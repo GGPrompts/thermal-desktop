@@ -7,30 +7,30 @@ Custom-built Wayland desktop components with a thermal/FLIR infrared aesthetic. 
 This is a Cargo workspace with shared dependencies. All components use `thermal-core` for the color palette and shared rendering utilities.
 
 ### Core Stack
-- **Terminal emulation**: alacritty_terminal + vte
-- **PTY management**: nix crate (direct epoll, custom multiplexing)
 - **GPU rendering**: wgpu + glyphon + cosmic-text (glyph atlas)
 - **Wayland**: smithay-client-toolkit + winit
+- **Terminal backend**: tmux (Phase 1) → alacritty_terminal + nix PTY (Phase 2)
 - **Audio**: rodio (PipeWire-compatible)
 - **D-Bus**: zbus (async, 100% Rust)
 - **File watching**: notify crate
-- **IPC**: D-Bus via org.thermal.Conductor
+- **IPC**: D-Bus via org.thermal.Conductor + thermal-ctl CLI
+
+### Hybrid Architecture (thermal-conductor)
+Phase 1 uses tmux as the terminal backend — thermal-conductor is a GPU-rendered tmux frontend:
+```
+thermal-conductor (wgpu renderer + state tracker)
+        ↕ tmux capture-pane / send-keys
+tmux server (PTY management, scrollback, session persistence)
+```
+This gets a working product fast. Phase 2 replaces tmux with direct PTY management. Phase 3 adds a session daemon for persistence without tmux.
 
 ### Components
-- **thermal-conductor**: The centerpiece — native GPU-rendered agent dashboard with terminal pane wall
+- **thermal-conductor**: The centerpiece — native GPU-rendered agent dashboard (tmux frontend → native PTY)
 - **thermal-bar**: Wayland layer-shell status bar with real system data
 - **thermal-launch**: Fuzzy-search app launcher overlay
 - **thermal-notify**: D-Bus notification daemon
 - **thermal-lock**: GPU-rendered lock screen
 - **thermal-core**: Shared palette, types, and rendering utilities
-
-### Thread Architecture (thermal-conductor)
-```
-PTY Manager Thread → epoll multiplexes N pseudo-terminals
-Parser Thread      → vte parses ANSI → updates per-pane Grid state
-Render Thread      → wgpu single pass, N viewports, glyph atlas
-Main Thread        → event loop, user input, agent lifecycle
-```
 
 ## Color Palette
 All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.

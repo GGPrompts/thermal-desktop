@@ -1,16 +1,20 @@
 {
   "tasks": [
-    {"id": 1, "title": "Wayland window setup", "status": "todo", "notes": "smithay-client-toolkit + winit to open a Wayland window"},
-    {"id": 2, "title": "wgpu device + surface", "status": "todo", "notes": "Initialize GPU rendering pipeline"},
-    {"id": 3, "title": "Basic text rendering", "status": "todo", "notes": "glyphon + cosmic-text to render text in the window"},
-    {"id": 4, "title": "Single terminal pane", "status": "todo", "notes": "alacritty_terminal + nix PTY, render one terminal in wgpu"},
-    {"id": 5, "title": "Pane grid layout", "status": "todo", "notes": "Split window into N panes with thermal-colored borders"},
-    {"id": 6, "title": "Multi-PTY management", "status": "todo", "notes": "Spawn and manage multiple PTY sessions with epoll"},
-    {"id": 7, "title": "Click-to-focus sidebar", "status": "todo", "notes": "Click a pane to expand it in sidebar view"},
-    {"id": 8, "title": "State tracking + thermal indicators", "status": "todo", "notes": "Watch Claude hooks, color pane borders by agent state"},
-    {"id": 9, "title": "Audio notifications", "status": "todo", "notes": "rodio + PipeWire for state change sounds"},
-    {"id": 10, "title": "D-Bus service", "status": "todo", "notes": "zbus org.thermal.Conductor interface"},
-    {"id": 11, "title": "Git diff awareness", "status": "todo", "notes": "Watch repos for changes, surface diffs that need review"},
-    {"id": 12, "title": "Polish + thermal HUD overlay", "status": "todo", "notes": "Scanlines, reticle, status readouts"}
+    {"id": 1, "title": "Wayland window with wgpu", "status": "todo", "notes": "winit to open Wayland window, wgpu device + surface + render pipeline. Just clear to ThermalPalette::BG color."},
+    {"id": 2, "title": "Basic text rendering", "status": "todo", "notes": "glyphon + cosmic-text to render 'THERMAL CONDUCTOR' text in the wgpu window. Verify font loading (Hack Nerd Font)."},
+    {"id": 3, "title": "tmux session management", "status": "todo", "notes": "On startup: create tmux session 'thermal-conductor'. Spawn N panes. On shutdown: optionally kill or detach. Use std::process::Command to call tmux."},
+    {"id": 4, "title": "Capture single tmux pane", "status": "todo", "notes": "Poll 'tmux capture-pane -t %0 -p -e' to get pane content with ANSI escapes. Parse ANSI into styled text. Render in wgpu viewport."},
+    {"id": 5, "title": "Render terminal text with thermal colors", "status": "todo", "notes": "Map ANSI colors to thermal palette. Render captured pane content as styled text in a wgpu viewport with proper monospace grid."},
+    {"id": 6, "title": "Pane grid layout engine", "status": "todo", "notes": "Split window into N viewports. Draw thermal-colored borders (active=red, inactive=cold purple). Support grid/sidebar/stack layouts."},
+    {"id": 7, "title": "Multi-pane capture + render", "status": "todo", "notes": "Capture all tmux panes in parallel. Render each in its viewport. Dirty tracking — only re-render panes with new content."},
+    {"id": 8, "title": "Input routing", "status": "todo", "notes": "Keyboard input → 'tmux send-keys -t %N' to focused pane. Mouse click to switch focus. Scroll for scrollback via 'tmux capture-pane -S -N'."},
+    {"id": 9, "title": "Click-to-focus sidebar", "status": "todo", "notes": "Click any pane to expand it in a sidebar view (70% width). Other panes become thumbnails on the side."},
+    {"id": 10, "title": "Agent state detection", "status": "todo", "notes": "Pattern match pane output for state (prompt=idle, output=running, error=failed). Color pane borders accordingly. Watch Claude hook files with notify crate."},
+    {"id": 11, "title": "Audio notifications", "status": "todo", "notes": "rodio + PipeWire. Play sounds on state transitions: idle→running (ascending), complete (chime), error (alert). Load WAV/OGG from assets/sounds/."},
+    {"id": 12, "title": "D-Bus service", "status": "todo", "notes": "zbus org.thermal.Conductor interface. Methods: CreatePane, SendKeys, GetPaneContent, FocusPane, SetLayout. Signals: AgentStateChanged."},
+    {"id": 13, "title": "thermal-ctl CLI", "status": "todo", "notes": "CLI wrapper around D-Bus API. 'thermal-ctl create', 'thermal-ctl send', 'thermal-ctl focus', 'thermal-ctl state'. Replaces tmux send-keys muscle memory."},
+    {"id": 14, "title": "Git diff awareness", "status": "todo", "notes": "Watch repos for changes via notify crate. Surface changed files in a HUD overlay. Highlight panes that triggered changes."},
+    {"id": 15, "title": "Thermal HUD overlay", "status": "todo", "notes": "Scanlines, reticle crosshair, status readouts. FPS counter. Agent count. System temp if available."},
+    {"id": 16, "title": "Phase 2: Direct PTY (replace tmux)", "status": "todo", "notes": "Future: nix::pty::openpty, epoll multiplexing, alacritty_terminal Grid. Keep D-Bus API identical."}
   ]
 }

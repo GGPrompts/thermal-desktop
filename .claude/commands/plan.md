@@ -1,41 +1,55 @@
 ---
-description: Break down an issue into tasks with dependencies
+description: Break down an issue into ready-to-execute tasks (fully automated)
 argument-hint: <issue description>
 ---
 
-Break down the following issue into implementation tasks:
+Fully break down the following issue into implementation tasks, scout files, draft prompts, and mark everything ready for execution.
 
 **Issue:** $ARGUMENTS
 
-## Instructions
+## Instructions — do ALL of these steps automatically, do NOT stop to ask the user
 
-1. Read the CLAUDE.md in the current working directory for project context
-2. Read the `tasks.jsonl` file in the current directory (create it if it doesn't exist)
-3. Find the next available task ID (max existing ID + 1)
-4. Break the issue into concrete, implementable tasks (aim for 2-8 tasks)
-5. For each task, identify:
-   - **deps**: IDs of tasks that must complete first (empty array if none)
-   - **files**: leave as empty array (use /scout to fill these in)
-   - **prompt**: leave as empty string (use /draft to fill these in)
-6. Append each task as a JSONL line to `tasks.jsonl`
+### Step 1: Understand context
+- Read the CLAUDE.md in the current working directory
+- Read `tasks.jsonl` in the current directory (create if it doesn't exist)
+- Find the next available task ID
 
-## Task Format (one JSON object per line in tasks.jsonl)
+### Step 2: Break down into tasks
+- Break the issue into 2-8 concrete, implementable tasks
+- Identify dependencies between tasks (which must finish before others can start)
+- Each task should be small enough for a single agent to complete
 
+### Step 3: Scout files (use haiku agents in parallel)
+- For each task, launch a haiku Agent to search the codebase for relevant files
+- Use Glob and Grep to find files that need to be read or modified
+- Prefix with `[r]` for read-context, `[w]` for write-targets
+- Max 10 files per task
+
+### Step 4: Draft prompts
+- For each task, read the scouted files and write a detailed implementation prompt
+- Prompts must be self-contained — an agent should execute without other context
+- Include exact file paths, what to change, and success criteria (e.g., "cargo check must pass")
+- Keep prompts under 2000 characters
+
+### Step 5: Check dependencies and mark ready
+- Tasks with no deps or all deps already "done" → status "ready"
+- Tasks with unfinished deps → status "blocked"
+
+### Step 6: Write everything to tasks.jsonl
+Append each task as one JSON line:
 ```
-{"id": N, "title": "...", "status": "planning", "deps": [], "files": [], "prompt": "", "notes": "..."}
+{"id": N, "title": "...", "status": "ready", "deps": [M], "files": ["[r] path", "[w] path"], "prompt": "...", "notes": "..."}
 ```
 
-## Status values
-- `planning` — just created, needs scouting/drafting
-- `scouted` — files identified
-- `drafted` — prompt written, ready for review
-- `ready` — approved for execution
-- `running` — currently being executed
+### Step 7: Show summary
+Display a table of all created tasks with their status and deps.
+
+## Line limit
+If tasks.jsonl exceeds 50 lines after adding, warn: "⚠ Consider running /split to archive done tasks"
+
+## Task statuses
+- `ready` — can be executed now
+- `blocked` — waiting on deps
+- `running` — being executed
 - `done` — completed
-- `blocked` — waiting on dependency
 - `failed` — execution failed
-
-## Line limit rule
-If tasks.jsonl exceeds 50 lines, suggest splitting into a sub-file (e.g., `tasks-feature-name.jsonl`) and keeping only active/recent tasks in the main file.
-
-After creating tasks, show a summary table of what was planned.

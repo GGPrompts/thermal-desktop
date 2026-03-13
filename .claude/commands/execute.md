@@ -1,39 +1,48 @@
 ---
-description: Execute ready tasks with agents (parallel when possible)
+description: Execute ready tasks with agents until all done
 argument-hint: [task-id or "all"]
 ---
 
-Execute tasks that are marked as ready, using subagents.
+Execute tasks using subagents. Run everything until all tasks are done.
 
-## Instructions
+## Instructions — fully automated, do not stop to ask the user
 
 1. Read `tasks.jsonl` in the current directory
 2. If `$ARGUMENTS` is a number, execute only that task ID
-3. If `$ARGUMENTS` is "all" or empty, execute all tasks with status "ready"
-4. Build a dependency graph from the tasks
-5. Group tasks into waves:
-   - Wave 1: all ready tasks with no unfinished deps
-   - Wave 2: tasks whose deps are all in wave 1
-   - etc.
-6. For each wave:
-   - Launch tasks in parallel using Agent tool with sonnet model
-   - Each agent gets the task's `prompt` field as its instruction
-   - Each agent prompt should end with: "After completing, verify with cargo check. Report what you did."
-   - Mark tasks as "running" before launching
-   - When agents complete, mark tasks as "done" and record results in notes
-   - If an agent fails, mark as "failed" with error in notes
-7. After each wave completes, check if the next wave's deps are met
-8. Continue until all waves are done
-9. Write updated tasks back to `tasks.jsonl`
+3. If `$ARGUMENTS` is "all" or empty, execute ALL tasks with status "ready"
 
-## Agent model selection
-- Use **sonnet** agents for implementation tasks (default)
-- Use **opus** agents for complex architecture/integration tasks (if task notes contain "complex" or "architecture")
-- Use **haiku** agents for simple file changes or research
+### Build waves from dependency graph
+- **Wave 1**: all ready tasks with no unfinished deps
+- **Wave 2**: tasks whose deps are all in wave 1
+- Continue until all tasks are assigned to waves
 
-## Parallel execution rules
-- Tasks in the same wave with NO shared write-files can run in parallel
-- Tasks that write to the same file must run sequentially
-- Maximum 5 agents in parallel
+### Execute each wave
+For each wave:
+1. Check which tasks can run in parallel (no shared `[w]` files)
+2. Launch agents in parallel (max 5 at once):
+   - **sonnet** agents for implementation (default)
+   - **opus** agents if task notes contain "complex" or "architecture"
+   - **haiku** agents if task notes contain "simple" or "research"
+3. Each agent receives the task's `prompt` field as its full instruction
+4. Mark tasks as "running" before launch
+5. When agents return:
+   - If successful → mark "done", record summary in notes
+   - If failed → mark "failed", record error in notes
+6. After wave completes, unblock the next wave's tasks (change "blocked" → "ready")
+7. Continue to next wave
 
-Show a summary after all waves complete.
+### After all waves
+1. Write updated tasks back to `tasks.jsonl`
+2. Run `cargo check` to verify the workspace still compiles
+3. If cargo check fails, create a fix task and execute it
+4. Show final summary of what was done
+
+### Git
+After all tasks complete successfully:
+- `git add -A && git commit` with a summary of changes
+- `git push`
+
+## Important
+- Do NOT ask for confirmation between waves — just keep going
+- If a task fails, continue with other tasks that don't depend on it
+- Log everything in task notes for later review

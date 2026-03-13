@@ -1,0 +1,11 @@
+{
+  "tasks": [
+    {"id": 1, "title": "ext-session-lock-v1 protocol", "status": "todo", "notes": "Implement Wayland session lock protocol for secure locking"},
+    {"id": 2, "title": "wgpu surface setup", "status": "todo", "notes": "Full-screen surface covering all outputs"},
+    {"id": 3, "title": "Heat-map shader", "status": "todo", "notes": "wgpu fragment shader applying thermal color ramp over background"},
+    {"id": 4, "title": "Auth input UI", "status": "todo", "notes": "Password input field with thermal styling, masked input"},
+    {"id": 5, "title": "PAM authentication", "status": "todo", "notes": "PAM integration for password verification"},
+    {"id": 6, "title": "Clock display", "status": "todo", "notes": "Large green digital readout clock centered on screen"},
+    {"id": 7, "title": "Failed auth feedback", "status": "todo", "notes": "Screen flash to CRITICAL red on wrong password"}
+  ]
+}

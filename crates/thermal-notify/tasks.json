@@ -1,0 +1,11 @@
+{
+  "tasks": [
+    {"id": 1, "title": "D-Bus server (org.freedesktop.Notifications)", "status": "todo", "notes": "zbus async server implementing the full Notifications spec"},
+    {"id": 2, "title": "Wayland layer-shell popup surface", "status": "todo", "notes": "Overlay layer surface anchored to top-right corner"},
+    {"id": 3, "title": "wgpu notification card rendering", "status": "todo", "notes": "Rounded cards with thermal palette, urgency-mapped colors"},
+    {"id": 4, "title": "Urgency heat mapping", "status": "todo", "notes": "low=COOL blue, normal=WARM green, critical=SEARING red"},
+    {"id": 5, "title": "Auto-dismiss timer", "status": "todo", "notes": "Configurable timeout with fade-out animation"},
+    {"id": 6, "title": "Notification queue + stacking", "status": "todo", "notes": "Stack multiple notifications, animate in/out"},
+    {"id": 7, "title": "PipeWire audio cues", "status": "todo", "notes": "rodio plays thermal-themed sounds on notification urgency"}
+  ]
+}

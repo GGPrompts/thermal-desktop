@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {"id": 1, "title": "Wayland window setup", "status": "todo", "notes": "smithay-client-toolkit + winit to open a Wayland window"},
+    {"id": 2, "title": "wgpu device + surface", "status": "todo", "notes": "Initialize GPU rendering pipeline"},
+    {"id": 3, "title": "Basic text rendering", "status": "todo", "notes": "glyphon + cosmic-text to render text in the window"},
+    {"id": 4, "title": "Single terminal pane", "status": "todo", "notes": "alacritty_terminal + nix PTY, render one terminal in wgpu"},
+    {"id": 5, "title": "Pane grid layout", "status": "todo", "notes": "Split window into N panes with thermal-colored borders"},
+    {"id": 6, "title": "Multi-PTY management", "status": "todo", "notes": "Spawn and manage multiple PTY sessions with epoll"},
+    {"id": 7, "title": "Click-to-focus sidebar", "status": "todo", "notes": "Click a pane to expand it in sidebar view"},
+    {"id": 8, "title": "State tracking + thermal indicators", "status": "todo", "notes": "Watch Claude hooks, color pane borders by agent state"},
+    {"id": 9, "title": "Audio notifications", "status": "todo", "notes": "rodio + PipeWire for state change sounds"},
+    {"id": 10, "title": "D-Bus service", "status": "todo", "notes": "zbus org.thermal.Conductor interface"},
+    {"id": 11, "title": "Git diff awareness", "status": "todo", "notes": "Watch repos for changes, surface diffs that need review"},
+    {"id": 12, "title": "Polish + thermal HUD overlay", "status": "todo", "notes": "Scanlines, reticle, status readouts"}
+  ]
+}

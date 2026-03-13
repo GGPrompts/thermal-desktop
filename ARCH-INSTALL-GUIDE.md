@@ -5,7 +5,7 @@ This guide assumes you know nothing. Every step is spelled out.
 
 ## What You Need
 
-- A USB drive (8GB+)
+- A USB drive (2GB+)
 - Your empty 1TB D: drive
 - An internet connection (ethernet is easiest, WiFi works too)
 - About 1-2 hours

@@ -124,3 +124,68 @@ impl std::fmt::Display for AudioError {
 }
 
 impl std::error::Error for AudioError {}
+
+// ── State-transition wiring ───────────────────────────────────────────────────
+
+use crate::state_detector::DetectedState;
+
+/// Tracks per-pane state history and fires audio cues on transitions.
+///
+/// Wrap an `AudioManager` in this helper and call
+/// [`StateTransitionAudio::on_state_change`] after every poll cycle.
+#[allow(dead_code)]
+pub struct StateTransitionAudio {
+    pub manager: AudioManager,
+    prev_states: std::collections::HashMap<String, DetectedState>,
+}
+
+#[allow(dead_code)]
+impl StateTransitionAudio {
+    /// Create a new helper backed by an `AudioManager` pointing at
+    /// `assets_dir` (typically `assets/sounds/`).
+    pub fn new(assets_dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            manager: AudioManager::new(assets_dir),
+            prev_states: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Notify the helper of a new state for `pane_id`.
+    ///
+    /// Returns the `SoundEvent` that was played (if any). On the first call
+    /// for a given pane the previous state is unknown so no sound is played.
+    pub fn on_state_change(
+        &mut self,
+        pane_id: &str,
+        new_state: DetectedState,
+    ) -> Option<SoundEvent> {
+        let event = if let Some(prev) = self.prev_states.get(pane_id) {
+            match (prev, new_state) {
+                // Any state → Running: agent just started working.
+                (_, DetectedState::Running) => Some(SoundEvent::AgentStarted),
+
+                // Running or Thinking → Complete: task finished.
+                (DetectedState::Running | DetectedState::Thinking, DetectedState::Complete) => {
+                    Some(SoundEvent::AgentComplete)
+                }
+
+                // Any → Error.
+                (_, DetectedState::Error) => Some(SoundEvent::AgentError),
+
+                // No interesting transition.
+                _ => None,
+            }
+        } else {
+            // First time we see this pane — record but don't play anything.
+            None
+        };
+
+        self.prev_states.insert(pane_id.to_owned(), new_state);
+
+        if let Some(ev) = event {
+            self.manager.play(ev);
+        }
+
+        event
+    }
+}

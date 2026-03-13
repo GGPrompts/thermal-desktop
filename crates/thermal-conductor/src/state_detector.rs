@@ -165,3 +165,61 @@ impl Default for StateDetector {
         Self::new()
     }
 }
+
+// ── AgentState bridge ─────────────────────────────────────────────────────────
+
+/// Convert a locally-detected state to the canonical `thermal_core::AgentState`.
+#[allow(dead_code)]
+pub fn detected_to_agent(state: DetectedState) -> thermal_core::AgentState {
+    match state {
+        DetectedState::Idle => thermal_core::AgentState::Idle,
+        DetectedState::Running => thermal_core::AgentState::Running,
+        DetectedState::Thinking => thermal_core::AgentState::Thinking,
+        DetectedState::Error => thermal_core::AgentState::Error,
+        DetectedState::Complete => thermal_core::AgentState::Complete,
+    }
+}
+
+// ── HookWatcher ───────────────────────────────────────────────────────────────
+
+/// Watches `~/.claude/hooks/` for file changes using the `notify` crate.
+///
+/// Each call to [`HookWatcher::drain_events`] returns all filesystem events
+/// that have accumulated since the last call. The watcher runs on a background
+/// thread; this struct is purely a receiver handle.
+#[allow(dead_code)]
+pub struct HookWatcher {
+    /// Keep the watcher alive for as long as HookWatcher exists.
+    _watcher: notify::RecommendedWatcher,
+    pub rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+}
+
+#[allow(dead_code)]
+impl HookWatcher {
+    /// Start watching `hooks_dir` recursively. Returns an error if the
+    /// directory cannot be watched (e.g. does not exist).
+    pub fn new(hooks_dir: &std::path::Path) -> notify::Result<Self> {
+        use notify::Watcher;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut watcher = notify::recommended_watcher(tx)?;
+        watcher.watch(hooks_dir, notify::RecursiveMode::Recursive)?;
+
+        Ok(Self {
+            _watcher: watcher,
+            rx,
+        })
+    }
+
+    /// Drain all pending events from the channel. Non-blocking.
+    pub fn drain_events(&self) -> Vec<notify::Event> {
+        let mut events = Vec::new();
+        while let Ok(result) = self.rx.try_recv() {
+            if let Ok(event) = result {
+                events.push(event);
+            }
+        }
+        events
+    }
+}

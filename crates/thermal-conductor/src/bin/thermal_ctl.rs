@@ -10,7 +10,11 @@
 //!   thermal-ctl capture <pane>      Capture pane content
 //!   thermal-ctl kill <pane>         Kill a pane
 
+use std::process::Command;
+
 use clap::{Parser, Subcommand};
+
+const SESSION: &str = "thermal-conductor";
 
 #[derive(Parser)]
 #[command(name = "thermal-ctl")]
@@ -68,38 +72,150 @@ enum Commands {
     },
 }
 
+// ── tmux helpers ──────────────────────────────────────────────────────────────
+
+/// Run tmux with the given args. Returns stdout on success or an error string.
+fn tmux(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("tmux").args(args).output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "tmux not found — install tmux first".to_string()
+        } else {
+            format!("io error: {e}")
+        }
+    })?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if msg.is_empty() {
+            format!("tmux exited with status {}", output.status)
+        } else {
+            msg
+        })
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    // For now, use tmux directly. Later: D-Bus calls to thermal-conductor.
     match cli.command {
+        // ── Create ────────────────────────────────────────────────────────────
         Commands::Create { command } => {
             println!("◉ Creating pane with command: {}", command);
-            // TODO: call tmux or D-Bus
-            println!("  (D-Bus integration pending — use tmux directly for now)");
+            println!("  (D-Bus pending — use tmux directly for now)");
         }
+
+        // ── Send ──────────────────────────────────────────────────────────────
         Commands::Send { pane, keys } => {
             let keys_str = keys.join(" ");
-            println!("◉ Sending to {}: {}", pane, keys_str);
+            match tmux(&["send-keys", "-t", &pane, &keys_str]) {
+                Ok(_) => {
+                    // Also send Enter so the command runs.
+                    match tmux(&["send-keys", "-t", &pane, "Enter"]) {
+                        Ok(_) => println!("◉ Sent to {}: {}", pane, keys_str),
+                        Err(e) => eprintln!("✗ send Enter failed: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("✗ send-keys failed: {e}"),
+            }
         }
+
+        // ── Focus ─────────────────────────────────────────────────────────────
         Commands::Focus { pane } => {
-            println!("◉ Focusing pane: {}", pane);
+            println!("◉ Focus {}: (D-Bus pending)", pane);
         }
+
+        // ── List ──────────────────────────────────────────────────────────────
         Commands::List => {
-            println!("◉ THERMAL CONDUCTOR — Pane Status");
-            println!("  (D-Bus integration pending)");
+            let target = format!("{SESSION}:");
+            match tmux(&[
+                "list-panes",
+                "-t",
+                &target,
+                "-F",
+                "#{pane_id} #{pane_current_command} #{pane_active}",
+            ]) {
+                Ok(output) => {
+                    println!("◉ THERMAL CONDUCTOR — Pane Status");
+                    println!("  {:<12}  {:<24}  {}", "ID", "COMMAND", "STATUS");
+                    println!("  {}", "─".repeat(50));
+                    for line in output.lines().filter(|l| !l.is_empty()) {
+                        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                        if parts.len() == 3 {
+                            let active = parts[2].trim() == "1";
+                            let icon = if active { "◉" } else { "○" };
+                            let status = if active { "ACTIVE" } else { "idle" };
+                            println!(
+                                "  {icon} {:<10}  {:<24}  {}",
+                                parts[0], parts[1], status
+                            );
+                        }
+                    }
+                }
+                Err(e) => eprintln!("✗ list-panes failed: {e}"),
+            }
         }
+
+        // ── State ─────────────────────────────────────────────────────────────
         Commands::State { pane } => {
-            println!("◉ State for {}: unknown", pane);
+            let start = format!("-{}", 20);
+            match tmux(&["capture-pane", "-t", &pane, "-p", "-e", "-S", &start]) {
+                Ok(content) => {
+                    // Simple heuristic: look at the last non-empty line.
+                    let last = content
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("");
+                    // Strip ANSI escapes naively.
+                    let mut clean = String::new();
+                    let mut in_escape = false;
+                    for ch in last.chars() {
+                        if ch == '\x1b' {
+                            in_escape = true;
+                        } else if in_escape && ch.is_alphabetic() {
+                            in_escape = false;
+                        } else if !in_escape {
+                            clean.push(ch);
+                        }
+                    }
+                    let clean = clean.trim();
+                    let state = if clean.ends_with("$ ")
+                        || clean.ends_with("❯ ")
+                        || clean.ends_with("% ")
+                        || clean.ends_with("# ")
+                    {
+                        "IDLE"
+                    } else {
+                        "RUNNING"
+                    };
+                    println!("◉ State for {}: {}", pane, state);
+                }
+                Err(e) => eprintln!("✗ capture-pane failed: {e}"),
+            }
         }
+
+        // ── Layout ────────────────────────────────────────────────────────────
         Commands::Layout { layout } => {
-            println!("◉ Setting layout: {}", layout);
+            println!("◉ Layout {}: (D-Bus pending)", layout);
         }
+
+        // ── Capture ───────────────────────────────────────────────────────────
         Commands::Capture { pane, lines } => {
-            println!("◉ Capturing {} ({} lines)", pane, lines);
+            let start = format!("-{}", lines.abs());
+            match tmux(&["capture-pane", "-t", &pane, "-p", "-e", "-S", &start]) {
+                Ok(content) => print!("{content}"),
+                Err(e) => eprintln!("✗ capture-pane failed: {e}"),
+            }
         }
+
+        // ── Kill ──────────────────────────────────────────────────────────────
         Commands::Kill { pane } => {
-            println!("◉ Killing pane: {}", pane);
+            match tmux(&["kill-pane", "-t", &pane]) {
+                Ok(_) => println!("◉ Killed pane {}", pane),
+                Err(e) => eprintln!("✗ kill-pane failed: {e}"),
+            }
         }
     }
 }

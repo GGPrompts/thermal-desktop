@@ -143,6 +143,30 @@ pub fn thermal_gradient(t: f32) -> Color {
     Color::WHITE_HOT
 }
 
+/// Generate a Vec of `n` Colors evenly sampled across the thermal spectrum.
+pub fn thermal_gradient_lut(n: usize) -> Vec<Color> {
+    if n == 0 { return vec![]; }
+    if n == 1 { return vec![thermal_gradient(0.0)]; }
+    (0..n).map(|i| thermal_gradient(i as f32 / (n - 1) as f32)).collect()
+}
+
+/// Convert a heat value `t` in `[0.0, 1.0]` directly to a `[f32; 4]` RGBA array.
+pub fn thermal_gradient_f32(t: f32) -> [f32; 4] {
+    thermal_gradient(t).to_f32_array()
+}
+
+/// Map a heat level to a descriptive temperature string.
+pub fn heat_label(t: f32) -> &'static str {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.15 { "CRYO" }
+    else if t < 0.30 { "COLD" }
+    else if t < 0.50 { "MILD" }
+    else if t < 0.65 { "WARM" }
+    else if t < 0.80 { "HOT" }
+    else if t < 0.92 { "SEARING" }
+    else { "WHITE-HOT" }
+}
+
 // ---------------------------------------------------------------------------
 // Legacy [f32; 4] palette (kept for wgpu compatibility)
 // ---------------------------------------------------------------------------

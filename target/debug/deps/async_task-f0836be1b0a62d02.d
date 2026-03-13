@@ -1,0 +1,11 @@
+/home/builder/projects/thermal-desktop/target/debug/deps/async_task-f0836be1b0a62d02.d: /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/lib.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/header.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/raw.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/runnable.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/state.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/task.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/utils.rs
+
+/home/builder/projects/thermal-desktop/target/debug/deps/libasync_task-f0836be1b0a62d02.rmeta: /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/lib.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/header.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/raw.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/runnable.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/state.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/task.rs /home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/utils.rs
+
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/lib.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/header.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/raw.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/runnable.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/state.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/task.rs:
+/home/builder/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/async-task-4.7.1/src/utils.rs:

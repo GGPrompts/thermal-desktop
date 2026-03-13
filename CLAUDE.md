@@ -43,4 +43,4 @@ cargo run -p thermal-bar              # Run the status bar
 ```
 
 ## Task Tracking
-Each crate has its own `tasks.json` for granular progress tracking.
+Each crate has its own `tasks.jsonl` for granular progress tracking.

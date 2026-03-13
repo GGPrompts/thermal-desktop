@@ -1,0 +1,8 @@
+{"id":1,"title":"Wayland layer-shell surface","status":"todo","notes":"wlr-layer-shell anchored to top of screen with exclusive zone"}
+{"id":2,"title":"wgpu rendering pipeline","status":"todo","notes":"Basic rect + text rendering with thermal palette"}
+{"id":3,"title":"System metrics reader","status":"todo","notes":"Read /sys/class/thermal/, /proc/stat for CPU temp, usage, memory"}
+{"id":4,"title":"Left/center/right module layout","status":"todo","notes":"Configurable module zones with thermal separators"}
+{"id":5,"title":"D-Bus client for thermal-conductor","status":"todo","notes":"Query agent status from org.thermal.Conductor"}
+{"id":6,"title":"Clock + date module","status":"todo","notes":"Green readout digital clock in thermal HUD style"}
+{"id":7,"title":"Network and GPU metrics","status":"todo","notes":"Network throughput, GPU temp/load if available"}
+{"id":8,"title":"Thermal gradient sparklines","status":"todo","notes":"Mini sparkline graphs colored by heat level"}

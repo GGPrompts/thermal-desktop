@@ -1,0 +1,5 @@
+{"id":1,"title":"ThermalPalette constants","status":"done","notes":"All colors as [f32; 4] RGBA in palette.rs"}
+{"id":2,"title":"wgpu context helpers","status":"todo","notes":"Shared device/queue/surface initialization utilities"}
+{"id":3,"title":"Text renderer abstraction","status":"todo","notes":"glyphon + cosmic-text wrapper for consistent text across crates"}
+{"id":4,"title":"Common geometry types","status":"todo","notes":"Rect, Size, Point with layout helpers"}
+{"id":5,"title":"Thermal gradient generator","status":"todo","notes":"Function to interpolate across the thermal spectrum by heat value"}

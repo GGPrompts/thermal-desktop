@@ -22,12 +22,21 @@ struct Rect {
     _pad3: f32,
 };
 
+struct Globals {
+    viewport_size: vec2<f32>,
+};
+
 @group(0) @binding(0)
 var<uniform> rect: Rect;
+
+@group(0) @binding(1)
+var<uniform> globals: Globals;
 
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) local_uv: vec2<f32>,
+    @location(2) rect_size_px: vec2<f32>,
 };
 
 @vertex
@@ -44,12 +53,31 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOut {
     var out: VertexOut;
     out.pos = vec4<f32>(rect.min + c * rect.size, 0.0, 1.0);
     out.color = rect.color;
+    // Pass local UV [0,1] and pixel-space rect size for SDF calculation
+    out.local_uv = c;
+    out.rect_size_px = rect.size * globals.viewport_size * 0.5;
     return out;
+}
+
+// SDF for a rounded rectangle: returns negative inside, positive outside
+fn sdf_rounded_rect(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
+    let q = abs(p) - half_size + vec2<f32>(radius, radius);
+    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let r = rect.radius;
+    if r <= 0.0 {
+        return in.color;
+    }
+    // Fragment position in pixel-space relative to rect center
+    let px_pos = (in.local_uv - vec2<f32>(0.5, 0.5)) * in.rect_size_px;
+    let half_size = in.rect_size_px * 0.5;
+    let dist = sdf_rounded_rect(px_pos, half_size, r);
+    // Anti-aliased edge: smooth over ~1px
+    let aa = 1.0 - smoothstep(-1.0, 0.5, dist);
+    return vec4<f32>(in.color.rgb * aa, in.color.a * aa);
 }
 "#;
 
@@ -63,6 +91,13 @@ struct RectUniform {
     color: [f32; 4],
     radius: f32,
     _pad: [f32; 3], // pad to 48 bytes (WGSL uniform alignment rounds up to vec4 = 16 bytes)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct GlobalsUniform {
+    viewport_size: [f32; 2],
+    _pad: [f32; 2],
 }
 
 // ── NotificationRenderer ─────────────────────────────────────────────────────
@@ -99,16 +134,28 @@ impl NotificationRenderer {
         let bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("rect bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         // ── Pipeline ─────────────────────────────────────────────────────────
@@ -199,8 +246,7 @@ impl NotificationRenderer {
                     label: Some("notify render encoder"),
                 });
 
-        // ── Background clear ─────────────────────────────────────────────────
-        let bg = ThermalPalette::BG_SURFACE;
+        // ── Background clear (transparent so rounded corners show through) ──
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bg clear"),
@@ -208,12 +254,7 @@ impl NotificationRenderer {
                     view: surface_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: (bg[0] * a) as f64,
-                            g: (bg[1] * a) as f64,
-                            b: (bg[2] * a) as f64,
-                            a: a as f64,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -226,23 +267,29 @@ impl NotificationRenderer {
         let w = width as f32;
         let h = height as f32;
 
-        // ── Accent bar (left 8 px) ────────────────────────────────────────────
+        // ── Card background (full rect with rounded corners) ──────────────────
+        let bg_light = ThermalPalette::BG_LIGHT;
+        self.draw_rect(
+            &mut encoder,
+            surface_view,
+            [-1.0, -1.0],
+            [2.0, 2.0],
+            apply_alpha(bg_light, a),
+            8.0,
+            width,
+            height,
+        );
+
+        // ── Accent bar (left 8 px, no rounding — drawn on top) ────────────────
         self.draw_rect(
             &mut encoder,
             surface_view,
             [-1.0, -1.0],
             [2.0 * 8.0 / w, 2.0],
             apply_alpha(urgency_color, a),
-        );
-
-        // ── Card background (right of accent bar) ─────────────────────────────
-        let bg_light = ThermalPalette::BG_LIGHT;
-        self.draw_rect(
-            &mut encoder,
-            surface_view,
-            [-1.0 + 2.0 * 8.0 / w, -1.0],
-            [2.0 - 2.0 * 8.0 / w, 2.0],
-            apply_alpha(bg_light, a),
+            0.0,
+            width,
+            height,
         );
 
         // ── Text ──────────────────────────────────────────────────────────────
@@ -358,12 +405,15 @@ impl NotificationRenderer {
         ndc_min: [f32; 2],
         ndc_size: [f32; 2],
         color: [f32; 4],
+        radius: f32,
+        viewport_w: u32,
+        viewport_h: u32,
     ) {
         let uniform = RectUniform {
             min: ndc_min,
             size: ndc_size,
             color,
-            radius: 4.0,
+            radius,
             _pad: [0.0; 3],
         };
 
@@ -375,13 +425,32 @@ impl NotificationRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
+        let globals = GlobalsUniform {
+            viewport_size: [viewport_w as f32, viewport_h as f32],
+            _pad: [0.0; 2],
+        };
+
+        let globals_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("globals uniform"),
+                contents: bytemuck::bytes_of(&globals),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("rect bg"),
             layout: &self.bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: globals_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

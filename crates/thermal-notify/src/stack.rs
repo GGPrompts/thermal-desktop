@@ -43,7 +43,7 @@ impl NotificationStack {
             entry.target_y += step;
         }
 
-        let timer = DismissTimer::new(id, timeout_ms);
+        let timer = DismissTimer::with_urgency(id, timeout_ms, notif.urgency);
         self.slots.insert(
             0,
             ActiveNotif {
@@ -115,5 +115,19 @@ impl NotificationStack {
 
     pub fn gap(&self) -> f32 {
         self.gap
+    }
+
+    /// Dismiss the front-most (top) notification by triggering its fade-out.
+    /// If it has no timer (persistent/critical), force-remove it immediately.
+    pub fn dismiss_front(&mut self) {
+        if let Some(entry) = self.slots.first_mut() {
+            if let Some(timer) = &mut entry.timer {
+                timer.dismiss();
+            } else {
+                // Persistent notification — force remove
+                let id = entry.notif.id;
+                self.remove_id(id);
+            }
+        }
     }
 }

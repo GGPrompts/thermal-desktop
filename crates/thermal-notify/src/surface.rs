@@ -1,11 +1,15 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{Capability, SeatHandler, SeatState},
+    seat::{
+        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+        Capability, SeatHandler, SeatState,
+    },
     shell::wlr_layer::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
         LayerSurfaceConfigure,
@@ -13,7 +17,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_output, wl_seat, wl_surface},
+    protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
     Connection, Proxy, QueueHandle,
 };
 
@@ -38,6 +42,15 @@ pub struct NotifySurface {
     pub device: std::sync::Arc<wgpu::Device>,
     pub queue: std::sync::Arc<wgpu::Queue>,
     pub surface_config: wgpu::SurfaceConfiguration,
+}
+
+impl NotifySurface {
+    /// Check and clear the "clicked" flag. Returns true if user clicked the surface.
+    pub fn take_click(&mut self) -> bool {
+        let clicked = self.state.clicked;
+        self.state.clicked = false;
+        clicked
+    }
 }
 
 impl NotifySurface {
@@ -67,6 +80,8 @@ impl NotifySurface {
             layer_surface: None,
             configured: false,
             closed: false,
+            clicked: false,
+            pointer: None,
         };
 
         // Roundtrip so OutputState learns about available monitors
@@ -293,6 +308,8 @@ struct NotifySurfaceState {
     layer_surface: Option<LayerSurface>,
     configured: bool,
     closed: bool,
+    clicked: bool,
+    pointer: Option<WlPointer>,
 }
 
 // ── smithay-client-toolkit delegate impls ─────────────────────────────────────
@@ -412,10 +429,13 @@ impl SeatHandler for NotifySurfaceState {
     fn new_capability(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = Some(self.seat_state.get_pointer(qh, &seat).unwrap());
+        }
     }
 
     fn remove_capability(
@@ -423,8 +443,13 @@ impl SeatHandler for NotifySurfaceState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+        }
     }
 
     fn remove_seat(
@@ -444,8 +469,27 @@ impl ProvidesRegistryState for NotifySurfaceState {
     registry_handlers![OutputState, SeatState];
 }
 
+impl PointerHandler for NotifySurfaceState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if let PointerEventKind::Press { button, .. } = event.kind {
+                if button == BTN_LEFT {
+                    self.clicked = true;
+                }
+            }
+        }
+    }
+}
+
 delegate_compositor!(NotifySurfaceState);
 delegate_output!(NotifySurfaceState);
 delegate_seat!(NotifySurfaceState);
+delegate_pointer!(NotifySurfaceState);
 delegate_layer!(NotifySurfaceState);
 delegate_registry!(NotifySurfaceState);

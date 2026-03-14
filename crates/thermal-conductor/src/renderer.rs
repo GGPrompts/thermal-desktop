@@ -27,22 +27,53 @@ pub struct WgpuState {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub surface_config: wgpu::SurfaceConfiguration,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[allow(dead_code)]
 impl WgpuState {
-    /// Initialise wgpu from an existing winit window.
-    pub async fn new(window: std::sync::Arc<winit::window::Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
+    /// Create a new WgpuState from raw Wayland display and surface pointers.
+    ///
+    /// # Safety
+    ///
+    /// - `wl_display` must be a valid `*mut wl_display` pointer that remains
+    ///   valid for the lifetime of this WgpuState.
+    /// - `wl_surface` must be a valid `*mut wl_surface` pointer that remains
+    ///   valid for the lifetime of this WgpuState.
+    pub async fn new_from_wayland(
+        wl_display: *mut std::ffi::c_void,
+        wl_surface: *mut std::ffi::c_void,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<Self> {
+        use std::ptr::NonNull;
+        use raw_window_handle::{
+            RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
+        };
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
             ..Default::default()
         });
 
-        // SAFETY: surface must not outlive the window. We keep both alive for
-        // the same duration via Arc.
-        let surface = instance.create_surface(window)?;
+        // Build raw window handles for Wayland.
+        let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            NonNull::new(wl_display)
+                .ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
+        ));
+        let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
+            NonNull::new(wl_surface)
+                .ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
+        ));
+
+        // Safety: the caller guarantees the pointers remain valid.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle,
+                raw_window_handle,
+            })?
+        };
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -57,30 +88,21 @@ impl WgpuState {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("thermal-conductor device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::default(),
+                    ..Default::default()
                 },
                 None,
             )
             .await?;
 
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-
+        let surface_format = wgpu::TextureFormat::Bgra8Unorm;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            format: surface_format,
+            width: width.max(1),
+            height: height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
         };
         surface.configure(&device, &surface_config);
@@ -90,20 +112,24 @@ impl WgpuState {
             device,
             queue,
             surface_config,
+            width,
+            height,
         })
     }
 
     /// Handle a window resize — reconfigures the surface.
-    pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
-        if new_size.width == 0 || new_size.height == 0 {
+    pub fn resize(&mut self, new_width: u32, new_height: u32) {
+        if new_width == 0 || new_height == 0 {
             return;
         }
-        self.surface_config.width = new_size.width;
-        self.surface_config.height = new_size.height;
+        self.width = new_width;
+        self.height = new_height;
+        self.surface_config.width = new_width;
+        self.surface_config.height = new_height;
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    /// Clear the frame to ThermalPalette::BG (#0a0010 — deep void purple).
+    /// Clear the frame to ThermalPalette::BG and render pane captures.
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -117,8 +143,6 @@ impl WgpuState {
             });
 
         {
-            // Convert sRGB palette values to linear f64 for wgpu clear color.
-            // ThermalPalette::BG is [f32; 4] with values already in [0,1] sRGB range.
             let bg = thermal_core::ThermalPalette::BG;
             let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear pass"),

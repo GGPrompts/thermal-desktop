@@ -59,6 +59,25 @@ Usually F2, F12, DEL, or ESC at boot. Check your motherboard manual.
 5. Select "Arch Linux install medium" and press Enter
 6. You'll land at a `root@archiso` prompt — you're in
 
+## Phase 1.5: Enable SSH (so you can use Claude Code from your phone)
+
+Do this right after you land at the `root@archiso` prompt:
+
+```bash
+passwd                       # set a temporary root password (anything simple is fine)
+systemctl start sshd         # start the SSH server
+ip addr                      # find your IP address — look for 192.168.x.x
+```
+
+Then from your phone or another device:
+```bash
+ssh root@192.168.x.x        # replace with your actual IP
+```
+
+Now you can run Claude Code over SSH and have it guide you through the rest of the install. Everything from here on can be done remotely.
+
+**Tip:** If you're on WiFi, do Phase 2 (connect to internet) from the physical keyboard first, THEN come back and start sshd. Ethernet users can do SSH immediately.
+
 ## Phase 2: Connect to Internet (2 minutes)
 
 ### If ethernet (recommended)

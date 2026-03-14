@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 while let Some(notif) = q.pop_front() {
                     tracing::debug!(id = notif.id, "Pushing notification to stack: {}", notif.summary);
                     stack.push(notif);
+                    notify_surface.visible = true;
                 }
             }
 
@@ -114,32 +115,32 @@ async fn main() -> anyhow::Result<()> {
             last_tick = now;
             stack.tick(dt);
 
-            // Render visible notifications
-            if !stack.is_empty() {
-                // Render the top-most visible notification into the single layer-shell surface.
-                if let Some(active) = stack.iter_visible().next() {
-                    renderer.set_alpha(active.alpha());
-                    let urgency_color = active.notif.urgency.to_color();
+            // Render visible notifications, or clear to transparent when idle
+            if let Some(active) = stack.iter_visible().next() {
+                renderer.set_alpha(active.alpha());
+                let urgency_color = active.notif.urgency.to_color();
 
-                    match notify_surface.get_current_texture() {
-                        Ok(output) => {
-                            let view = output
-                                .texture
-                                .create_view(&wgpu::TextureViewDescriptor::default());
-                            renderer.render(
-                                &view,
-                                &active.notif,
-                                urgency_color,
-                                NOTIF_WIDTH,
-                                NOTIF_HEIGHT,
-                            );
-                            output.present();
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to acquire surface texture: {e}");
-                        }
+                match notify_surface.get_current_texture() {
+                    Ok(output) => {
+                        let view = output
+                            .texture
+                            .create_view(&wgpu::TextureViewDescriptor::default());
+                        renderer.render(
+                            &view,
+                            &active.notif,
+                            urgency_color,
+                            NOTIF_WIDTH,
+                            NOTIF_HEIGHT,
+                        );
+                        output.present();
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to acquire surface texture: {e}");
                     }
                 }
+            } else if notify_surface.visible {
+                notify_surface.clear_transparent();
+                notify_surface.visible = false;
             }
 
             // ~60 fps tick rate

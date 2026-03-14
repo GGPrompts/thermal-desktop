@@ -22,11 +22,14 @@ use wayland_client::{
 pub struct NotifySurface {
     pub width: u32,
     pub height: u32,
+    pub visible: bool,
 
     // Wayland state
     conn: Connection,
+    event_queue: wayland_client::EventQueue<NotifySurfaceState>,
     queue_handle: QueueHandle<NotifySurfaceState>,
     state: NotifySurfaceState,
+    wl_surface: wl_surface::WlSurface,
 
     // wgpu — device and queue are Arc so they can be shared with the renderer
     instance: wgpu::Instance,
@@ -54,15 +57,35 @@ impl NotifySurface {
         let registry_state = RegistryState::new(&globals);
         let seat_state = SeatState::new(&globals, &qh);
 
-        // Create a wl_surface and promote it to a layer surface
-        let wl_surface = compositor_state.create_surface(&qh);
+        // Create a temporary state to do a roundtrip and discover outputs
+        let mut init_state = NotifySurfaceState {
+            compositor_state,
+            layer_shell,
+            output_state,
+            registry_state,
+            seat_state,
+            layer_surface: None,
+            configured: false,
+            closed: false,
+        };
 
-        let layer_surface = layer_shell.create_layer_surface(
+        // Roundtrip so OutputState learns about available monitors
+        event_queue
+            .roundtrip(&mut init_state)
+            .context("initial roundtrip failed")?;
+
+        // Prefer the focused/primary output (first in the list = DP-1)
+        let primary_output = init_state.output_state.outputs().next();
+
+        // Create a wl_surface and promote it to a layer surface
+        let wl_surface = init_state.compositor_state.create_surface(&qh);
+
+        let layer_surface = init_state.layer_shell.create_layer_surface(
             &qh,
             wl_surface.clone(),
             Layer::Overlay,
             Some("thermal-notify"),
-            None,
+            primary_output.as_ref(),
         );
 
         // Configure anchoring: top-right corner
@@ -73,18 +96,10 @@ impl NotifySurface {
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
         wl_surface.commit();
 
-        let mut state = NotifySurfaceState {
-            compositor_state,
-            layer_shell,
-            output_state,
-            registry_state,
-            seat_state,
-            layer_surface: layer_surface.clone(),
-            configured: false,
-            closed: false,
-        };
+        init_state.layer_surface = Some(layer_surface.clone());
 
         // Run the event loop until the surface is configured
+        let mut state = init_state;
         while !state.configured {
             event_queue
                 .blocking_dispatch(&mut state)
@@ -176,9 +191,12 @@ impl NotifySurface {
         Ok(Self {
             width,
             height,
+            visible: true,
             conn,
+            event_queue,
             queue_handle: qh,
             state,
+            wl_surface,
             instance,
             surface: wgpu_surface,
             adapter,
@@ -195,19 +213,53 @@ impl NotifySurface {
         }
         self.width = w;
         self.height = h;
-        self.state.layer_surface.set_size(w, h);
+        if let Some(ls) = &self.state.layer_surface {
+            ls.set_size(w, h);
+        }
         self.surface_config.width = w;
         self.surface_config.height = h;
         self.surface.configure(&*self.device, &self.surface_config);
     }
 
+    /// Render a fully transparent frame to visually hide the surface.
+    pub fn clear_transparent(&self) {
+        if let Ok(output) = self.get_current_texture() {
+            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear"),
+            });
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("transparent clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            drop(_pass);
+            self.queue.submit(std::iter::once(encoder.finish()));
+            output.present();
+        }
+    }
+
     /// Dispatch pending Wayland events (non-blocking).
     pub fn dispatch(&mut self) -> Result<()> {
-        self.conn
-            .prepare_read()
-            .context("prepare_read failed")?
-            .read()
-            .ok(); // ignore read errors (EAGAIN etc.)
+        // Flush outgoing requests
+        self.conn.flush().context("wayland flush failed")?;
+        // Read any new data from the socket (non-blocking)
+        if let Some(guard) = self.conn.prepare_read() {
+            guard.read().ok(); // ignore EAGAIN
+        }
+        // Dispatch all pending events through the queue
+        self.event_queue
+            .dispatch_pending(&mut self.state)
+            .context("wayland dispatch_pending failed")?;
         Ok(())
     }
 
@@ -238,7 +290,7 @@ struct NotifySurfaceState {
     output_state: OutputState,
     registry_state: RegistryState,
     seat_state: SeatState,
-    layer_surface: LayerSurface,
+    layer_surface: Option<LayerSurface>,
     configured: bool,
     closed: bool,
 }

@@ -17,7 +17,9 @@ struct Rect {
     size: vec2<f32>,
     color: vec4<f32>,
     radius: f32,
-    _pad: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 };
 
 @group(0) @binding(0)
@@ -60,7 +62,7 @@ struct RectUniform {
     size: [f32; 2],
     color: [f32; 4],
     radius: f32,
-    _pad: f32,
+    _pad: [f32; 3], // pad to 48 bytes (WGSL uniform alignment rounds up to vec4 = 16 bytes)
 }
 
 // ── NotificationRenderer ─────────────────────────────────────────────────────
@@ -362,7 +364,7 @@ impl NotificationRenderer {
             size: ndc_size,
             color,
             radius: 4.0,
-            _pad: 0.0,
+            _pad: [0.0; 3],
         };
 
         let buf = self

@@ -29,7 +29,7 @@ impl ConductorInterface {
 
     /// Create a new pane (stub — returns a placeholder pane ID).
     fn create_pane(&self, _command: &str) -> String {
-        let mut panes = self.panes.lock().unwrap();
+        let mut panes = self.panes.lock().unwrap_or_else(|e| e.into_inner());
         let id = format!("pane-{}", panes.len());
         panes.push(id.clone());
         id
@@ -45,13 +45,13 @@ impl ConductorInterface {
 
     /// Focus a pane (stub).
     fn focus_pane(&self, pane_id: &str) {
-        let mut active = self.active_pane.lock().unwrap();
+        let mut active = self.active_pane.lock().unwrap_or_else(|e| e.into_inner());
         *active = pane_id.to_owned();
     }
 
     /// Set the layout (stub — updates the stored layout name).
     fn set_layout(&self, layout: &str) {
-        let mut l = self.layout.lock().unwrap();
+        let mut l = self.layout.lock().unwrap_or_else(|e| e.into_inner());
         *l = layout.to_owned();
     }
 
@@ -65,18 +65,18 @@ impl ConductorInterface {
     /// All known pane IDs.
     #[zbus(property)]
     fn panes(&self) -> Vec<String> {
-        self.panes.lock().unwrap().clone()
+        self.panes.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Currently focused pane ID.
     #[zbus(property)]
     fn active_pane(&self) -> String {
-        self.active_pane.lock().unwrap().clone()
+        self.active_pane.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Current layout name.
     #[zbus(property)]
     fn layout(&self) -> String {
-        self.layout.lock().unwrap().clone()
+        self.layout.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }

@@ -6,6 +6,7 @@
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_void};
 use tracing::warn;
+use zeroize::Zeroizing;
 
 // ── PAM FFI types ─────────────────────────────────────────────────────────────
 
@@ -51,6 +52,8 @@ unsafe extern "C" {
     ) -> c_int;
 
     fn pam_authenticate(pamh: *mut PamHandle, flags: c_int) -> c_int;
+
+    fn pam_acct_mgmt(pamh: *mut PamHandle, flags: c_int) -> c_int;
 
     fn pam_end(pamh: *mut PamHandle, pam_status: c_int) -> c_int;
 
@@ -109,7 +112,7 @@ unsafe extern "C" fn pam_conv_callback(
 
 /// Authenticate `username` with `password` via PAM service "login".
 /// Returns `true` on success.
-pub fn authenticate(username: &str, password: &str) -> bool {
+pub fn authenticate(username: &str, password: &Zeroizing<String>) -> bool {
     let service = match CString::new("login") {
         Ok(s) => s,
         Err(e) => {
@@ -124,7 +127,7 @@ pub fn authenticate(username: &str, password: &str) -> bool {
             return false;
         }
     };
-    let pass_c = match CString::new(password) {
+    let pass_c = match CString::new(password.as_str()) {
         Ok(s) => s,
         Err(e) => {
             warn!("PAM: invalid password: {}", e);
@@ -132,7 +135,7 @@ pub fn authenticate(username: &str, password: &str) -> bool {
         }
     };
 
-    unsafe {
+    let result = unsafe {
         let conv = PamConv {
             conv: pam_conv_callback,
             appdata_ptr: pass_c.as_ptr() as *mut c_void,
@@ -146,15 +149,30 @@ pub fn authenticate(username: &str, password: &str) -> bool {
         }
 
         let auth_ret = pam_authenticate(pamh, 0);
-        pam_end(pamh, auth_ret);
+        // Check account validity (expired/locked accounts, policy restrictions)
+        let acct_ret = if auth_ret == PAM_SUCCESS {
+            pam_acct_mgmt(pamh, 0)
+        } else {
+            auth_ret
+        };
+        pam_end(pamh, acct_ret);
 
-        if auth_ret != PAM_SUCCESS {
-            warn!("PAM: authentication failed with code {}", auth_ret);
+        if acct_ret != PAM_SUCCESS {
+            warn!("PAM: authentication failed with code {}", acct_ret);
             false
         } else {
             true
         }
+    };
+
+    // Zero the CString bytes before dropping
+    unsafe {
+        let ptr = pass_c.as_ptr() as *mut u8;
+        let len = pass_c.as_bytes().len();
+        std::ptr::write_bytes(ptr, 0, len);
     }
+
+    result
 }
 
 /// Get the current user's login name.

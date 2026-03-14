@@ -10,10 +10,17 @@ pub use urgency::Urgency;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use audio::AudioPlayer;
 use dbus::{NotificationQueue, NotificationServer};
+use renderer::NotificationRenderer;
+use stack::NotificationStack;
+use surface::NotifySurface;
+
+/// Notification popup dimensions (pixels).
+const NOTIF_WIDTH: u32 = 380;
+const NOTIF_HEIGHT: u32 = 100;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Shared notification queue
+    // Shared notification queue (std::sync::Mutex so spawn_blocking can lock it without .await)
     let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
 
     // Build the D-Bus server
@@ -53,9 +60,91 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("D-Bus service registered — waiting for notifications");
 
-    // Run the Wayland event loop in a blocking task so it doesn't block tokio
-    let _wayland_task = tokio::task::spawn_blocking(move || {
-        tracing::debug!("Wayland event loop thread started (stub)");
+    // Run the Wayland render loop in a blocking task so it doesn't block tokio.
+    let queue_clone = Arc::clone(&queue);
+    let _render_task = tokio::task::spawn_blocking(move || {
+        tracing::info!("Wayland render loop starting");
+
+        // Set up Wayland surface + wgpu
+        let mut notify_surface = match NotifySurface::new(NOTIF_WIDTH, NOTIF_HEIGHT) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to create Wayland surface: {e}");
+                return;
+            }
+        };
+
+        // Clone the Arc<Device> and Arc<Queue> from the surface so the renderer
+        // can share them without unsafe ptr reads.
+        let device = Arc::clone(&notify_surface.device);
+        let gpu_queue = Arc::clone(&notify_surface.queue);
+        let format = notify_surface.surface_config.format;
+
+        let mut renderer = NotificationRenderer::new(
+            device,
+            gpu_queue,
+            format,
+            NOTIF_WIDTH,
+            NOTIF_HEIGHT,
+        );
+
+        let mut stack = NotificationStack::new();
+        let mut last_tick = std::time::Instant::now();
+
+        loop {
+            // Dispatch pending Wayland events (non-blocking)
+            if let Err(e) = notify_surface.dispatch() {
+                tracing::warn!("Wayland dispatch error: {e}");
+            }
+
+            // Drain the incoming notification queue into the stack
+            {
+                let mut q = queue_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                while let Some(notif) = q.pop_front() {
+                    tracing::debug!(id = notif.id, "Pushing notification to stack: {}", notif.summary);
+                    stack.push(notif);
+                }
+            }
+
+            // Advance animation/timer state
+            let now = std::time::Instant::now();
+            let dt = now.duration_since(last_tick).as_secs_f32();
+            last_tick = now;
+            stack.tick(dt);
+
+            // Render visible notifications
+            if !stack.is_empty() {
+                // Render the top-most visible notification into the single layer-shell surface.
+                if let Some(active) = stack.iter_visible().next() {
+                    renderer.set_alpha(active.alpha());
+                    let urgency_color = active.notif.urgency.to_color();
+
+                    match notify_surface.get_current_texture() {
+                        Ok(output) => {
+                            let view = output
+                                .texture
+                                .create_view(&wgpu::TextureViewDescriptor::default());
+                            renderer.render(
+                                &view,
+                                &active.notif,
+                                urgency_color,
+                                NOTIF_WIDTH,
+                                NOTIF_HEIGHT,
+                            );
+                            output.present();
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to acquire surface texture: {e}");
+                        }
+                    }
+                }
+            }
+
+            // ~60 fps tick rate
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
     });
 
     // Keep alive until Ctrl-C

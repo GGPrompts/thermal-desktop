@@ -53,6 +53,9 @@ impl Rect {
         (0..n).map(|i| Rect::new(self.origin.x, self.origin.y + i as f32 * tile_h, self.size.width, tile_h)).collect()
     }
     pub fn grid(self, cols: usize, rows: usize) -> Vec<Rect> {
+        if cols == 0 || rows == 0 {
+            return vec![];
+        }
         let tw = self.size.width / cols as f32;
         let th = self.size.height / rows as f32;
         (0..rows).flat_map(|r| (0..cols).map(move |c| Rect::new(self.origin.x + c as f32 * tw, self.origin.y + r as f32 * th, tw, th))).collect()

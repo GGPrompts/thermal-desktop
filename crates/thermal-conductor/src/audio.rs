@@ -76,24 +76,24 @@ impl AudioManager {
 /// Play a sound file using rodio
 #[cfg(feature = "audio")]
 fn play_sound(path: &Path) -> Result<(), AudioError> {
-    use rodio::{Decoder, OutputStream, Source};
+    use rodio::{Decoder, OutputStream, Sink};
     use std::fs::File;
     use std::io::BufReader;
 
     let (_stream, stream_handle) = OutputStream::try_default()
         .map_err(|e| AudioError::DeviceError(e.to_string()))?;
 
-    let file = File::open(path).map_err(|e| AudioError::FileError(e.to_string()))?;
-    let reader = BufReader::new(file);
-
-    let source = Decoder::new(reader).map_err(|e| AudioError::DecodeError(e.to_string()))?;
-
-    stream_handle
-        .play_raw(source.convert_samples())
+    let sink = Sink::try_new(&stream_handle)
         .map_err(|e| AudioError::PlayError(e.to_string()))?;
 
-    // Wait for playback (simple approach — rodio drops the stream when done)
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    let file = File::open(path).map_err(|e| AudioError::FileError(e.to_string()))?;
+    let reader = BufReader::new(file);
+    let source = Decoder::new(reader).map_err(|e| AudioError::DecodeError(e.to_string()))?;
+
+    sink.append(source);
+    // Blocks the thread only for the actual audio duration (no hardcoded sleep).
+    // _stream must remain alive for the duration of playback.
+    sink.sleep_until_end();
 
     Ok(())
 }

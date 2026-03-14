@@ -82,8 +82,12 @@ impl StateDetector {
             self.current_state  // No change
         };
 
-        // Complete state auto-transitions to Idle after 3 seconds
-        if self.current_state == DetectedState::Complete && elapsed.as_secs() > 3 {
+        // Complete state auto-transitions to Idle after 3 seconds,
+        // but only if new_state is also Complete (i.e., no new activity detected).
+        if self.current_state == DetectedState::Complete
+            && new_state == DetectedState::Complete
+            && elapsed.as_secs() > 3
+        {
             self.current_state = DetectedState::Idle;
             return DetectedState::Idle;
         }
@@ -92,14 +96,14 @@ impl StateDetector {
         new_state
     }
 
-    /// Check if the last few lines contain error patterns
+    /// Check if the last few lines contain error patterns (whole-word matching).
     fn has_error_pattern(&self, lines: &[&str]) -> bool {
         // Only check last 5 lines to avoid false positives from scrollback
         let check_lines = if lines.len() > 5 { &lines[lines.len()-5..] } else { lines };
         for line in check_lines {
             let clean = strip_ansi(line);
             for pattern in &self.error_patterns {
-                if clean.contains(pattern.as_str()) {
+                if contains_whole_word(&clean, pattern) {
                     return true;
                 }
             }
@@ -131,6 +135,23 @@ impl StateDetector {
     pub fn add_prompt_pattern(&mut self, pattern: String) {
         self.prompt_patterns.push(pattern);
     }
+}
+
+/// Returns true if `text` contains `word` as a whole word (bounded by
+/// non-alphanumeric characters or string start/end).
+fn contains_whole_word(text: &str, word: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(word) {
+        let abs = start + pos;
+        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after_ok = abs + word.len() >= text.len()
+            || !text.as_bytes()[abs + word.len()].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
 }
 
 /// Strip ANSI escape sequences from a string

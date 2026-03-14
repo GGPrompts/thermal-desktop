@@ -115,7 +115,7 @@ fn main() {
             .expect("Wayland display ptr is null"),
     ));
     let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-        NonNull::new(layer.wl_surface().id().as_ptr() as *mut _)
+        NonNull::new(layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>())
             .expect("wl_surface ptr is null"),
     ));
 
@@ -197,6 +197,11 @@ fn main() {
         },
         text: text_state,
         reticle: reticle_pipeline,
+        cached_query_buf: None,
+        cached_query: String::new(),
+        cached_entry_bufs: Vec::new(),
+        cached_results: Vec::new(),
+        cached_selected: 0,
     };
 
     // Event loop
@@ -483,6 +488,17 @@ struct LauncherSurface {
     wgpu: WgpuState,
     text: TextState,
     reticle: ReticlePipeline,
+    // ── Text buffer cache ────────────────────────────────────────────────────
+    /// Cached glyphon buffer for the query line — rebuilt only when query changes.
+    cached_query_buf: Option<Buffer>,
+    /// Last query string used to build cached_query_buf.
+    cached_query: String,
+    /// Cached glyphon buffers for the result entry rows.
+    cached_entry_bufs: Vec<Buffer>,
+    /// Last result set (indices) used to build cached_entry_bufs.
+    cached_results: Vec<usize>,
+    /// Last selected index used to build cached_entry_bufs (selection changes color).
+    cached_selected: usize,
 }
 
 impl LauncherSurface {
@@ -510,20 +526,11 @@ impl LauncherSurface {
         const FONT_SIZE: f32 = 18.0;
         const LINE_HEIGHT: f32 = 22.0;
 
-        // ── Build text buffers ───────────────────────────────────────────────
+        // ── Build text buffers (cached) ──────────────────────────────────────
+        //
+        // Buffers are only rebuilt when the query, results, or selection change.
+        // At ~60fps this eliminates ~540 glyphon allocations/sec.
 
-        let mut text_areas: Vec<TextArea> = Vec::new();
-
-        // Query buffer
-        let query_text = if self.state.query.is_empty() {
-            "Type to search...".to_string()
-        } else {
-            format!("> {}", self.state.query)
-        };
-
-        let mut query_buf =
-            Buffer::new(&mut self.text.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        query_buf.set_size(&mut self.text.font_system, Some(WIDTH as f32 - PADDING_X * 2.0), None);
         let warm = ThermalPalette::WARM;
         let warm_color = GlyphonColor::rgba(
             (warm[0] * 255.0) as u8,
@@ -531,36 +538,19 @@ impl LauncherSurface {
             (warm[2] * 255.0) as u8,
             255,
         );
-        query_buf.set_text(
-            &mut self.text.font_system,
-            &query_text,
-            Attrs::new().color(warm_color).family(Family::Monospace),
-            Shaping::Advanced,
-        );
-        query_buf.shape_until_scroll(&mut self.text.font_system, false);
 
-        // We need to keep buffers alive for TextArea references.
-        // Collect them into a Vec to ensure lifetime.
-        let mut entry_bufs: Vec<Buffer> = Vec::new();
+        let query_text = if self.state.query.is_empty() {
+            "Type to search...".to_string()
+        } else {
+            format!("> {}", self.state.query)
+        };
 
-        for (i, &entry_idx) in self.state.results.iter().enumerate() {
-            let entry = &self.state.all_entries[entry_idx];
-            let is_selected = i == self.state.selected;
-
-            let color_arr = if is_selected {
-                ThermalPalette::WHITE_HOT
-            } else {
-                ThermalPalette::TEXT
-            };
-            let color = GlyphonColor::rgba(
-                (color_arr[0] * 255.0) as u8,
-                (color_arr[1] * 255.0) as u8,
-                (color_arr[2] * 255.0) as u8,
-                255,
+        // Rebuild query buffer only when the query string changed.
+        if self.cached_query != self.state.query {
+            let mut buf = Buffer::new(
+                &mut self.text.font_system,
+                Metrics::new(FONT_SIZE, LINE_HEIGHT),
             );
-
-            let mut buf =
-                Buffer::new(&mut self.text.font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
             buf.set_size(
                 &mut self.text.font_system,
                 Some(WIDTH as f32 - PADDING_X * 2.0),
@@ -568,35 +558,83 @@ impl LauncherSurface {
             );
             buf.set_text(
                 &mut self.text.font_system,
-                &entry.name,
-                Attrs::new().color(color).family(Family::SansSerif),
+                &query_text,
+                Attrs::new().color(warm_color).family(Family::Monospace),
                 Shaping::Advanced,
             );
             buf.shape_until_scroll(&mut self.text.font_system, false);
-            entry_bufs.push(buf);
+            self.cached_query_buf = Some(buf);
+            self.cached_query = self.state.query.clone();
         }
 
-        // Build text areas now that buffers are stable
-        let query_top = QUERY_Y as i32;
-        let query_area = TextArea {
-            buffer: &query_buf,
-            left: PADDING_X,
-            top: QUERY_Y,
-            scale: 1.0,
-            bounds: TextBounds {
-                left: PADDING_X as i32,
-                top: query_top,
-                right: (WIDTH as f32 - PADDING_X) as i32,
-                bottom: (QUERY_Y + LINE_HEIGHT) as i32,
-            },
-            default_color: warm_color,
-            custom_glyphs: &[],
-        };
-        text_areas.push(query_area);
+        // Rebuild entry buffers when results list or selection changes.
+        let entries_dirty = self.cached_results != self.state.results
+            || self.cached_selected != self.state.selected;
+        if entries_dirty {
+            self.cached_entry_bufs.clear();
+            for (i, &entry_idx) in self.state.results.iter().enumerate() {
+                let entry = &self.state.all_entries[entry_idx];
+                let is_selected = i == self.state.selected;
 
-        for (i, buf) in entry_bufs.iter().enumerate() {
+                let color_arr = if is_selected {
+                    ThermalPalette::WHITE_HOT
+                } else {
+                    ThermalPalette::TEXT
+                };
+                let color = GlyphonColor::rgba(
+                    (color_arr[0] * 255.0) as u8,
+                    (color_arr[1] * 255.0) as u8,
+                    (color_arr[2] * 255.0) as u8,
+                    255,
+                );
+
+                let mut buf = Buffer::new(
+                    &mut self.text.font_system,
+                    Metrics::new(FONT_SIZE, LINE_HEIGHT),
+                );
+                buf.set_size(
+                    &mut self.text.font_system,
+                    Some(WIDTH as f32 - PADDING_X * 2.0),
+                    None,
+                );
+                buf.set_text(
+                    &mut self.text.font_system,
+                    &entry.name,
+                    Attrs::new().color(color).family(Family::SansSerif),
+                    Shaping::Advanced,
+                );
+                buf.shape_until_scroll(&mut self.text.font_system, false);
+                self.cached_entry_bufs.push(buf);
+            }
+            self.cached_results = self.state.results.clone();
+            self.cached_selected = self.state.selected;
+        }
+
+        // Build text areas referencing the cached buffers (which live in self).
+        let mut text_areas: Vec<TextArea> = Vec::new();
+
+        // Query text area
+        if let Some(query_buf) = &self.cached_query_buf {
+            let query_top = QUERY_Y as i32;
+            text_areas.push(TextArea {
+                buffer: query_buf,
+                left: PADDING_X,
+                top: QUERY_Y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: PADDING_X as i32,
+                    top: query_top,
+                    right: (WIDTH as f32 - PADDING_X) as i32,
+                    bottom: (QUERY_Y + LINE_HEIGHT) as i32,
+                },
+                default_color: warm_color,
+                custom_glyphs: &[],
+            });
+        }
+
+        for (i, buf) in self.cached_entry_bufs.iter().enumerate() {
             let row_y = ENTRY_START_Y + i as f32 * ROW_HEIGHT;
-            let color_arr = if i == self.state.selected {
+            let color_arr = if i == self.cached_selected {
                 ThermalPalette::WHITE_HOT
             } else {
                 ThermalPalette::TEXT

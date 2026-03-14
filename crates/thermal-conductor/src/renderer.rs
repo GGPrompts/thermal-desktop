@@ -7,6 +7,18 @@
 //! CI). The window cannot actually be displayed in those environments, but
 //! `cargo check` and `cargo build` succeed.
 
+// ── Color helpers ─────────────────────────────────────────────────────────────
+
+/// Convert an sRGB component in [0,1] to linear light value for wgpu.
+/// Uses the IEC 61966-2-1 standard sRGB transfer function.
+fn srgb_to_linear(v: f32) -> f64 {
+    if v <= 0.04045 {
+        (v / 12.92) as f64
+    } else {
+        ((v + 0.055) / 1.055_f32).powf(2.4) as f64
+    }
+}
+
 // ── WgpuState ─────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -105,18 +117,20 @@ impl WgpuState {
             });
 
         {
+            // Convert sRGB palette values to linear f64 for wgpu clear color.
+            // ThermalPalette::BG is [f32; 4] with values already in [0,1] sRGB range.
+            let bg = thermal_core::ThermalPalette::BG;
             let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // ThermalPalette::BG = #0a0010
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.039,
-                            g: 0.000,
-                            b: 0.063,
-                            a: 1.0,
+                            r: srgb_to_linear(bg[0]),
+                            g: srgb_to_linear(bg[1]),
+                            b: srgb_to_linear(bg[2]),
+                            a: bg[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },

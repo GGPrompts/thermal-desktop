@@ -8,22 +8,23 @@ pub struct WgpuContext {
 }
 
 impl WgpuContext {
-    /// Synchronously create a WgpuContext with low-power defaults suitable
-    /// for all thermal components. Panics if no adapter is found.
-    pub async fn new() -> Self {
+    /// Synchronously create a WgpuContext with high-performance defaults suitable
+    /// for all thermal components. Uses pollster::block_on internally so callers
+    /// do not need an async runtime. Panics if no adapter is found.
+    pub fn new() -> Self {
         let instance = Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = pollster::block_on(instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
                 compatible_surface: None,
-            })
-            .await
-            .expect("thermal-core: no wgpu adapter found");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
-            .await
-            .expect("thermal-core: failed to create wgpu device");
+            },
+        ))
+        .expect("thermal-core: no wgpu adapter found");
+        let (device, queue) = pollster::block_on(
+            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+        )
+        .expect("thermal-core: failed to create wgpu device");
         Self { instance, adapter, device, queue }
     }
 }

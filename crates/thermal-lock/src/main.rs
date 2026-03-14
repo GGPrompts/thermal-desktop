@@ -22,6 +22,7 @@ use smithay_client_toolkit::{
 use std::{ptr::NonNull, time::{Instant, SystemTime, UNIX_EPOCH}};
 use thermal_core::ThermalPalette;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
@@ -35,9 +36,9 @@ pub mod auth;
 const HEATMAP_SHADER: &str = r#"
 struct TimeUniform {
     time: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    width: f32,
+    height: f32,
+    _pad: f32,
 }
 @group(0) @binding(0)
 var<uniform> u_time: TimeUniform;
@@ -85,7 +86,7 @@ fn heat_noise(uv: vec2<f32>, t: f32) -> f32 {
 
 @fragment
 fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
-    let uv = frag_coord.xy / 1080.0;
+    let uv = frag_coord.xy / vec2<f32>(u_time.width, u_time.height);
     let t = u_time.time;
     let noise = heat_noise(uv, t);
     let color = thermal_color(noise);
@@ -177,9 +178,9 @@ impl HeatmapPipeline {
         Self { pipeline, time_buf, bind_group, start: Instant::now() }
     }
 
-    fn update_time(&self, queue: &wgpu::Queue) {
+    fn update_time(&self, queue: &wgpu::Queue, width: u32, height: u32) {
         let elapsed = self.start.elapsed().as_secs_f32();
-        let bytes: [f32; 4] = [elapsed, 0.0, 0.0, 0.0];
+        let bytes: [f32; 4] = [elapsed, width as f32, height as f32, 0.0];
         queue.write_buffer(&self.time_buf, 0, bytemuck::cast_slice(&bytes));
     }
 
@@ -294,14 +295,24 @@ fn make_flash_pipeline(
 // ── Auth state ────────────────────────────────────────────────────────────────
 
 struct AuthState {
-    password: String,
+    password: Zeroizing<String>,
     failed: bool,
     shake_timer: f32,
+    /// Count of consecutive failed authentication attempts (for rate limiting)
+    failed_attempts: u32,
+    /// Lockout until this instant; None means no lockout active
+    lockout_until: Option<Instant>,
 }
 
 impl AuthState {
     fn new() -> Self {
-        Self { password: String::new(), failed: false, shake_timer: 0.0 }
+        Self {
+            password: Zeroizing::new(String::new()),
+            failed: false,
+            shake_timer: 0.0,
+            failed_attempts: 0,
+            lockout_until: None,
+        }
     }
 
     fn masked(&self) -> String {
@@ -395,7 +406,7 @@ impl WgpuSurface {
         let delta = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        self.heatmap.update_time(&self.queue);
+        self.heatmap.update_time(&self.queue, self.width, self.height);
         self.update_clock();
 
         let elapsed = self.heatmap.elapsed_secs();
@@ -776,11 +787,22 @@ fn main() {
             }
         }
 
-        // Snapshot auth state for rendering
+        // Reset failed_attempts counter once lockout has expired
+        if let Some(lockout_until) = app.auth.lockout_until {
+            if Instant::now() >= lockout_until {
+                app.auth.lockout_until = None;
+                app.auth.failed_attempts = 0;
+            }
+        }
+
+        // Snapshot auth state for rendering — use masked string, never clone the real password
+        let masked_str = app.auth.masked();
         let auth_snapshot = AuthState {
-            password: app.auth.password.clone(),
+            password: Zeroizing::new(masked_str),
             failed: app.auth.failed,
             shake_timer: app.auth.shake_timer,
+            failed_attempts: app.auth.failed_attempts,
+            lockout_until: app.auth.lockout_until,
         };
         for ws in &mut app.wgpu_surfaces {
             ws.render_frame(&auth_snapshot);
@@ -832,7 +854,7 @@ impl SessionLockHandler for LockApp {
             .position(|s| s.wl_surface().id() == surface_id)
         {
             let lock_surface = self.pending_surfaces.remove(pos);
-            let raw_surface_ptr = lock_surface.wl_surface().id().as_ptr() as *mut _;
+            let raw_surface_ptr: *mut std::ffi::c_void = lock_surface.wl_surface().id().as_ptr().cast();
 
             let wgpu_surface = unsafe {
                 self.wgpu_instance
@@ -1095,6 +1117,15 @@ impl KeyboardHandler for LockApp {
     ) {
         let sym = event.keysym;
 
+        // Check rate-limit lockout before processing any input
+        if let Some(lockout_until) = self.auth.lockout_until {
+            if Instant::now() < lockout_until {
+                return; // Still locked out — ignore all key input
+            } else {
+                self.auth.lockout_until = None; // Lockout expired
+            }
+        }
+
         if sym == Keysym::new(xkeysym::key::BackSpace) {
             // Remove last character
             self.auth.password.pop();
@@ -1103,8 +1134,7 @@ impl KeyboardHandler for LockApp {
         {
             // Attempt authentication
             let username = self.username.clone();
-            let password = self.auth.password.clone();
-            let ok = auth::authenticate(&username, &password);
+            let ok = auth::authenticate(&username, &self.auth.password);
             if ok {
                 info!("Authentication successful — unlocking");
                 if let Some(lock) = &self.session_lock {
@@ -1115,7 +1145,13 @@ impl KeyboardHandler for LockApp {
                 warn!("Authentication failed");
                 self.auth.failed = true;
                 self.auth.shake_timer = 0.5;
+                self.auth.failed_attempts += 1;
                 self.auth.password.clear();
+                // After 3 consecutive failures, impose a 2-second lockout
+                if self.auth.failed_attempts >= 3 {
+                    warn!("Rate limiting: {} failed attempts — 2s lockout", self.auth.failed_attempts);
+                    self.auth.lockout_until = Some(Instant::now() + std::time::Duration::from_secs(2));
+                }
             }
         } else if let Some(text) = event.utf8 {
             // Printable character — append to password

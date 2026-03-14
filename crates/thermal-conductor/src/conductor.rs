@@ -68,17 +68,24 @@ impl Conductor {
         }
 
         // Replace captures, keeping old value for panes that errored.
-        let old_captures = std::mem::replace(&mut self.captures, Vec::with_capacity(n));
-        let mut old_iter = old_captures.into_iter();
+        // Convert old captures to indexed Vec<Option<PaneCapture>> so we can
+        // take by index rather than iterating sequentially.
+        let mut old_indexed: Vec<Option<PaneCapture>> =
+            std::mem::replace(&mut self.captures, Vec::with_capacity(n))
+                .into_iter()
+                .map(Some)
+                .collect();
+        // Pad to n in case panes were added.
+        old_indexed.resize_with(n, || None);
+
         for (i, opt) in new_captures.into_iter().enumerate() {
             match opt {
                 Some(c) => self.captures.push(c),
                 None => {
-                    // Re-use the old capture if available.
-                    if let Some(old) = old_iter.next() {
+                    // Re-use the old capture for this specific pane index.
+                    if let Some(old) = old_indexed[i].take() {
                         self.captures.push(old);
                     }
-                    let _ = i; // suppress warning
                 }
             }
         }

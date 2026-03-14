@@ -52,7 +52,9 @@ impl InputHandler {
 
                 use winit::keyboard::{Key, NamedKey};
                 match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => Some(InputAction::Quit),
+                    // Note: Escape is NOT quit — it's used by terminal apps (vim, readline, etc.).
+                    // Ctrl-Q (winit sends \x11, ASCII 17) quits thermal-conductor.
+                    Key::Character(c) if c.as_str() == "\x11" => Some(InputAction::Quit),
                     Key::Named(NamedKey::Enter) => Some(InputAction::SendKeys {
                         pane_idx: self.focused_pane,
                         keys: "\r".to_owned(),

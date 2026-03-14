@@ -28,12 +28,12 @@ pub struct NotifySurface {
     queue_handle: QueueHandle<NotifySurfaceState>,
     state: NotifySurfaceState,
 
-    // wgpu
+    // wgpu — device and queue are Arc so they can be shared with the renderer
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    pub device: std::sync::Arc<wgpu::Device>,
+    pub queue: std::sync::Arc<wgpu::Queue>,
     pub surface_config: wgpu::SurfaceConfiguration,
 }
 
@@ -129,7 +129,7 @@ impl NotifySurface {
         }))
         .context("no suitable wgpu adapter found")?;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
+        let (device_raw, queue_raw) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("thermal-notify"),
                 required_features: wgpu::Features::empty(),
@@ -139,6 +139,9 @@ impl NotifySurface {
             None,
         ))
         .context("request_device failed")?;
+
+        let device = std::sync::Arc::new(device_raw);
+        let queue = std::sync::Arc::new(queue_raw);
 
         let surface_caps = wgpu_surface.get_capabilities(&adapter);
         let format = surface_caps
@@ -168,7 +171,7 @@ impl NotifySurface {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        wgpu_surface.configure(&device, &surface_config);
+        wgpu_surface.configure(&*device, &surface_config);
 
         Ok(Self {
             width,
@@ -195,7 +198,7 @@ impl NotifySurface {
         self.state.layer_surface.set_size(w, h);
         self.surface_config.width = w;
         self.surface_config.height = h;
-        self.surface.configure(&self.device, &self.surface_config);
+        self.surface.configure(&*self.device, &self.surface_config);
     }
 
     /// Dispatch pending Wayland events (non-blocking).

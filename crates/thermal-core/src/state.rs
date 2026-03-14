@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::palette::Color;
 
 /// The operational state of a single agent pane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AgentState {
     /// Waiting for input — cold blue.
     Idle,

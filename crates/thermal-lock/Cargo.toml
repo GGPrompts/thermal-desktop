@@ -21,3 +21,4 @@ raw-window-handle = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 xkeysym = "0.2"
+zeroize = { version = "1", features = ["derive"] }

@@ -267,6 +267,22 @@ You should see a line like `Found Windows Boot Manager on /dev/sda1`. If you do,
 umount /mnt/windows-efi
 ```
 
+## Phase 7.5: CPU Microcode (IMPORTANT)
+
+Microcode updates fix CPU bugs and security vulnerabilities.
+
+### AMD (Ryzen 5800X)
+```bash
+pacman -S amd-ucode
+```
+
+### Intel
+```bash
+pacman -S intel-ucode
+```
+
+GRUB will auto-detect and load microcode on next boot.
+
 ## Phase 8: Install GPU Drivers
 
 ### AMD (Ryzen 5800X has no integrated GPU — skip if you have a discrete GPU)
@@ -382,6 +398,34 @@ Arch is gone, Windows is fine.
 sudo systemctl start NetworkManager
 sudo nmtui
 ```
+
+## Staged Install Strategy (Recommended)
+
+Don't install everything at once. Do it in two stages:
+
+### Stage 1: TUI Only (boot into working terminal first)
+```bash
+bash ~/dotfiles/bootstrap.sh --tui-only
+```
+Verify: ZSH, Neovim, tmux all work. Fix any issues here.
+
+### Stage 2: Full GUI
+```bash
+bash ~/dotfiles/bootstrap.sh --gui
+```
+Verify: Hyprland starts, Waybar shows, Kitty launches.
+
+## Post-Install Checklist
+
+- [ ] Boot succeeds, GRUB shows Arch + Windows
+- [ ] WiFi/ethernet works (`ping archlinux.org`)
+- [ ] ZSH is default shell (`echo $SHELL`)
+- [ ] Neovim opens (`nvim`)
+- [ ] Hyprland starts (`Hyprland` from TTY)
+- [ ] Waybar visible
+- [ ] Kitty terminal launches (Super+Return)
+- [ ] Audio works (`pamixer --get-volume`)
+- [ ] GPU acceleration active (`glxinfo | grep renderer` or `vulkaninfo`)
 
 ## Quick Reference
 

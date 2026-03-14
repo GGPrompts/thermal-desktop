@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::Mutex;
 use zbus::interface;
 use zbus::zvariant::Value;
 
@@ -23,6 +23,9 @@ pub struct Notification {
 
 // ── Type alias for the shared queue ─────────────────────────────────────────
 
+/// Shared notification queue. Uses std::sync::Mutex so it can be accessed
+/// from both async D-Bus handlers (non-blocking lock) and the sync render loop
+/// running in spawn_blocking.
 pub type NotificationQueue = Arc<Mutex<VecDeque<Notification>>>;
 
 // ── D-Bus server implementation ──────────────────────────────────────────────
@@ -84,7 +87,7 @@ impl NotificationServer {
             "New notification"
         );
 
-        self.queue.lock().await.push_back(notif);
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(notif);
 
         // Play audio cue (fire-and-forget via channel)
         if let Some(audio) = &self.audio {
@@ -96,7 +99,7 @@ impl NotificationServer {
 
     async fn close_notification(&self, id: u32) {
         tracing::debug!(id, "CloseNotification requested");
-        let mut q = self.queue.lock().await;
+        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.retain(|n| n.id != id);
     }
 

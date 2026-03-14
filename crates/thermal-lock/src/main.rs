@@ -770,6 +770,12 @@ fn main() {
         event_queue.blocking_dispatch(&mut app).expect("Wayland event dispatch failed");
 
         if app.exit {
+            // Roundtrip to ensure the compositor has fully processed the
+            // unlock before we tear down the connection.  Without this,
+            // Hyprland may not re-send wl_keyboard::enter to the previously
+            // focused surface, leaving existing terminals unable to receive
+            // keyboard input.
+            let _ = event_queue.roundtrip(&mut app);
             break;
         }
 

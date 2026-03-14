@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("thermal-bar v{}", env!("CARGO_PKG_VERSION"));
 
-    wayland::run()?;
+    wayland::run().await?;
 
     Ok(())
 }

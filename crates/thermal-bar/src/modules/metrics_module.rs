@@ -19,9 +19,9 @@ impl MetricsModule {
         let m = SystemMetrics::poll_full();
         let mut modules = Vec::new();
 
-        // CPU usage.
+        // CPU usage — boost low values so text is always readable.
         let cpu_heat = (m.cpu_usage_pct / 100.0).clamp(0.0, 1.0);
-        let cpu_color = thermal_gradient_f32(cpu_heat);
+        let cpu_color = thermal_gradient_f32((cpu_heat * 0.5 + 0.5).clamp(0.5, 1.0));
         modules.push(ModuleOutput::new(
             Zone::Left,
             format!("CPU {:>3.0}%", m.cpu_usage_pct),
@@ -30,9 +30,8 @@ impl MetricsModule {
 
         // CPU temp (if available).
         if let Some(temp) = m.cpu_temp_c {
-            // Normalize: 0°C = 0.0, 100°C = 1.0.
             let heat = ((temp - 20.0) / 80.0).clamp(0.0, 1.0);
-            let color = thermal_gradient_f32(heat);
+            let color = thermal_gradient_f32((heat * 0.5 + 0.5).clamp(0.5, 1.0));
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 format!("{:>3.0}°C", temp),
@@ -47,7 +46,7 @@ impl MetricsModule {
             0.0
         };
         let mem_heat = mem_pct.clamp(0.0, 1.0);
-        let mem_color = thermal_gradient_f32(mem_heat);
+        let mem_color = thermal_gradient_f32((mem_heat * 0.5 + 0.5).clamp(0.5, 1.0));
         modules.push(ModuleOutput::new(
             Zone::Left,
             format!("MEM {:>4}MB", m.mem_used_mb),
@@ -63,14 +62,14 @@ impl MetricsModule {
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 net_str,
-                ThermalPalette::ACCENT_NEUTRAL,
+                ThermalPalette::TEXT_BRIGHT,
             ));
         }
 
         // GPU temp + usage (if available).
         if let (Some(gpu_temp), Some(gpu_pct)) = (m.gpu_temp_c, m.gpu_usage_pct) {
             let gpu_heat = ((gpu_temp - 20.0) / 80.0).clamp(0.0, 1.0);
-            let gpu_color = thermal_gradient_f32(gpu_heat);
+            let gpu_color = thermal_gradient_f32((gpu_heat * 0.5 + 0.5).clamp(0.5, 1.0));
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 format!("GPU {:>3.0}% {:>3.0}°C", gpu_pct, gpu_temp),

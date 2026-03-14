@@ -232,7 +232,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
 
         // Pre-warm font system.
-        let mut warmup_buf = Buffer::new(&mut font_system, Metrics::new(13.0, 20.0));
+        let mut warmup_buf = Buffer::new(&mut font_system, Metrics::new(16.0, 24.0));
         warmup_buf.set_size(&mut font_system, Some(width as f32), Some(height as f32));
         warmup_buf.set_text(
             &mut font_system,
@@ -269,7 +269,7 @@ impl Renderer {
     /// Render all modules to the bar surface.
     ///
     /// Clears to ThermalPalette::BG, draws module backgrounds and text.
-    pub fn render(&mut self, modules: &[ModuleOutput]) -> anyhow::Result<()> {
+    pub fn render(&mut self, modules: &[ModuleOutput], spark_rects: &[crate::sparkline::SparkRect]) -> anyhow::Result<()> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
@@ -296,7 +296,7 @@ impl Renderer {
             }
 
             if !module.text.is_empty() {
-                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(13.0, 20.0));
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(16.0, 24.0));
                 buf.set_size(
                     &mut self.font_system,
                     Some(module.width.max(200.0)),
@@ -315,12 +315,20 @@ impl Renderer {
             }
         }
 
-        // Build vertex list for all rect quads.
+        // Build vertex list for all rect quads + sparkline rects.
         let mut rect_vertices: Vec<ColorVertex> = Vec::new();
         for (xywh, color) in &rect_quads {
             let (x, y, w, h) = (xywh[0], xywh[1], xywh[2], xywh[3]);
             let verts =
                 pixel_rect_to_ndc(x, y, w, h, self.width as f32, self.height as f32, *color);
+            rect_vertices.extend_from_slice(&verts);
+        }
+        for r in spark_rects {
+            let verts = pixel_rect_to_ndc(
+                r.x, r.y, r.w, r.h,
+                self.width as f32, self.height as f32,
+                r.color,
+            );
             rect_vertices.extend_from_slice(&verts);
         }
 
@@ -420,10 +428,14 @@ impl Renderer {
         Ok(())
     }
 
-    /// Convenience: render a `BarLayout` by computing positions and rendering.
-    pub fn render_layout(&mut self, layout: &crate::layout::BarLayout) -> anyhow::Result<()> {
+    /// Convenience: render a `BarLayout` with optional sparkline overlay.
+    pub fn render_layout(
+        &mut self,
+        layout: &crate::layout::BarLayout,
+        spark_rects: &[crate::sparkline::SparkRect],
+    ) -> anyhow::Result<()> {
         let modules = layout.all_positioned();
-        self.render(&modules)
+        self.render(&modules, spark_rects)
     }
 
     /// Draw a batch of sparkline rects in a single render pass.

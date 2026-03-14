@@ -80,7 +80,7 @@ impl BarLayout {
     ///
     /// Returns positioned `ModuleOutput` items in left→center→right order.
     pub fn compute_positions(&self) -> Vec<ModuleOutput> {
-        let char_width: f32 = 8.0; // approximate monospace char width at 13px
+        let char_width: f32 = 10.0; // approximate monospace char width at 16px
         let padding: f32 = 16.0;
         let margin: f32 = 8.0;
 

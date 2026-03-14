@@ -77,8 +77,8 @@ impl ClockModule {
         vec![
             // Time in warm green (like a digital readout)
             ModuleOutput::new(Zone::Right, &cache.time_str, ThermalPalette::WARM),
-            // Date in muted text
-            ModuleOutput::new(Zone::Right, &cache.date_str, ThermalPalette::TEXT_MUTED),
+            // Date in lighter text
+            ModuleOutput::new(Zone::Right, &cache.date_str, ThermalPalette::TEXT),
         ]
     }
 }

@@ -2,6 +2,8 @@
 ///
 /// Uses smithay-client-toolkit 0.19 to create a wlr-layer-shell surface
 /// anchored to the top of the screen with a 32px exclusive zone.
+use std::time::{Duration, Instant};
+
 use smithay_client_toolkit as sctk;
 
 use sctk::{
@@ -20,10 +22,16 @@ use sctk::{
     },
 };
 use wayland_client::{
-    Connection, QueueHandle,
+    Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_output, wl_seat, wl_surface},
 };
+
+use crate::layout::BarLayout;
+use crate::modules::clock::ClockModule;
+use crate::modules::metrics_module::MetricsModule;
+use crate::renderer::Renderer;
+use crate::sparkline::SparklineSet;
 
 /// Height of the bar in pixels.
 pub const BAR_HEIGHT: u32 = 32;
@@ -151,7 +159,6 @@ impl LayerShellHandler for BarState {
         if configure.new_size.0 != 0 {
             self.width = configure.new_size.0;
         }
-        self.configured = true;
 
         tracing::debug!(
             width = self.width,
@@ -159,8 +166,13 @@ impl LayerShellHandler for BarState {
             "layer surface configured"
         );
 
-        // Commit the empty surface so the compositor maps it.
-        self.layer.wl_surface().commit();
+        // Only commit on the first configure to acknowledge and map the surface.
+        // Subsequent configures are handled by the render loop which commits
+        // with an actual buffer attached, avoiding an infinite configure loop.
+        if !self.configured {
+            self.configured = true;
+            self.layer.wl_surface().commit();
+        }
     }
 }
 
@@ -216,7 +228,7 @@ impl ProvidesRegistryState for BarState {
 
 /// Connect to the Wayland compositor, create a layer-shell bar surface, and
 /// enter the event loop.  Returns when the surface is closed or an error occurs.
-pub fn run() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<()> {
     // Connect to the Wayland compositor via WAYLAND_DISPLAY.
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
@@ -257,15 +269,94 @@ pub fn run() -> anyhow::Result<()> {
         exit: false,
     };
 
-    tracing::info!("thermal-bar: entering Wayland event loop");
+    tracing::info!("thermal-bar: waiting for compositor configure");
+
+    // Phase 1: Block until the compositor sends the first configure event,
+    // which tells us the actual surface dimensions.
+    while !bar.configured {
+        event_queue.blocking_dispatch(&mut bar)?;
+        if bar.exit {
+            tracing::info!("thermal-bar: exit before configure");
+            return Ok(());
+        }
+    }
+
+    // Phase 2: Initialize the wgpu renderer now that we know the surface size.
+    let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
+    let surface_ptr = bar.layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>()
+        as *mut std::ffi::c_void;
+
+    let mut renderer =
+        Renderer::new_from_wayland(display_ptr, surface_ptr, bar.width, BAR_HEIGHT).await?;
+
+    tracing::info!(
+        width = bar.width,
+        height = BAR_HEIGHT,
+        "thermal-bar: renderer initialized, entering render loop"
+    );
+
+    // Phase 3: Render loop — poll metrics, build layout, render, dispatch events.
+    let metrics_module = MetricsModule::new();
+    let clock_module = ClockModule::new();
+    let mut sparklines = SparklineSet::new();
+    let mut last_metrics = Instant::now();
+
+    // Do an initial metrics poll to seed the CPU delta.
+    let _ = crate::metrics::SystemMetrics::poll_full();
 
     loop {
-        event_queue.blocking_dispatch(&mut bar)?;
+        // Non-blocking dispatch of any pending Wayland events.
+        event_queue.dispatch_pending(&mut bar)?;
+        // Flush outgoing requests to the compositor.
+        conn.flush()?;
+        // Read any new events that arrived on the socket (non-blocking).
+        if let Some(guard) = conn.prepare_read() {
+            let _ = guard.read();
+            event_queue.dispatch_pending(&mut bar)?;
+        }
 
         if bar.exit {
             tracing::info!("thermal-bar: exit requested");
             break;
         }
+
+        // Check if the compositor resized us.
+        if renderer.width != bar.width {
+            renderer.resize(bar.width, BAR_HEIGHT);
+        }
+
+        // Build layout from modules.
+        let mut layout = BarLayout::new(bar.width);
+
+        // Left zone: system metrics.
+        let metric_outputs = metrics_module.render();
+        layout.left = metric_outputs;
+
+        // Right zone: clock + date.
+        let clock_outputs = clock_module.render();
+        layout.right = clock_outputs;
+
+        // Update sparklines once per second.
+        if last_metrics.elapsed() >= Duration::from_secs(1) {
+            let m = crate::metrics::SystemMetrics::poll_full();
+            sparklines.push_metrics(&m);
+            last_metrics = Instant::now();
+        }
+
+        // Build sparkline rects.
+        let spark_rects = sparklines.render_all(8.0, 6.0);
+
+        // Render the bar with sparklines in a single pass.
+        match renderer.render_layout(&layout, &spark_rects) {
+            Ok(()) => {}
+            Err(e) => {
+                tracing::warn!("render error: {e}");
+            }
+        }
+
+        // Sleep ~1 second between frames. A status bar doesn't need high FPS;
+        // 1 Hz is sufficient for metrics updates.
+        std::thread::sleep(Duration::from_secs(1));
     }
 
     Ok(())

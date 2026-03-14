@@ -329,10 +329,10 @@ impl ReticlePipeline {
             cache: None,
         });
 
-        // Pre-allocate buffer for 8 quads × 6 vertices each = 48 vertices max
+        // Pre-allocate buffer for UI quads: 11 quads × 6 vertices = 66 vertices max
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reticle verts"),
-            size: (48 * std::mem::size_of::<ReticleVertex>()) as wgpu::BufferAddress,
+            size: (72 * std::mem::size_of::<ReticleVertex>()) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -354,7 +354,7 @@ impl ReticlePipeline {
         h: f32,
         color: [f32; 4],
     ) -> Vec<ReticleVertex> {
-        const ARM: f32 = 12.0;
+        const ARM: f32 = 16.0;
         const THICK: f32 = 2.0;
 
         // 4 corners, each has 2 bars (horizontal + vertical) = 8 quads
@@ -520,33 +520,41 @@ impl LauncherSurface {
 
         // Layout constants
         const PADDING_X: f32 = 30.0;
-        const QUERY_Y: f32 = 30.0;
-        const ENTRY_START_Y: f32 = 80.0;
-        const ROW_HEIGHT: f32 = 40.0;
-        const FONT_SIZE: f32 = 18.0;
-        const LINE_HEIGHT: f32 = 22.0;
+        const QUERY_Y: f32 = 24.0;
+        const QUERY_BAR_TOP: f32 = 12.0;
+        const QUERY_BAR_HEIGHT: f32 = 44.0;
+        const SEPARATOR_Y: f32 = 62.0;
+        const ENTRY_START_Y: f32 = 76.0;
+        const ROW_HEIGHT: f32 = 36.0;
+        const FONT_SIZE: f32 = 16.0;
+        const LINE_HEIGHT: f32 = 20.0;
 
         // ── Build text buffers (cached) ──────────────────────────────────────
         //
         // Buffers are only rebuilt when the query, results, or selection change.
         // At ~60fps this eliminates ~540 glyphon allocations/sec.
 
-        let warm = ThermalPalette::WARM;
-        let warm_color = GlyphonColor::rgba(
-            (warm[0] * 255.0) as u8,
-            (warm[1] * 255.0) as u8,
-            (warm[2] * 255.0) as u8,
+        let query_color_arr = if self.state.query.is_empty() {
+            ThermalPalette::TEXT_MUTED
+        } else {
+            ThermalPalette::HOT
+        };
+        let query_color = GlyphonColor::rgba(
+            (query_color_arr[0] * 255.0) as u8,
+            (query_color_arr[1] * 255.0) as u8,
+            (query_color_arr[2] * 255.0) as u8,
             255,
         );
 
         let query_text = if self.state.query.is_empty() {
-            "Type to search...".to_string()
+            "search...".to_string()
         } else {
-            format!("> {}", self.state.query)
+            format!("› {}", self.state.query)
         };
 
         // Rebuild query buffer only when the query string changed.
-        if self.cached_query != self.state.query {
+        // On first render, cached_query_buf is None so we also need to build.
+        if self.cached_query_buf.is_none() || self.cached_query != self.state.query {
             let mut buf = Buffer::new(
                 &mut self.text.font_system,
                 Metrics::new(FONT_SIZE, LINE_HEIGHT),
@@ -559,7 +567,7 @@ impl LauncherSurface {
             buf.set_text(
                 &mut self.text.font_system,
                 &query_text,
-                Attrs::new().color(warm_color).family(Family::Monospace),
+                Attrs::new().color(query_color).family(Family::Monospace),
                 Shaping::Advanced,
             );
             buf.shape_until_scroll(&mut self.text.font_system, false);
@@ -627,7 +635,7 @@ impl LauncherSurface {
                     right: (WIDTH as f32 - PADDING_X) as i32,
                     bottom: (QUERY_Y + LINE_HEIGHT) as i32,
                 },
-                default_color: warm_color,
+                default_color: query_color,
                 custom_glyphs: &[],
             });
         }
@@ -680,22 +688,52 @@ impl LauncherSurface {
 
         // ── Build reticle verts for selected row ──────────────────────────────
 
+        // Reticle tightly wraps the text, not the full row
         let selected_row_y = ENTRY_START_Y + self.state.selected as f32 * ROW_HEIGHT;
-        let rx0 = PADDING_X - 8.0;
-        let ry0 = selected_row_y - 4.0;
-        let rx1 = WIDTH as f32 - PADDING_X + 8.0;
-        let ry1 = selected_row_y + ROW_HEIGHT + 4.0;
-        let hot = ThermalPalette::ACCENT_HOT;
+        let text_center_y = selected_row_y + LINE_HEIGHT * 0.5;
+        let reticle_half = LINE_HEIGHT * 0.5 + 6.0; // tight around text + small margin
+        let rx0 = PADDING_X - 10.0;
+        let ry0 = text_center_y - reticle_half;
+        let rx1 = WIDTH as f32 - PADDING_X + 10.0;
+        let ry1 = text_center_y + reticle_half;
+        let hot = ThermalPalette::SEARING;
 
-        let verts = if !self.state.results.is_empty() {
-            ReticlePipeline::build_reticle_verts(
+        let mut verts: Vec<ReticleVertex> = Vec::new();
+
+        // ── Search bar background panel ──────────────────────────────────
+        let bar_color = ThermalPalette::BG_SURFACE;
+        verts.extend_from_slice(&quad_verts(
+            PADDING_X - 12.0, QUERY_BAR_TOP,
+            WIDTH as f32 - PADDING_X + 12.0, QUERY_BAR_TOP + QUERY_BAR_HEIGHT,
+            WIDTH as f32, HEIGHT as f32, bar_color,
+        ));
+
+        // ── Separator line ───────────────────────────────────────────────
+        let sep_color = ThermalPalette::COLD;
+        verts.extend_from_slice(&quad_verts(
+            PADDING_X - 12.0, SEPARATOR_Y,
+            WIDTH as f32 - PADDING_X + 12.0, SEPARATOR_Y + 1.0,
+            WIDTH as f32, HEIGHT as f32, sep_color,
+        ));
+
+        // ── Selected row highlight ───────────────────────────────────────
+        if !self.state.results.is_empty() {
+            let highlight_color = [ThermalPalette::BG_SURFACE[0], ThermalPalette::BG_SURFACE[1], ThermalPalette::BG_SURFACE[2], 0.6];
+            verts.extend_from_slice(&quad_verts(
+                PADDING_X - 12.0, selected_row_y - 2.0,
+                WIDTH as f32 - PADDING_X + 12.0, selected_row_y + LINE_HEIGHT + 8.0,
+                WIDTH as f32, HEIGHT as f32, highlight_color,
+            ));
+        }
+
+        // ── Reticle brackets ─────────────────────────────────────────────
+        if !self.state.results.is_empty() {
+            verts.extend(ReticlePipeline::build_reticle_verts(
                 rx0, ry0, rx1, ry1,
                 WIDTH as f32, HEIGHT as f32,
                 hot,
-            )
-        } else {
-            vec![]
-        };
+            ));
+        }
 
         // Upload reticle verts
         if !verts.is_empty() {

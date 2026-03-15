@@ -49,7 +49,11 @@ enum Commands {
     },
 
     /// List all kitty windows
-    List,
+    List {
+        /// Output raw JSON instead of table
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Kill (close) a therminal
     Kill {
@@ -77,7 +81,7 @@ async fn main() -> Result<()> {
         } => cmd_spawn(count, project, title).await,
         Commands::Status => cmd_status().await,
         Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
-        Commands::List => cmd_list().await,
+        Commands::List { json } => cmd_list(json).await,
         Commands::Kill { window_id } => cmd_kill(window_id).await,
     }
 }
@@ -95,18 +99,10 @@ async fn cmd_spawn(count: u32, project: Option<String>, title: String) -> Result
             format!("{title} {}", i + 1)
         };
 
-        let mut command_args: Vec<&str> = vec!["claude"];
+        let command_args: Vec<&str> = vec!["claude"];
+        let cwd = project.as_deref();
 
-        // If a project path is given, start claude with --project
-        // We need to own the string for the borrow to work
-        let project_flag;
-        if let Some(ref p) = project {
-            project_flag = p.clone();
-            command_args.push("--project");
-            command_args.push(&project_flag);
-        }
-
-        let window_id = kitty.spawn(&window_title, &command_args).await?;
+        let window_id = kitty.spawn(&window_title, &command_args, cwd).await?;
         println!("  Therminal \"{}\" spawned (window id: {})", window_title, window_id);
     }
 
@@ -202,13 +198,38 @@ async fn cmd_send(window_id: u64, prompt: String) -> Result<()> {
 }
 
 /// List all kitty windows.
-async fn cmd_list() -> Result<()> {
+async fn cmd_list(json: bool) -> Result<()> {
     let kitty = KittyController::new()?;
     let windows_json = kitty.list_windows().await?;
 
-    // Pretty-print the JSON
-    let pretty = serde_json::to_string_pretty(&windows_json)?;
-    println!("{pretty}");
+    if json {
+        let pretty = serde_json::to_string_pretty(&windows_json)?;
+        println!("{pretty}");
+        return Ok(());
+    }
+
+    // Compact table output
+    let mut count = 0u32;
+    if let Some(os_windows) = windows_json.as_array() {
+        for os_window in os_windows {
+            if let Some(tabs) = os_window.get("tabs").and_then(|t| t.as_array()) {
+                for tab in tabs {
+                    if let Some(windows) = tab.get("windows").and_then(|w| w.as_array()) {
+                        for window in windows {
+                            let id = window.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let title = window.get("title").and_then(|v| v.as_str()).unwrap_or("untitled");
+                            let pid = window.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let is_focused = window.get("is_focused").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let focus = if is_focused { " *" } else { "" };
+                            println!("  [{id}] {title}{focus}  (pid: {pid})");
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("\n{count} window{}.", if count == 1 { "" } else { "s" });
     Ok(())
 }
 

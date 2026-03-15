@@ -1,33 +1,36 @@
 //! KittyController — interface to kitty terminal via remote control protocol.
 //!
-//! All communication goes through `kitty @` CLI commands over a unix socket.
+//! All communication goes through `kitty @` CLI commands over unix sockets.
+//! Supports multiple kitty instances by scanning all `/tmp/kitty-*` sockets.
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
-/// Controller for interacting with a kitty terminal instance via remote control.
+/// Controller for interacting with kitty terminal instances via remote control.
 pub struct KittyController {
-    /// Path to the kitty unix socket (e.g. `/tmp/kitty-{pid}`).
-    socket: String,
+    /// All discovered kitty unix sockets.
+    sockets: Vec<String>,
 }
 
 impl KittyController {
     /// Create a new KittyController.
     ///
-    /// Discovers the kitty socket by checking `KITTY_LISTEN_ON` env var first,
-    /// then scanning `/tmp/kitty-*` for unix sockets.
+    /// Discovers kitty sockets by checking `KITTY_LISTEN_ON` env var first,
+    /// then scanning `/tmp/kitty-*` for all unix sockets.
     pub fn new() -> Result<Self> {
-        let socket = Self::find_socket()?;
-        tracing::debug!(socket = %socket, "kitty socket found");
-        Ok(Self { socket })
+        let sockets = Self::find_sockets()?;
+        tracing::debug!(count = sockets.len(), "kitty sockets found");
+        Ok(Self { sockets })
     }
 
-    /// Find the kitty remote control socket.
-    fn find_socket() -> Result<String> {
+    /// Find all kitty remote control sockets.
+    fn find_sockets() -> Result<Vec<String>> {
+        let mut sockets = Vec::new();
+
         // 1. Check KITTY_LISTEN_ON env var
         if let Ok(listen_on) = std::env::var("KITTY_LISTEN_ON") {
             if !listen_on.is_empty() {
-                return Ok(listen_on);
+                sockets.push(listen_on);
             }
         }
 
@@ -39,29 +42,49 @@ impl KittyController {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("kitty-") {
                         let socket_path = format!("unix:{}", path.display());
-                        return Ok(socket_path);
+                        if !sockets.contains(&socket_path) {
+                            sockets.push(socket_path);
+                        }
                     }
                 }
             }
         }
 
-        bail!("no kitty socket found — is kitty running with allow_remote_control enabled?")
+        if sockets.is_empty() {
+            bail!("no kitty socket found — is kitty running with allow_remote_control enabled?");
+        }
+
+        Ok(sockets)
     }
 
-    /// Build the base `kitty @` command with the socket target.
-    fn base_cmd(&self) -> Command {
+    /// Get the first socket (used for spawn, send, kill — targeted operations).
+    fn primary_socket(&self) -> &str {
+        &self.sockets[0]
+    }
+
+    /// Build a `kitty @` command targeting a specific socket.
+    fn cmd_for(&self, socket: &str) -> Command {
         let mut cmd = Command::new("kitty");
-        cmd.arg("@").arg("--to").arg(&self.socket);
+        cmd.arg("@").arg("--to").arg(socket);
         cmd
+    }
+
+    /// Build the base `kitty @` command with the primary socket.
+    fn base_cmd(&self) -> Command {
+        self.cmd_for(self.primary_socket())
     }
 
     /// Spawn a new kitty OS window running the given command.
     /// Returns the kitty window id.
-    pub async fn spawn(&self, title: &str, command: &[&str]) -> Result<u64> {
+    pub async fn spawn(&self, title: &str, command: &[&str], cwd: Option<&str>) -> Result<u64> {
         let mut cmd = self.base_cmd();
         cmd.arg("launch")
             .arg("--type=os-window")
             .arg(format!("--title={title}"));
+
+        if let Some(dir) = cwd {
+            cmd.arg(format!("--cwd={dir}"));
+        }
 
         // Add -- separator then the command args
         cmd.arg("--");
@@ -131,25 +154,31 @@ impl KittyController {
         Ok(())
     }
 
-    /// List all kitty windows as JSON.
+    /// List all kitty windows across ALL sockets, merged into one JSON array.
     pub async fn list_windows(&self) -> Result<serde_json::Value> {
-        let mut cmd = self.base_cmd();
-        cmd.arg("ls");
+        let mut all_windows = Vec::new();
 
-        let output = cmd
-            .output()
-            .await
-            .context("failed to run kitty @ ls")?;
+        for socket in &self.sockets {
+            let mut cmd = self.cmd_for(socket);
+            cmd.arg("ls");
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("kitty @ ls failed: {stderr}");
+            let output = cmd.output().await;
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(arr) = json.as_array() {
+                            all_windows.extend(arr.clone());
+                        }
+                    }
+                }
+                _ => {
+                    tracing::debug!(socket = %socket, "failed to query kitty socket, skipping");
+                }
+            }
         }
 
-        let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .context("failed to parse kitty @ ls JSON")?;
-
-        Ok(json)
+        Ok(serde_json::Value::Array(all_windows))
     }
 
     /// Close a kitty window.

@@ -6,6 +6,7 @@ members = [
     "crates/thermal-launch",
     "crates/thermal-notify",
     "crates/thermal-lock",
+    "crates/thermal-monitor",
     "crates/thermal-core",
 ]
 

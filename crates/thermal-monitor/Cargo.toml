@@ -1,0 +1,12 @@
+[package]
+name = "thermal-monitor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thermal-core = { path = "../thermal-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -28,6 +28,7 @@ use wayland_client::{
 };
 
 use crate::layout::BarLayout;
+use crate::modules::claude_module::ClaudeModule;
 use crate::modules::clock::ClockModule;
 use crate::modules::metrics_module::MetricsModule;
 use crate::renderer::Renderer;
@@ -298,6 +299,7 @@ pub async fn run() -> anyhow::Result<()> {
     // Phase 3: Render loop — poll metrics, build layout, render, dispatch events.
     let metrics_module = MetricsModule::new();
     let clock_module = ClockModule::new();
+    let mut claude_module = ClaudeModule::new();
     let mut sparklines = SparklineSet::new();
     let mut last_metrics = Instant::now();
 
@@ -332,9 +334,10 @@ pub async fn run() -> anyhow::Result<()> {
         let metric_outputs = metrics_module.render();
         layout.left = metric_outputs;
 
-        // Right zone: clock + date.
-        let clock_outputs = clock_module.render();
-        layout.right = clock_outputs;
+        // Right zone: Claude status + clock + date.
+        let mut right_outputs = claude_module.render();
+        right_outputs.extend(clock_module.render());
+        layout.right = right_outputs;
 
         // Update sparklines once per second.
         if last_metrics.elapsed() >= Duration::from_secs(1) {

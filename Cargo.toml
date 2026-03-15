@@ -7,6 +7,7 @@ members = [
     "crates/thermal-notify",
     "crates/thermal-lock",
     "crates/thermal-monitor",
+    "crates/thermal-audio",
     "crates/thermal-core",
 ]
 
@@ -58,3 +59,4 @@ anyhow = "1"
 pollster = "0.3"
 raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
+md-5 = "0.10"

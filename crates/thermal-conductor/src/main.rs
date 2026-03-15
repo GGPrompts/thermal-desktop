@@ -5,7 +5,7 @@
 
 mod kitty;
 
-use anyhow::Result;
+use anyhow::{Result, Context, bail};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
@@ -60,6 +60,27 @@ enum Commands {
         /// Kitty window id to close
         window_id: u64,
     },
+
+    /// Toggle TTS audio announcements on/off
+    Audio {
+        #[command(subcommand)]
+        action: AudioAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AudioAction {
+    /// Start TTS audio daemon
+    On,
+    /// Stop TTS audio daemon
+    Off,
+    /// Check if audio daemon is running
+    Status,
+    /// Test TTS with a message
+    Test {
+        /// Text to speak
+        text: String,
+    },
 }
 
 #[tokio::main]
@@ -83,6 +104,7 @@ async fn main() -> Result<()> {
         Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
         Commands::List { json } => cmd_list(json).await,
         Commands::Kill { window_id } => cmd_kill(window_id).await,
+        Commands::Audio { action } => cmd_audio(action).await,
     }
 }
 
@@ -240,6 +262,68 @@ async fn cmd_kill(window_id: u64) -> Result<()> {
 
     kitty.close_window(&match_arg).await?;
     println!("Therminal {window_id} closed.");
+    Ok(())
+}
+
+/// Toggle thermal-audio daemon.
+async fn cmd_audio(action: AudioAction) -> Result<()> {
+    match action {
+        AudioAction::On => {
+            // Check if already running
+            let check = tokio::process::Command::new("pgrep")
+                .arg("-x")
+                .arg("thermal-audio")
+                .output()
+                .await?;
+            if check.status.success() {
+                println!("Audio daemon already running.");
+                return Ok(());
+            }
+            tokio::process::Command::new("thermal-audio")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("failed to start thermal-audio — is it installed?")?;
+            println!("Audio daemon started.");
+        }
+        AudioAction::Off => {
+            let result = tokio::process::Command::new("pkill")
+                .arg("-x")
+                .arg("thermal-audio")
+                .output()
+                .await?;
+            if result.status.success() {
+                println!("Audio daemon stopped.");
+            } else {
+                println!("Audio daemon not running.");
+            }
+        }
+        AudioAction::Status => {
+            let check = tokio::process::Command::new("pgrep")
+                .arg("-x")
+                .arg("thermal-audio")
+                .output()
+                .await?;
+            if check.status.success() {
+                let pid = String::from_utf8_lossy(&check.stdout).trim().to_string();
+                println!("Audio daemon running (pid: {pid}).");
+            } else {
+                println!("Audio daemon not running.");
+            }
+        }
+        AudioAction::Test { text } => {
+            let status = tokio::process::Command::new("thermal-audio")
+                .arg("--test")
+                .arg(&text)
+                .status()
+                .await
+                .context("failed to run thermal-audio --test")?;
+            if !status.success() {
+                bail!("thermal-audio test failed");
+            }
+        }
+    }
     Ok(())
 }
 

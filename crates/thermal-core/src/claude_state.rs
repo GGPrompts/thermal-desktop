@@ -26,6 +26,25 @@ impl Default for ClaudeStatus {
     }
 }
 
+/// Tool argument details from the Claude state file.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ToolArgs {
+    pub file_path: Option<String>,
+    pub command: Option<String>,
+    pub pattern: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Tool event details from the Claude state file.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ToolDetails {
+    pub event: Option<String>,
+    pub tool: Option<String>,
+    pub args: Option<ToolArgs>,
+}
+
 /// State of a single Claude session, deserialized from a JSON state file.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -37,6 +56,10 @@ pub struct ClaudeSessionState {
     pub context_percent: Option<f32>,
     pub working_dir: Option<String>,
     pub last_updated: Option<String>,
+    pub details: Option<ToolDetails>,
+    pub hook_type: Option<String>,
+    pub tmux_pane: Option<String>,
+    pub pid: Option<u32>,
 }
 
 impl Default for ClaudeSessionState {
@@ -49,6 +72,10 @@ impl Default for ClaudeSessionState {
             context_percent: None,
             working_dir: None,
             last_updated: None,
+            details: None,
+            hook_type: None,
+            tmux_pane: None,
+            pid: None,
         }
     }
 }

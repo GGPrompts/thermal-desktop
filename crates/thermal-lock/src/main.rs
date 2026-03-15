@@ -21,7 +21,7 @@ use smithay_client_toolkit::{
 };
 use std::{ptr::NonNull, time::{Instant, SystemTime, UNIX_EPOCH}};
 use thermal_core::ThermalPalette;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 use zeroize::Zeroizing;
 use wayland_client::{
     globals::registry_queue_init,
@@ -714,8 +714,47 @@ struct LockApp {
 }
 
 fn main() {
+    // Install a panic hook that logs to the log file instead of stderr
+    std::panic::set_hook(Box::new(|info| {
+        let path = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{}/thermal-lock.log", path))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "PANIC: {}", info);
+        }
+        eprintln!("thermal-lock PANIC: {}", info);
+    }));
+
+    // catch_unwind so a panic doesn't crash the session lock protocol
+    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_lock)) {
+        eprintln!("thermal-lock caught panic: {:?}", e);
+    }
+}
+
+fn run_lock() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(|| {
+            // Log to file so we can debug crashes launched by hypridle
+            use std::fs::OpenOptions;
+            let path = std::env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| "/tmp".into());
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(format!("{}/thermal-lock.log", path))
+                .unwrap_or_else(|_| OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open("/tmp/thermal-lock.log")
+                    .expect("cannot open any log file"))
+        })
         .init();
 
     let username = auth::current_username();
@@ -767,14 +806,28 @@ fn main() {
     );
 
     loop {
-        event_queue.blocking_dispatch(&mut app).expect("Wayland event dispatch failed");
+        if let Err(e) = event_queue.blocking_dispatch(&mut app) {
+            error!("Wayland event dispatch failed: {:?}", e);
+            // Try to unlock gracefully so we don't leave the session stuck
+            if let Some(lock) = &app.session_lock {
+                lock.unlock();
+            }
+            break;
+        }
 
         if app.exit {
-            // Roundtrip to ensure the compositor has fully processed the
-            // unlock before we tear down the connection.  Without this,
-            // Hyprland may not re-send wl_keyboard::enter to the previously
-            // focused surface, leaving existing terminals unable to receive
-            // keyboard input.
+            // Drop lock surfaces BEFORE the roundtrip so the compositor
+            // sees both the unlock and surface destruction in the same
+            // synchronisation window.  Without this, Hyprland may not
+            // re-send wl_keyboard::enter to the previously focused surface,
+            // leaving existing windows unable to receive keyboard input.
+            app.wgpu_surfaces.clear();
+            app.pending_surfaces.clear();
+
+            // Two roundtrips: first lets the compositor process the surface
+            // destruction + unlock, second ensures any resulting focus
+            // events have been dispatched.
+            let _ = event_queue.roundtrip(&mut app);
             let _ = event_queue.roundtrip(&mut app);
             break;
         }
@@ -848,6 +901,7 @@ impl SessionLockHandler for LockApp {
         _serial: u32,
     ) {
         let (width, height) = configure.new_size;
+        info!("configure: surface {}x{}", width, height);
         if width == 0 || height == 0 {
             return;
         }
@@ -863,7 +917,7 @@ impl SessionLockHandler for LockApp {
             let raw_surface_ptr: *mut std::ffi::c_void = lock_surface.wl_surface().id().as_ptr().cast();
 
             let wgpu_surface = unsafe {
-                self.wgpu_instance
+                match self.wgpu_instance
                     .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
                         raw_display_handle: RawDisplayHandle::Wayland(
                             WaylandDisplayHandle::new(NonNull::new(self.display_ptr).unwrap()),
@@ -871,22 +925,47 @@ impl SessionLockHandler for LockApp {
                         raw_window_handle: RawWindowHandle::Wayland(
                             WaylandWindowHandle::new(NonNull::new(raw_surface_ptr).unwrap()),
                         ),
-                    })
-                    .expect("wgpu surface creation failed")
+                    }) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("wgpu surface creation failed for {}x{}: {:?}", width, height, e);
+                        // Put it back so the protocol isn't violated
+                        self.pending_surfaces.push(lock_surface);
+                        return;
+                    }
+                }
             };
 
-            let adapter = pollster::block_on(self.wgpu_instance.request_adapter(
+            let adapter = match pollster::block_on(self.wgpu_instance.request_adapter(
                 &wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::HighPerformance,
                     compatible_surface: Some(&wgpu_surface),
                     force_fallback_adapter: false,
                 },
-            ))
-            .expect("no suitable wgpu adapter for lock surface");
+            )) {
+                Some(a) => {
+                    info!("adapter: {:?}", a.get_info());
+                    a
+                }
+                None => {
+                    error!("no suitable wgpu adapter for lock surface {}x{}", width, height);
+                    self.pending_surfaces.push(lock_surface);
+                    return;
+                }
+            };
 
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&Default::default(), None))
-                    .expect("request_device failed");
+            let (device, queue) = match pollster::block_on(
+                adapter.request_device(&Default::default(), None),
+            ) {
+                Ok(dq) => dq,
+                Err(e) => {
+                    error!("request_device failed for {}x{}: {:?}", width, height, e);
+                    self.pending_surfaces.push(lock_surface);
+                    return;
+                }
+            };
+
+            info!("wgpu device ready for surface {}x{}", width, height);
 
             let caps = wgpu_surface.get_capabilities(&adapter);
             let format = caps

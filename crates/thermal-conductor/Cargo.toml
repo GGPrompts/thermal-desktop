@@ -2,42 +2,17 @@
 name = "thermal-conductor"
 version.workspace = true
 edition.workspace = true
-default-run = "thermal-conductor"
 
 [[bin]]
 name = "thermal-conductor"
 path = "src/main.rs"
 
-[[bin]]
-name = "thermal-ctl"
-path = "src/bin/thermal_ctl.rs"
-
-[features]
-default = []
-audio = ["rodio"]
-
 [dependencies]
 thermal-core = { path = "../thermal-core" }
-alacritty_terminal = { workspace = true }
-vte = { workspace = true }
-nix = { workspace = true }
-wgpu = { workspace = true }
-glyphon = { workspace = true }
-cosmic-text = { workspace = true }
-winit = { workspace = true }
-smithay-client-toolkit = { workspace = true }
-wayland-client = { workspace = true, features = ["system"] }
-raw-window-handle = { workspace = true }
-bytemuck = { workspace = true }
 tokio = { workspace = true }
-notify = { workspace = true }
-zbus = { workspace = true }
-rodio = { workspace = true, optional = true }
-clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror = { workspace = true }
 anyhow = { workspace = true }
-pollster = { workspace = true }

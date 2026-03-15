@@ -1,613 +1,233 @@
-//! Thermal Conductor — Native GPU-rendered agent dashboard.
+//! Thermal Conductor — kitty remote control CLI for orchestrating Claude agent therminals.
 //!
-//! A wall of terminal panes, each running a Claude agent session.
-//! Thermal state indicators, PipeWire audio cues, git diff awareness.
-//!
-//! Uses smithay-client-toolkit for a Wayland toplevel surface and wgpu for
-//! GPU-accelerated rendering of tmux pane captures.
+//! Spawns, tracks, polls, and sends to kitty windows running Claude sessions.
+//! Hyprland auto-tiles the spawned OS windows.
 
-mod ansi;
-mod audio;
-mod capture;
-mod conductor;
-mod dbus;
-mod git_watcher;
-mod hud;
-mod input;
-mod layout;
-mod renderer;
-mod session;
-mod state_detector;
-mod tmux;
+mod kitty;
 
-use std::time::{Duration, Instant};
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
-use smithay_client_toolkit as sctk;
+use kitty::KittyController;
 
-use sctk::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_seat,
-    output::{OutputHandler, OutputState},
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    seat::{
-        Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+/// Thermal Conductor — orchestrate Claude agent therminals via kitty remote control.
+#[derive(Parser)]
+#[command(name = "thermal-conductor", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Spawn new kitty therminals running Claude
+    Spawn {
+        /// Number of therminals to spawn
+        #[arg(short = 'n', long, default_value_t = 1)]
+        count: u32,
+
+        /// Project directory to start Claude in
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Title prefix for spawned windows
+        #[arg(short, long, default_value = "Therminal")]
+        title: String,
     },
-    shell::{
-        WaylandSurface,
-        xdg::{XdgShell, window::{Window, WindowConfigure, WindowHandler, WindowDecorations}},
+
+    /// Show status of all tracked therminals with Claude state
+    Status,
+
+    /// Send text to a therminal
+    Send {
+        /// Kitty window id to send to
+        window_id: u64,
+
+        /// Text/prompt to send
+        prompt: String,
     },
-};
-use wayland_client::{
-    Connection, Proxy, QueueHandle,
-    globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
-};
 
-use thermal_core::{ConductorConfig, Layout};
+    /// List all kitty windows
+    List,
 
-// ── Wayland application state ─────────────────────────────────────────────────
-
-/// State for the thermal-conductor Wayland client.
-struct ConductorState {
-    registry_state: RegistryState,
-    seat_state: SeatState,
-    output_state: OutputState,
-
-    /// The XDG toplevel window.
-    window: Window,
-    /// Current surface dimensions.
-    width: u32,
-    height: u32,
-    /// Whether we have received the first configure.
-    configured: bool,
-    /// Set to true to exit the event loop.
-    exit: bool,
-
-    /// Pending key events to send to tmux.
-    /// Each entry is (keys_string, literal) — if literal is true, use `send-keys -l`.
-    pending_keys: Vec<(String, bool)>,
-    /// Current keyboard modifiers.
-    modifiers: Modifiers,
-    /// Which pane has keyboard focus.
-    focused_pane: usize,
-    /// Last known cursor position.
-    cursor_pos: (f64, f64),
-    /// Pane index that was clicked (processed in render loop where layout is available).
-    click_pending: bool,
+    /// Kill (close) a therminal
+    Kill {
+        /// Kitty window id to close
+        window_id: u64,
+    },
 }
-
-// ── sctk handler impls ───────────────────────────────────────────────────────
-
-impl CompositorHandler for ConductorState {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
-    ) {
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wl_output::Transform,
-    ) {
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for ConductorState {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-
-    fn new_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-
-    fn update_output(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-
-    fn output_destroyed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl WindowHandler for ConductorState {
-    fn request_close(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _window: &Window,
-    ) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _window: &Window,
-        configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        if let Some(w) = configure.new_size.0 {
-            self.width = w.get();
-        }
-        if let Some(h) = configure.new_size.1 {
-            self.height = h.get();
-        }
-
-        tracing::debug!(
-            width = self.width,
-            height = self.height,
-            "window configured"
-        );
-
-        if !self.configured {
-            self.configured = true;
-            self.window.wl_surface().commit();
-        }
-    }
-}
-
-impl SeatHandler for ConductorState {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-
-    fn new_capability(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Keyboard {
-            if let Err(e) = self.seat_state.get_keyboard(qh, &seat, None) {
-                tracing::warn!("failed to get keyboard: {e}");
-            }
-        }
-        if capability == Capability::Pointer {
-            if let Err(e) = self.seat_state.get_pointer(qh, &seat) {
-                tracing::warn!("failed to get pointer: {e}");
-            }
-        }
-    }
-
-    fn remove_capability(
-        &mut self,
-        _conn: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_seat::WlSeat,
-        _capability: Capability,
-    ) {
-    }
-
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-}
-
-impl KeyboardHandler for ConductorState {
-    fn enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
-        _serial: u32,
-        _raw: &[u32],
-        _keysyms: &[Keysym],
-    ) {
-    }
-
-    fn leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
-        _serial: u32,
-    ) {
-    }
-
-    fn press_key(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        event: KeyEvent,
-    ) {
-        // Ctrl-Q: quit
-        if self.modifiers.ctrl && event.keysym == Keysym::q {
-            self.exit = true;
-            return;
-        }
-
-        // Map keysym to tmux key name (not raw escape sequences).
-        // tmux send-keys expects key names for special keys, and -l for literal text.
-        let key_entry: Option<(String, bool)> = match event.keysym {
-            Keysym::Return | Keysym::KP_Enter => Some(("Enter".to_owned(), false)),
-            Keysym::BackSpace => Some(("BSpace".to_owned(), false)),
-            Keysym::Tab => Some(("Tab".to_owned(), false)),
-            Keysym::Escape => Some(("Escape".to_owned(), false)),
-            Keysym::Up => Some(("Up".to_owned(), false)),
-            Keysym::Down => Some(("Down".to_owned(), false)),
-            Keysym::Right => Some(("Right".to_owned(), false)),
-            Keysym::Left => Some(("Left".to_owned(), false)),
-            Keysym::Home => Some(("Home".to_owned(), false)),
-            Keysym::End => Some(("End".to_owned(), false)),
-            Keysym::Delete => Some(("DC".to_owned(), false)),
-            Keysym::Page_Up => Some(("PageUp".to_owned(), false)),
-            Keysym::Page_Down => Some(("PageDown".to_owned(), false)),
-            _ => {
-                if self.modifiers.ctrl {
-                    // Ctrl+letter → send as C-<letter> tmux key name.
-                    if let Some(ref utf8) = event.utf8 {
-                        if utf8.len() == 1 {
-                            let ch = utf8.chars().next().unwrap();
-                            if ch.is_ascii_alphabetic() {
-                                Some((format!("C-{}", ch.to_ascii_lowercase()), false))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else if let Some(ref utf8) = event.utf8 {
-                    // Regular text — send literally.
-                    if !utf8.is_empty() {
-                        Some((utf8.clone(), true))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-        };
-
-        if let Some(entry) = key_entry {
-            tracing::info!(keys = %entry.0, literal = entry.1, "key pressed");
-            self.pending_keys.push(entry);
-        }
-    }
-
-    fn release_key(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        _event: KeyEvent,
-    ) {
-    }
-
-    fn update_modifiers(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &wl_keyboard::WlKeyboard,
-        _serial: u32,
-        modifiers: Modifiers,
-        _layout: u32,
-    ) {
-        self.modifiers = modifiers;
-    }
-}
-
-impl PointerHandler for ConductorState {
-    fn pointer_frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
-    ) {
-        for event in events {
-            match event.kind {
-                PointerEventKind::Motion { .. } => {
-                    self.cursor_pos = event.position;
-                }
-                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
-                    self.cursor_pos = event.position;
-                    self.click_pending = true;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-// ── sctk delegate macros ──────────────────────────────────────────────────────
-
-delegate_compositor!(ConductorState);
-delegate_output!(ConductorState);
-delegate_seat!(ConductorState);
-delegate_registry!(ConductorState);
-sctk::delegate_keyboard!(ConductorState);
-sctk::delegate_pointer!(ConductorState);
-
-sctk::delegate_xdg_shell!(ConductorState);
-sctk::delegate_xdg_window!(ConductorState);
-
-impl ProvidesRegistryState for ConductorState {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState, SeatState];
-}
-
-// ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("thermal_conductor=debug".parse().unwrap()),
+                .add_directive("thermal_conductor=info".parse().unwrap()),
         )
         .init();
 
-    tracing::info!("THERMAL CONDUCTOR v{} — Initializing...", env!("CARGO_PKG_VERSION"));
+    let cli = Cli::parse();
 
-    // ── Session setup ─────────────────────────────────────────────────────────
-    let config = ConductorConfig::default();
-    let session_mgr = session::SessionManager::start(config).map_err(|e| {
-        anyhow::anyhow!("SessionManager error: {e}")
-    })?;
+    match cli.command {
+        Commands::Spawn {
+            count,
+            project,
+            title,
+        } => cmd_spawn(count, project, title).await,
+        Commands::Status => cmd_status().await,
+        Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
+        Commands::List => cmd_list().await,
+        Commands::Kill { window_id } => cmd_kill(window_id).await,
+    }
+}
 
-    tracing::info!(
-        session = %session_mgr.session.session_name,
-        panes = session_mgr.pane_ids().len(),
-        "tmux session ready"
+/// Spawn N therminals running Claude.
+async fn cmd_spawn(count: u32, project: Option<String>, title: String) -> Result<()> {
+    let kitty = KittyController::new()?;
+
+    println!("Spawning {count} therminal{}...", if count == 1 { "" } else { "s" });
+
+    for i in 0..count {
+        let window_title = if count == 1 {
+            title.clone()
+        } else {
+            format!("{title} {}", i + 1)
+        };
+
+        let mut command_args: Vec<&str> = vec!["claude"];
+
+        // If a project path is given, start claude with --project
+        // We need to own the string for the borrow to work
+        let project_flag;
+        if let Some(ref p) = project {
+            project_flag = p.clone();
+            command_args.push("--project");
+            command_args.push(&project_flag);
+        }
+
+        let window_id = kitty.spawn(&window_title, &command_args).await?;
+        println!("  Therminal \"{}\" spawned (window id: {})", window_title, window_id);
+    }
+
+    println!(
+        "{count} therminal{} active.",
+        if count == 1 { "" } else { "s" }
     );
+    Ok(())
+}
 
-    // ── Wayland connection ────────────────────────────────────────────────────
-    let conn = Connection::connect_to_env()?;
-    let (globals, mut event_queue) = registry_queue_init(&conn)?;
-    let qh = event_queue.handle();
+/// Show status of all therminals by cross-referencing kitty windows with Claude state.
+async fn cmd_status() -> Result<()> {
+    let kitty = KittyController::new()?;
 
-    // Bind Wayland globals.
-    let compositor = CompositorState::bind(&globals, &qh)
-        .map_err(|e| anyhow::anyhow!("wl_compositor not available: {e}"))?;
-    let xdg_shell = XdgShell::bind(&globals, &qh)
-        .map_err(|e| anyhow::anyhow!("xdg_wm_base not available: {e}"))?;
+    // Get kitty windows
+    let windows_json = kitty.list_windows().await?;
 
-    // Create a toplevel window.
-    let wl_surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(
-        wl_surface,
-        WindowDecorations::RequestServer,
-        &qh,
-    );
-    window.set_title("THERMAL CONDUCTOR".to_string());
-    window.set_app_id("thermal-conductor".to_string());
-    window.commit();
-
-    let default_width = 1920u32;
-    let default_height = 1080u32;
-
-    let mut state = ConductorState {
-        registry_state: RegistryState::new(&globals),
-        seat_state: SeatState::new(&globals, &qh),
-        output_state: OutputState::new(&globals, &qh),
-        window,
-        width: default_width,
-        height: default_height,
-        configured: false,
-        exit: false,
-        pending_keys: Vec::new(),
-        modifiers: Modifiers::default(),
-        focused_pane: 0,
-        cursor_pos: (0.0, 0.0),
-        click_pending: false,
+    // Get Claude session states
+    let sessions: Vec<ClaudeSessionState> = match ClaudeStatePoller::new() {
+        Ok(poller) => poller.get_all(),
+        Err(e) => {
+            tracing::warn!("could not read Claude state: {e}");
+            Vec::new()
+        }
     };
 
-    tracing::info!("waiting for compositor configure...");
+    // Collect all kitty windows across OS windows and tabs
+    let mut window_count = 0u32;
 
-    // Phase 1: Block until the compositor sends the first configure event.
-    while !state.configured {
-        event_queue.blocking_dispatch(&mut state)?;
-        if state.exit {
-            tracing::info!("exit before configure");
-            let _ = session_mgr.shutdown(false);
-            return Ok(());
-        }
-    }
+    if let Some(os_windows) = windows_json.as_array() {
+        for os_window in os_windows {
+            if let Some(tabs) = os_window.get("tabs").and_then(|t| t.as_array()) {
+                for tab in tabs {
+                    if let Some(windows) = tab.get("windows").and_then(|w| w.as_array()) {
+                        for window in windows {
+                            let id = window.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let title = window
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("untitled");
+                            let pid = window.get("pid").and_then(|v| v.as_u64());
+                            let is_focused = window
+                                .get("is_focused")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
 
-    // Phase 2: Initialize the wgpu renderer now that we know the surface size.
-    let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
-    let surface_ptr = state.window.wl_surface().id().as_ptr().cast::<std::ffi::c_void>()
-        as *mut std::ffi::c_void;
+                            // Try to match with a Claude session by PID
+                            let claude_state = pid.and_then(|window_pid| {
+                                sessions.iter().find(|s| {
+                                    s.pid.map_or(false, |sp| sp as u64 == window_pid)
+                                })
+                            });
 
-    let mut renderer = renderer::WgpuState::new_from_wayland(
-        display_ptr,
-        surface_ptr,
-        state.width,
-        state.height,
-    )
-    .await?;
+                            let status_str = match claude_state {
+                                Some(state) => format_claude_status(&state.status),
+                                None => "unknown".to_string(),
+                            };
 
-    tracing::info!(
-        width = state.width,
-        height = state.height,
-        "renderer initialized"
-    );
+                            let tool_str = claude_state
+                                .and_then(|s| s.current_tool.as_deref())
+                                .unwrap_or("-");
 
-    // Phase 3: Create the Conductor and enter the render loop.
-    let layout_engine = layout::LayoutEngine::new(
-        Layout::Grid,
-        state.width as f32,
-        state.height as f32,
-    );
-    let mut cond = conductor::Conductor::new(session_mgr, layout_engine);
-    cond.layout.pane_count = cond.session.pane_ids().len();
+                            let context_str = claude_state
+                                .and_then(|s| s.context_percent)
+                                .map(|p| format!("{:.0}%", p))
+                                .unwrap_or_else(|| "-".to_string());
 
-    // Create text renderer for pane content.
-    let mut text_renderer = renderer::TextRenderer::new(
-        &renderer.device,
-        &renderer.queue,
-        renderer.surface_config.format,
-        state.width,
-        state.height,
-    );
+                            let focus_marker = if is_focused { " *" } else { "" };
 
-    tracing::info!(
-        panes = cond.session.pane_ids().len(),
-        "entering render loop"
-    );
-
-    let target_frame_time = Duration::from_millis(16); // ~60 fps
-    let poll_interval = Duration::from_millis(100); // poll tmux at ~10 Hz
-    let mut last_poll = Instant::now();
-
-    loop {
-        let frame_start = Instant::now();
-
-        // Non-blocking dispatch of pending Wayland events.
-        event_queue.dispatch_pending(&mut state)?;
-        conn.flush()?;
-        if let Some(guard) = conn.prepare_read() {
-            let _ = guard.read();
-            event_queue.dispatch_pending(&mut state)?;
-        }
-
-        if state.exit {
-            tracing::info!("exit requested — shutting down");
-            break;
-        }
-
-        // Handle resize.
-        if renderer.width != state.width || renderer.height != state.height {
-            renderer.resize(state.width, state.height);
-            text_renderer.set_resolution(&renderer.queue, state.width, state.height);
-            cond.layout.window_width = state.width as f32;
-            cond.layout.window_height = state.height as f32;
-        }
-
-        // Handle click-to-focus.
-        if state.click_pending {
-            state.click_pending = false;
-            let (cx, cy) = state.cursor_pos;
-            if let Some(idx) = cond.layout.pane_at(cx as f32, cy as f32) {
-                state.focused_pane = idx;
-                tracing::info!(pane = idx, "focus changed");
-            }
-        }
-
-        // Send pending key events to the focused tmux pane.
-        if !state.pending_keys.is_empty() {
-            let pane_ids = cond.session.pane_ids().to_owned();
-            let focused = state.focused_pane.min(pane_ids.len().saturating_sub(1));
-            if let Some(pane_id) = pane_ids.get(focused) {
-                for (keys, literal) in state.pending_keys.drain(..) {
-                    let result = if literal {
-                        cond.session.session.send_keys_literal(pane_id, &keys)
-                    } else {
-                        cond.session.session.send_keys(pane_id, &keys)
-                    };
-                    if let Err(e) = result {
-                        tracing::warn!("send_keys error: {e}");
+                            println!(
+                                "  [{id}] {title}{focus_marker}  |  status: {status_str}  |  tool: {tool_str}  |  context: {context_str}"
+                            );
+                            window_count += 1;
+                        }
                     }
                 }
-            } else {
-                state.pending_keys.clear();
             }
-        }
-
-        // Poll tmux panes at the poll interval.
-        if last_poll.elapsed() >= poll_interval {
-            let dirty_count = cond.poll();
-            if dirty_count > 0 {
-                tracing::trace!(dirty = dirty_count, "panes updated");
-            }
-            last_poll = Instant::now();
-        }
-
-        // Compute layout rects and render.
-        let rects = cond.layout.compute_rects();
-        // Clear dirty flags.
-        for d in cond.dirty.iter_mut() {
-            *d = false;
-        }
-
-        match renderer.render(&cond.captures, &rects, &mut text_renderer) {
-            Ok(()) => {}
-            Err(wgpu::SurfaceError::Lost) => {
-                renderer.resize(state.width, state.height);
-            }
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                tracing::error!("wgpu: out of memory");
-                break;
-            }
-            Err(e) => {
-                tracing::warn!("render error: {e}");
-            }
-        }
-
-        // Commit the surface so the compositor displays the frame.
-        state.window.wl_surface().commit();
-
-        // Sleep to maintain target frame rate.
-        let elapsed = frame_start.elapsed();
-        if elapsed < target_frame_time {
-            std::thread::sleep(target_frame_time - elapsed);
         }
     }
 
-    // Leave the tmux session alive so the user can `tmux a` into it.
-    let _ = cond.session.shutdown(false);
-
+    println!("\n{window_count} therminal{} tracked.", if window_count == 1 { "" } else { "s" });
     Ok(())
+}
+
+/// Send text/prompt to a specific therminal.
+async fn cmd_send(window_id: u64, prompt: String) -> Result<()> {
+    let kitty = KittyController::new()?;
+    let match_arg = format!("id:{window_id}");
+
+    kitty.send_text(&match_arg, &prompt).await?;
+    println!("Sent to therminal {window_id}.");
+    Ok(())
+}
+
+/// List all kitty windows.
+async fn cmd_list() -> Result<()> {
+    let kitty = KittyController::new()?;
+    let windows_json = kitty.list_windows().await?;
+
+    // Pretty-print the JSON
+    let pretty = serde_json::to_string_pretty(&windows_json)?;
+    println!("{pretty}");
+    Ok(())
+}
+
+/// Kill (close) a therminal.
+async fn cmd_kill(window_id: u64) -> Result<()> {
+    let kitty = KittyController::new()?;
+    let match_arg = format!("id:{window_id}");
+
+    kitty.close_window(&match_arg).await?;
+    println!("Therminal {window_id} closed.");
+    Ok(())
+}
+
+/// Format a ClaudeStatus for display.
+fn format_claude_status(status: &ClaudeStatus) -> String {
+    match status {
+        ClaudeStatus::Idle => "idle".to_string(),
+        ClaudeStatus::Processing => "processing".to_string(),
+        ClaudeStatus::ToolUse => "tool_use".to_string(),
+        ClaudeStatus::AwaitingInput => "awaiting_input".to_string(),
+    }
 }

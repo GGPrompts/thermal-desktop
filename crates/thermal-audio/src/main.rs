@@ -127,6 +127,7 @@ impl AudioManager {
     fn generate_tts(&self, voice: &str, text: &str) -> Result<PathBuf> {
         let mut hasher = Md5::new();
         hasher.update(voice.as_bytes());
+        hasher.update(b"+20%");
         hasher.update(text.as_bytes());
         let hash = format!("{:x}", hasher.finalize());
 
@@ -144,6 +145,8 @@ impl AudioManager {
         let status = std::process::Command::new("edge-tts")
             .arg("--voice")
             .arg(voice)
+            .arg("--rate")
+            .arg("+20%")
             .arg("--text")
             .arg(text)
             .arg("--write-media")
@@ -225,12 +228,15 @@ fn transition_text(
         (ClaudeStatus::Idle, ClaudeStatus::Processing) => {
             Some(format!("{session_label} started working"))
         }
-        (ClaudeStatus::Processing, ClaudeStatus::ToolUse) => {
-            let tool = session
-                .current_tool
-                .as_deref()
-                .unwrap_or("a tool");
-            Some(format!("{session_label} using {tool}"))
+        (ClaudeStatus::Processing, ClaudeStatus::ToolUse)
+        | (ClaudeStatus::ToolUse, ClaudeStatus::ToolUse) => {
+            let tool = session.current_tool.as_deref().unwrap_or("a tool");
+            let detail = tool_detail(tool, session);
+            if let Some(d) = detail {
+                Some(format!("{session_label}: {d}"))
+            } else {
+                Some(format!("{session_label} using {tool}"))
+            }
         }
         (_, ClaudeStatus::AwaitingInput) => {
             Some(format!("{session_label} needs input"))
@@ -243,10 +249,65 @@ fn transition_text(
     }
 }
 
+/// Extract a human-friendly description of what a tool is doing.
+fn tool_detail(tool: &str, session: &ClaudeSessionState) -> Option<String> {
+    let args = session.details.as_ref()?.args.as_ref()?;
+
+    match tool {
+        "Read" => {
+            let filename = basename(args.file_path.as_deref()?);
+            Some(format!("reading {filename}"))
+        }
+        "Write" => {
+            let filename = basename(args.file_path.as_deref()?);
+            Some(format!("writing {filename}"))
+        }
+        "Edit" => {
+            let filename = basename(args.file_path.as_deref()?);
+            Some(format!("editing {filename}"))
+        }
+        "Bash" => {
+            let desc = args.description.as_deref()
+                .or_else(|| args.command.as_deref().map(|c| if c.len() > 40 { &c[..40] } else { c }));
+            desc.map(|d| format!("running {d}"))
+        }
+        "Glob" | "Grep" => {
+            let pat = args.pattern.as_deref()?;
+            Some(format!("searching {pat}"))
+        }
+        "Agent" | "Task" => {
+            let desc = args.description.as_deref()?;
+            Some(format!("agent: {desc}"))
+        }
+        "WebFetch" | "WebSearch" => {
+            Some("web search".to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Get the filename from a path.
+fn basename(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+}
+
 /// Derive a short human-readable label from a session.
+/// Prefers the project folder name from working_dir, falls back to short session ID.
 fn session_label(session: &ClaudeSessionState) -> String {
+    // Try to extract project folder name from working_dir
+    if let Some(ref dir) = session.working_dir {
+        if let Some(name) = std::path::Path::new(dir).file_name() {
+            if let Some(s) = name.to_str() {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
     if !session.session_id.is_empty() {
-        // Use first 8 chars of the session id for brevity.
         let short = if session.session_id.len() > 8 {
             &session.session_id[..8]
         } else {
@@ -298,11 +359,19 @@ fn main() -> Result<()> {
 
     let mut poller = ClaudeStatePoller::new().context("creating state poller")?;
     let mut prev_states: HashMap<String, ClaudeStatus> = HashMap::new();
+    // Track which context % threshold was last announced per session
+    // 0 = none, 50 = warned at 50%, 75 = warned at 75%, 90 = warned at 90%
+    let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
 
     // Seed initial states without announcing.
     for session in poller.poll() {
         if !session.session_id.is_empty() {
             prev_states.insert(session.session_id.clone(), session.status.clone());
+            // Seed context alerts so we don't fire on startup
+            if let Some(pct) = session.context_percent {
+                let threshold = context_threshold(pct as u32);
+                prev_context_alert.insert(session.session_id.clone(), threshold);
+            }
         }
     }
 
@@ -316,13 +385,15 @@ fn main() -> Result<()> {
                 continue;
             }
 
+            let label = session_label(session);
+
+            // State transition announcements
             let prev = prev_states
                 .get(&session.session_id)
                 .cloned()
                 .unwrap_or(ClaudeStatus::Idle);
 
             if prev != session.status {
-                let label = session_label(session);
                 if let Some(text) = transition_text(&label, &prev, &session.status, session) {
                     info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
                     let voice = voices.assign(&session.session_id);
@@ -330,8 +401,25 @@ fn main() -> Result<()> {
                         warn!("announce failed: {e}");
                     }
                 }
-
                 prev_states.insert(session.session_id.clone(), session.status.clone());
+            }
+
+            // Context % alerts at 50%, 75%, 90%
+            if let Some(pct) = session.context_percent {
+                let pct = pct as u32;
+                let threshold = context_threshold(pct);
+                let prev_threshold = prev_context_alert.get(&session.session_id).copied().unwrap_or(0);
+
+                if threshold > prev_threshold {
+                    let urgency = if pct >= 90 { "Alert" } else { "Warning" };
+                    let text = format!("{urgency}, {label} at {pct}% context");
+                    info!("[{}] context alert: {text}", session.session_id);
+                    let voice = voices.assign(&session.session_id);
+                    if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
+                        warn!("context announce failed: {e}");
+                    }
+                    prev_context_alert.insert(session.session_id.clone(), threshold);
+                }
             }
         }
 
@@ -342,5 +430,19 @@ fn main() -> Result<()> {
             .map(|s| s.session_id.clone())
             .collect();
         prev_states.retain(|id, _| active_ids.contains(id));
+        prev_context_alert.retain(|id, _| active_ids.contains(id));
+    }
+}
+
+/// Map a context percentage to the highest alert threshold crossed.
+fn context_threshold(pct: u32) -> u32 {
+    if pct >= 90 {
+        90
+    } else if pct >= 75 {
+        75
+    } else if pct >= 50 {
+        50
+    } else {
+        0
     }
 }

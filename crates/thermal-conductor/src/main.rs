@@ -135,77 +135,43 @@ async fn cmd_spawn(count: u32, project: Option<String>, title: String) -> Result
     Ok(())
 }
 
-/// Show status of all therminals by cross-referencing kitty windows with Claude state.
+/// Show status of all Claude sessions from state files.
+/// This reads directly from /tmp/claude-code-state/ — no kitty dependency needed.
 async fn cmd_status() -> Result<()> {
-    let kitty = KittyController::new()?;
-
-    // Get kitty windows
-    let windows_json = kitty.list_windows().await?;
-
-    // Get Claude session states
     let sessions: Vec<ClaudeSessionState> = match ClaudeStatePoller::new() {
         Ok(poller) => poller.get_all(),
         Err(e) => {
-            tracing::warn!("could not read Claude state: {e}");
-            Vec::new()
+            println!("No Claude state available: {e}");
+            return Ok(());
         }
     };
 
-    // Collect all kitty windows across OS windows and tabs
-    let mut window_count = 0u32;
-
-    if let Some(os_windows) = windows_json.as_array() {
-        for os_window in os_windows {
-            if let Some(tabs) = os_window.get("tabs").and_then(|t| t.as_array()) {
-                for tab in tabs {
-                    if let Some(windows) = tab.get("windows").and_then(|w| w.as_array()) {
-                        for window in windows {
-                            let id = window.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let title = window
-                                .get("title")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("untitled");
-                            let pid = window.get("pid").and_then(|v| v.as_u64());
-                            let is_focused = window
-                                .get("is_focused")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
-
-                            // Try to match with a Claude session by PID
-                            let claude_state = pid.and_then(|window_pid| {
-                                sessions.iter().find(|s| {
-                                    s.pid.map_or(false, |sp| sp as u64 == window_pid)
-                                })
-                            });
-
-                            let status_str = match claude_state {
-                                Some(state) => format_claude_status(&state.status),
-                                None => "unknown".to_string(),
-                            };
-
-                            let tool_str = claude_state
-                                .and_then(|s| s.current_tool.as_deref())
-                                .unwrap_or("-");
-
-                            let context_str = claude_state
-                                .and_then(|s| s.context_percent)
-                                .map(|p| format!("{:.0}%", p))
-                                .unwrap_or_else(|| "-".to_string());
-
-                            let focus_marker = if is_focused { " *" } else { "" };
-
-                            println!(
-                                "  [{id}] {title}{focus_marker}  |  status: {status_str}  |  tool: {tool_str}  |  context: {context_str}"
-                            );
-                            window_count += 1;
-                        }
-                    }
-                }
-            }
-        }
+    if sessions.is_empty() {
+        println!("No active Claude sessions.");
+        return Ok(());
     }
 
-    println!("\n{window_count} therminal{} tracked.", if window_count == 1 { "" } else { "s" });
+    for session in &sessions {
+        let label = session.working_dir.as_deref()
+            .and_then(|d| std::path::Path::new(d).file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or(&session.session_id);
+
+        let status = format_claude_status(&session.status);
+
+        let tool = session.current_tool.as_deref().unwrap_or("-");
+
+        let context = session.context_percent
+            .map(|p| format!("{:.0}%", p))
+            .unwrap_or_else(|| "-".to_string());
+
+        let agents = session.subagent_count.unwrap_or(0);
+        let agent_str = if agents > 0 { format!("  agents: {agents}") } else { String::new() };
+
+        println!("  {label}  |  {status}  |  tool: {tool}  |  ctx: {context}{agent_str}");
+    }
+
+    println!("\n{} session{}.", sessions.len(), if sessions.len() == 1 { "" } else { "s" });
     Ok(())
 }
 

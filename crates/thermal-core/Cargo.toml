@@ -7,4 +7,11 @@ edition.workspace = true
 wgpu = { workspace = true }
 glyphon = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 pollster = { workspace = true }
+notify = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+arc-swap = "1"
+portable-pty = "0.8"

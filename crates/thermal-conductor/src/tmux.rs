@@ -180,13 +180,22 @@ impl TmuxSession {
         }
     }
 
-    /// Send literal keys to a pane (does NOT automatically append Enter).
+    /// Send a tmux key name to a pane (e.g. "Enter", "Up", "C-a").
     pub fn send_keys(&self, pane_id: &str, keys: &str) -> Result<(), TmuxError> {
         if !self.pane_ids.iter().any(|id| id == pane_id) {
             return Err(TmuxError::PaneNotFound(pane_id.to_owned()));
         }
 
         tmux_quiet(&["send-keys", "-t", pane_id, keys])
+    }
+
+    /// Send literal text to a pane (uses -l flag so text is not parsed as key names).
+    pub fn send_keys_literal(&self, pane_id: &str, text: &str) -> Result<(), TmuxError> {
+        if !self.pane_ids.iter().any(|id| id == pane_id) {
+            return Err(TmuxError::PaneNotFound(pane_id.to_owned()));
+        }
+
+        tmux_quiet(&["send-keys", "-t", pane_id, "-l", text])
     }
 
     /// Resize a pane to the given character dimensions.

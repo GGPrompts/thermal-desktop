@@ -2,6 +2,7 @@
 name = "thermal-conductor"
 version.workspace = true
 edition.workspace = true
+default-run = "thermal-conductor"
 
 [[bin]]
 name = "thermal-conductor"

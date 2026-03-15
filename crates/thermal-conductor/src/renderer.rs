@@ -130,11 +130,94 @@ impl WgpuState {
     }
 
     /// Clear the frame to ThermalPalette::BG and render pane captures.
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    pub fn render(
+        &mut self,
+        captures: &[crate::capture::PaneCapture],
+        rects: &[Rect],
+        text_renderer: &mut TextRenderer,
+    ) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let font_size = 14.0_f32;
+        let line_height = font_size * 1.2;
+
+        // Build all text buffers first, then prepare+render in one batch.
+        // glyphon's prepare() replaces the vertex buffer, so we must submit
+        // all TextAreas in a single prepare call.
+        struct LineEntry {
+            buffer: glyphon::Buffer,
+            left: f32,
+            top: f32,
+            color: glyphon::Color,
+        }
+
+        let mut entries: Vec<LineEntry> = Vec::new();
+
+        for (capture, rect) in captures.iter().zip(rects.iter()) {
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                continue;
+            }
+
+            for (line_idx, line) in capture.lines.iter().enumerate() {
+                if line.is_empty() {
+                    continue;
+                }
+
+                let y = rect.y + line_idx as f32 * line_height;
+                if y + line_height > rect.y + rect.h {
+                    break;
+                }
+
+                let text: String = line.iter().map(|sc| sc.ch).collect();
+                let color = if let Some(first) = line.first() {
+                    ansi_color_to_rgba(&first.fg)
+                } else {
+                    glyphon::Color::rgba(0xc4, 0xb5, 0xfd, 0xff)
+                };
+
+                let buffer = text_renderer.inner.make_buffer(
+                    &text,
+                    font_size,
+                    line_height,
+                    color,
+                );
+
+                entries.push(LineEntry {
+                    buffer,
+                    left: rect.x,
+                    top: y,
+                    color,
+                });
+            }
+        }
+
+        // Build TextArea references from the entries.
+        let text_areas: Vec<glyphon::TextArea> = entries
+            .iter()
+            .map(|e| glyphon::TextArea {
+                buffer: &e.buffer,
+                left: e.left,
+                top: e.top,
+                scale: 1.0,
+                bounds: glyphon::TextBounds::default(),
+                default_color: e.color,
+                custom_glyphs: &[],
+            })
+            .collect();
+
+        // Prepare all text in one batch.
+        let _ = text_renderer.inner.renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut text_renderer.inner.font_system,
+            &mut text_renderer.inner.atlas,
+            &text_renderer.inner.viewport,
+            text_areas,
+            &mut text_renderer.inner.swash_cache,
+        );
 
         let mut encoder = self
             .device
@@ -144,8 +227,8 @@ impl WgpuState {
 
         {
             let bg = thermal_core::ThermalPalette::BG;
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear pass"),
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -163,6 +246,13 @@ impl WgpuState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+
+            // Render all prepared text in one call.
+            let _ = text_renderer.inner.renderer.render(
+                &text_renderer.inner.atlas,
+                &text_renderer.inner.viewport,
+                &mut render_pass,
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

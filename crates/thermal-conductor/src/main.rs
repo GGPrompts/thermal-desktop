@@ -30,7 +30,11 @@ use sctk::{
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{Capability, SeatHandler, SeatState},
+    seat::{
+        Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
+    },
     shell::{
         WaylandSurface,
         xdg::{XdgShell, window::{Window, WindowConfigure, WindowHandler, WindowDecorations}},
@@ -39,7 +43,7 @@ use sctk::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_seat, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 
 use thermal_core::{ConductorConfig, Layout};
@@ -61,6 +65,18 @@ struct ConductorState {
     configured: bool,
     /// Set to true to exit the event loop.
     exit: bool,
+
+    /// Pending key events to send to tmux.
+    /// Each entry is (keys_string, literal) — if literal is true, use `send-keys -l`.
+    pending_keys: Vec<(String, bool)>,
+    /// Current keyboard modifiers.
+    modifiers: Modifiers,
+    /// Which pane has keyboard focus.
+    focused_pane: usize,
+    /// Last known cursor position.
+    cursor_pos: (f64, f64),
+    /// Pane index that was clicked (processed in render loop where layout is available).
+    click_pending: bool,
 }
 
 // ── sctk handler impls ───────────────────────────────────────────────────────
@@ -190,10 +206,20 @@ impl SeatHandler for ConductorState {
     fn new_capability(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
     ) {
+        if capability == Capability::Keyboard {
+            if let Err(e) = self.seat_state.get_keyboard(qh, &seat, None) {
+                tracing::warn!("failed to get keyboard: {e}");
+            }
+        }
+        if capability == Capability::Pointer {
+            if let Err(e) = self.seat_state.get_pointer(qh, &seat) {
+                tracing::warn!("failed to get pointer: {e}");
+            }
+        }
     }
 
     fn remove_capability(
@@ -208,12 +234,149 @@ impl SeatHandler for ConductorState {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 
+impl KeyboardHandler for ConductorState {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[Keysym],
+    ) {
+    }
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {
+    }
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        // Ctrl-Q: quit
+        if self.modifiers.ctrl && event.keysym == Keysym::q {
+            self.exit = true;
+            return;
+        }
+
+        // Map keysym to tmux key name (not raw escape sequences).
+        // tmux send-keys expects key names for special keys, and -l for literal text.
+        let key_entry: Option<(String, bool)> = match event.keysym {
+            Keysym::Return | Keysym::KP_Enter => Some(("Enter".to_owned(), false)),
+            Keysym::BackSpace => Some(("BSpace".to_owned(), false)),
+            Keysym::Tab => Some(("Tab".to_owned(), false)),
+            Keysym::Escape => Some(("Escape".to_owned(), false)),
+            Keysym::Up => Some(("Up".to_owned(), false)),
+            Keysym::Down => Some(("Down".to_owned(), false)),
+            Keysym::Right => Some(("Right".to_owned(), false)),
+            Keysym::Left => Some(("Left".to_owned(), false)),
+            Keysym::Home => Some(("Home".to_owned(), false)),
+            Keysym::End => Some(("End".to_owned(), false)),
+            Keysym::Delete => Some(("DC".to_owned(), false)),
+            Keysym::Page_Up => Some(("PageUp".to_owned(), false)),
+            Keysym::Page_Down => Some(("PageDown".to_owned(), false)),
+            _ => {
+                if self.modifiers.ctrl {
+                    // Ctrl+letter → send as C-<letter> tmux key name.
+                    if let Some(ref utf8) = event.utf8 {
+                        if utf8.len() == 1 {
+                            let ch = utf8.chars().next().unwrap();
+                            if ch.is_ascii_alphabetic() {
+                                Some((format!("C-{}", ch.to_ascii_lowercase()), false))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else if let Some(ref utf8) = event.utf8 {
+                    // Regular text — send literally.
+                    if !utf8.is_empty() {
+                        Some((utf8.clone(), true))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(entry) = key_entry {
+            tracing::info!(keys = %entry.0, literal = entry.1, "key pressed");
+            self.pending_keys.push(entry);
+        }
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _event: KeyEvent,
+    ) {
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        modifiers: Modifiers,
+        _layout: u32,
+    ) {
+        self.modifiers = modifiers;
+    }
+}
+
+impl PointerHandler for ConductorState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            match event.kind {
+                PointerEventKind::Motion { .. } => {
+                    self.cursor_pos = event.position;
+                }
+                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                    self.cursor_pos = event.position;
+                    self.click_pending = true;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 // ── sctk delegate macros ──────────────────────────────────────────────────────
 
 delegate_compositor!(ConductorState);
 delegate_output!(ConductorState);
 delegate_seat!(ConductorState);
 delegate_registry!(ConductorState);
+sctk::delegate_keyboard!(ConductorState);
+sctk::delegate_pointer!(ConductorState);
 
 sctk::delegate_xdg_shell!(ConductorState);
 sctk::delegate_xdg_window!(ConductorState);
@@ -284,6 +447,11 @@ async fn main() -> anyhow::Result<()> {
         height: default_height,
         configured: false,
         exit: false,
+        pending_keys: Vec::new(),
+        modifiers: Modifiers::default(),
+        focused_pane: 0,
+        cursor_pos: (0.0, 0.0),
+        click_pending: false,
     };
 
     tracing::info!("waiting for compositor configure...");
@@ -326,6 +494,15 @@ async fn main() -> anyhow::Result<()> {
     let mut cond = conductor::Conductor::new(session_mgr, layout_engine);
     cond.layout.pane_count = cond.session.pane_ids().len();
 
+    // Create text renderer for pane content.
+    let mut text_renderer = renderer::TextRenderer::new(
+        &renderer.device,
+        &renderer.queue,
+        renderer.surface_config.format,
+        state.width,
+        state.height,
+    );
+
     tracing::info!(
         panes = cond.session.pane_ids().len(),
         "entering render loop"
@@ -354,8 +531,39 @@ async fn main() -> anyhow::Result<()> {
         // Handle resize.
         if renderer.width != state.width || renderer.height != state.height {
             renderer.resize(state.width, state.height);
+            text_renderer.set_resolution(&renderer.queue, state.width, state.height);
             cond.layout.window_width = state.width as f32;
             cond.layout.window_height = state.height as f32;
+        }
+
+        // Handle click-to-focus.
+        if state.click_pending {
+            state.click_pending = false;
+            let (cx, cy) = state.cursor_pos;
+            if let Some(idx) = cond.layout.pane_at(cx as f32, cy as f32) {
+                state.focused_pane = idx;
+                tracing::info!(pane = idx, "focus changed");
+            }
+        }
+
+        // Send pending key events to the focused tmux pane.
+        if !state.pending_keys.is_empty() {
+            let pane_ids = cond.session.pane_ids().to_owned();
+            let focused = state.focused_pane.min(pane_ids.len().saturating_sub(1));
+            if let Some(pane_id) = pane_ids.get(focused) {
+                for (keys, literal) in state.pending_keys.drain(..) {
+                    let result = if literal {
+                        cond.session.session.send_keys_literal(pane_id, &keys)
+                    } else {
+                        cond.session.session.send_keys(pane_id, &keys)
+                    };
+                    if let Err(e) = result {
+                        tracing::warn!("send_keys error: {e}");
+                    }
+                }
+            } else {
+                state.pending_keys.clear();
+            }
         }
 
         // Poll tmux panes at the poll interval.
@@ -367,9 +575,14 @@ async fn main() -> anyhow::Result<()> {
             last_poll = Instant::now();
         }
 
-        // Render a frame.
-        cond.render_frame(&mut renderer);
-        match renderer.render() {
+        // Compute layout rects and render.
+        let rects = cond.layout.compute_rects();
+        // Clear dirty flags.
+        for d in cond.dirty.iter_mut() {
+            *d = false;
+        }
+
+        match renderer.render(&cond.captures, &rects, &mut text_renderer) {
             Ok(()) => {}
             Err(wgpu::SurfaceError::Lost) => {
                 renderer.resize(state.width, state.height);

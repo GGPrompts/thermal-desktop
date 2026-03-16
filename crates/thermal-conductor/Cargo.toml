@@ -16,3 +16,14 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+nix = { workspace = true }
+wgpu = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+pollster = { workspace = true }
+raw-window-handle = { workspace = true }
+alacritty_terminal = { workspace = true }
+glyphon = { workspace = true }
+bytemuck = { workspace = true }
+parking_lot = "0.12"

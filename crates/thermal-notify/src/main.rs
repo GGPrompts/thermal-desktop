@@ -138,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
                             NOTIF_WIDTH,
                             NOTIF_HEIGHT,
                         );
+                        // Request next frame callback before presenting so the
+                        // compositor continues scheduling redraws when occluded.
+                        notify_surface.request_frame();
                         output.present();
                     }
                     Err(e) => {

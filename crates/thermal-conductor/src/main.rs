@@ -3,7 +3,13 @@
 //! Spawns, tracks, polls, and sends to kitty windows running Claude sessions.
 //! Hyprland auto-tiles the spawned OS windows.
 
+mod grid_renderer;
+mod input;
 mod kitty;
+mod osc633;
+mod pty;
+mod terminal;
+mod window;
 
 use anyhow::{Result, Context, bail};
 use clap::{Parser, Subcommand};
@@ -66,6 +72,9 @@ enum Commands {
         #[command(subcommand)]
         action: AudioAction,
     },
+
+    /// Launch the GPU-rendered terminal window
+    Window,
 }
 
 #[derive(Subcommand)]
@@ -83,8 +92,7 @@ enum AudioAction {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -94,18 +102,31 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::Spawn {
-            count,
-            project,
-            title,
-        } => cmd_spawn(count, project, title).await,
-        Commands::Status => cmd_status().await,
-        Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
-        Commands::List { json } => cmd_list(json).await,
-        Commands::Kill { window_id } => cmd_kill(window_id).await,
-        Commands::Audio { action } => cmd_audio(action).await,
+    // Window subcommand manages its own tokio runtime (for PTY async I/O),
+    // so it must run outside of #[tokio::main] to avoid nested runtime panic.
+    if matches!(cli.command, Commands::Window) {
+        return window::run();
     }
+
+    // All other subcommands use async kitty/process commands.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            match cli.command {
+                Commands::Spawn {
+                    count,
+                    project,
+                    title,
+                } => cmd_spawn(count, project, title).await,
+                Commands::Status => cmd_status().await,
+                Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
+                Commands::List { json } => cmd_list(json).await,
+                Commands::Kill { window_id } => cmd_kill(window_id).await,
+                Commands::Audio { action } => cmd_audio(action).await,
+                Commands::Window => unreachable!(),
+            }
+        })
 }
 
 /// Spawn N therminals running Claude.

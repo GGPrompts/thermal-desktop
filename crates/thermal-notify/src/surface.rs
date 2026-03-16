@@ -51,6 +51,18 @@ impl NotifySurface {
         self.state.clicked = false;
         clicked
     }
+
+    /// Request a Wayland frame callback.
+    ///
+    /// Call this immediately before `SurfaceTexture::present()` to tell the
+    /// compositor that we want to keep receiving frame events.  wgpu's
+    /// `present()` internally calls `wl_surface.attach(buffer)` + `commit()`,
+    /// so the frame request is picked up by that commit.  Without this the
+    /// compositor may stop notifying us when the surface is occluded, causing
+    /// the render loop to stall.
+    pub fn request_frame(&self) {
+        self.wl_surface.frame(&self.queue_handle, self.wl_surface.clone());
+    }
 }
 
 impl NotifySurface {
@@ -259,6 +271,11 @@ impl NotifySurface {
             });
             drop(_pass);
             self.queue.submit(std::iter::once(encoder.finish()));
+            // Request the next frame callback before presenting so the compositor
+            // continues scheduling redraws even when the surface is occluded.
+            // wgpu's present() internally calls wl_surface.attach(buffer) + commit(),
+            // so this frame() request is picked up by that same commit.
+            self.wl_surface.frame(&self.queue_handle, self.wl_surface.clone());
             output.present();
         }
     }

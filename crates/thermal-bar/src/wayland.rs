@@ -349,6 +349,16 @@ pub async fn run() -> anyhow::Result<()> {
         // Build sparkline rects.
         let spark_rects = sparklines.render_all(8.0, 6.0);
 
+        // Request the next frame callback before rendering.  This must be done
+        // prior to wgpu's present() (which internally commits the wl_surface)
+        // so the compositor associates the callback with the upcoming frame.
+        // Without this the compositor may stop sending frame events when the
+        // surface is occluded, potentially stalling the render loop.
+        {
+            let wl_surf = bar.layer.wl_surface();
+            wl_surf.frame(&qh, wl_surf.clone());
+        }
+
         // Render the bar with sparklines in a single pass.
         match renderer.render_layout(&layout, &spark_rects) {
             Ok(()) => {}

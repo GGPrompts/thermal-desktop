@@ -197,6 +197,7 @@ fn main() {
         },
         text: text_state,
         reticle: reticle_pipeline,
+        qh: qh.clone(),
         cached_query_buf: None,
         cached_query: String::new(),
         cached_entry_bufs: Vec::new(),
@@ -488,6 +489,8 @@ struct LauncherSurface {
     wgpu: WgpuState,
     text: TextState,
     reticle: ReticlePipeline,
+    /// Queue handle for requesting frame callbacks before each present.
+    qh: QueueHandle<LauncherSurface>,
     // ── Text buffer cache ────────────────────────────────────────────────────
     /// Cached glyphon buffer for the query line — rebuilt only when query changes.
     cached_query_buf: Option<Buffer>,
@@ -786,6 +789,14 @@ impl LauncherSurface {
         }
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));
+
+        // Request the next frame callback before presenting so the compositor
+        // continues scheduling redraws even when the surface is occluded.
+        // wgpu's present() internally calls wl_surface.attach(buffer) + commit(),
+        // so this frame() request is picked up by that same commit.
+        let wl_surf = self.layer.wl_surface();
+        wl_surf.frame(&self.qh, wl_surf.clone());
+
         output.present();
         self.text.atlas.trim();
     }

@@ -174,6 +174,320 @@ pub fn heat_label(t: f32) -> &'static str {
 /// The thermal/FLIR color palette used across all components.
 pub struct ThermalPalette;
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Color::from_hex ---
+
+    #[test]
+    fn from_hex_pure_red() {
+        let c = Color::from_hex(0xFF0000);
+        assert_eq!(c.r, 0xFF);
+        assert_eq!(c.g, 0x00);
+        assert_eq!(c.b, 0x00);
+        assert_eq!(c.a, 0xFF);
+    }
+
+    #[test]
+    fn from_hex_pure_green() {
+        let c = Color::from_hex(0x00FF00);
+        assert_eq!((c.r, c.g, c.b, c.a), (0x00, 0xFF, 0x00, 0xFF));
+    }
+
+    #[test]
+    fn from_hex_pure_blue() {
+        let c = Color::from_hex(0x0000FF);
+        assert_eq!((c.r, c.g, c.b, c.a), (0x00, 0x00, 0xFF, 0xFF));
+    }
+
+    #[test]
+    fn from_hex_black() {
+        let c = Color::from_hex(0x000000);
+        assert_eq!((c.r, c.g, c.b, c.a), (0x00, 0x00, 0x00, 0xFF));
+    }
+
+    #[test]
+    fn from_hex_white() {
+        let c = Color::from_hex(0xFFFFFF);
+        assert_eq!((c.r, c.g, c.b, c.a), (0xFF, 0xFF, 0xFF, 0xFF));
+    }
+
+    #[test]
+    fn from_hex_arbitrary() {
+        // BG constant: 0x0a0010
+        let c = Color::from_hex(0x0a0010);
+        assert_eq!((c.r, c.g, c.b), (0x0a, 0x00, 0x10));
+    }
+
+    // --- Color::from_rgba ---
+
+    #[test]
+    fn from_rgba_round_trips() {
+        let c = Color::from_rgba(10, 20, 30, 200);
+        assert_eq!((c.r, c.g, c.b, c.a), (10, 20, 30, 200));
+    }
+
+    #[test]
+    fn from_rgba_zero_alpha() {
+        let c = Color::from_rgba(255, 128, 0, 0);
+        assert_eq!(c.a, 0);
+    }
+
+    // --- Color::to_f32_array ---
+
+    #[test]
+    fn to_f32_array_black() {
+        let arr = Color::from_rgba(0, 0, 0, 255).to_f32_array();
+        assert_eq!(arr, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn to_f32_array_white() {
+        let arr = Color::from_rgba(255, 255, 255, 255).to_f32_array();
+        // Each channel should be 1.0.
+        for &ch in &arr {
+            assert!((ch - 1.0).abs() < 1e-6, "channel was {ch}");
+        }
+    }
+
+    #[test]
+    fn to_f32_array_half_red() {
+        // 128 / 255 ≈ 0.50196
+        let arr = Color::from_rgba(128, 0, 0, 255).to_f32_array();
+        assert!((arr[0] - 128.0 / 255.0).abs() < 1e-6);
+        assert_eq!(arr[1], 0.0);
+        assert_eq!(arr[2], 0.0);
+        assert_eq!(arr[3], 1.0);
+    }
+
+    #[test]
+    fn to_f32_array_zero_alpha() {
+        let arr = Color::from_rgba(255, 255, 255, 0).to_f32_array();
+        assert_eq!(arr[3], 0.0);
+    }
+
+    // --- Color::to_rgba_u8 ---
+
+    #[test]
+    fn to_rgba_u8_round_trips() {
+        let c = Color::from_rgba(1, 2, 3, 4);
+        assert_eq!(c.to_rgba_u8(), (1, 2, 3, 4));
+    }
+
+    // --- Color::to_ansi_escape ---
+
+    #[test]
+    fn to_ansi_escape_format() {
+        let c = Color::from_rgba(255, 128, 0, 255);
+        assert_eq!(c.to_ansi_escape(), "\x1b[38;2;255;128;0m");
+    }
+
+    #[test]
+    fn to_ansi_escape_black() {
+        let c = Color::from_rgba(0, 0, 0, 255);
+        assert_eq!(c.to_ansi_escape(), "\x1b[38;2;0;0;0m");
+    }
+
+    // --- thermal_gradient ---
+
+    #[test]
+    fn thermal_gradient_at_zero_returns_cool() {
+        assert_eq!(thermal_gradient(0.0), Color::COOL);
+    }
+
+    #[test]
+    fn thermal_gradient_at_one_returns_white_hot() {
+        assert_eq!(thermal_gradient(1.0), Color::WHITE_HOT);
+    }
+
+    #[test]
+    fn thermal_gradient_clamps_below_zero() {
+        assert_eq!(thermal_gradient(-1.0), thermal_gradient(0.0));
+    }
+
+    #[test]
+    fn thermal_gradient_clamps_above_one() {
+        assert_eq!(thermal_gradient(2.0), thermal_gradient(1.0));
+    }
+
+    #[test]
+    fn thermal_gradient_midpoint_is_between_stops() {
+        // At t=0.20 the result is COLD exactly (stop boundary).
+        assert_eq!(thermal_gradient(0.20), Color::COLD);
+    }
+
+    #[test]
+    fn thermal_gradient_at_0_40_is_mild() {
+        assert_eq!(thermal_gradient(0.40), Color::MILD);
+    }
+
+    #[test]
+    fn thermal_gradient_at_0_55_is_warm() {
+        assert_eq!(thermal_gradient(0.55), Color::WARM);
+    }
+
+    #[test]
+    fn thermal_gradient_at_0_70_is_hot() {
+        assert_eq!(thermal_gradient(0.70), Color::HOT);
+    }
+
+    #[test]
+    fn thermal_gradient_at_0_80_is_hotter() {
+        assert_eq!(thermal_gradient(0.80), Color::HOTTER);
+    }
+
+    #[test]
+    fn thermal_gradient_at_0_90_is_searing() {
+        assert_eq!(thermal_gradient(0.90), Color::SEARING);
+    }
+
+    #[test]
+    fn thermal_gradient_interpolates_between_stops() {
+        // At t=0.10 (half-way between COOL@0.0 and COLD@0.20) we should get
+        // a color whose red channel is between the two stop values.
+        let mid = thermal_gradient(0.10);
+        let cool_r = Color::COOL.r;
+        let cold_r = Color::COLD.r;
+        let lo = cool_r.min(cold_r);
+        let hi = cool_r.max(cold_r);
+        assert!(mid.r >= lo && mid.r <= hi, "r={} not in [{lo},{hi}]", mid.r);
+    }
+
+    // --- thermal_gradient_lut ---
+
+    #[test]
+    fn thermal_gradient_lut_empty() {
+        assert!(thermal_gradient_lut(0).is_empty());
+    }
+
+    #[test]
+    fn thermal_gradient_lut_single() {
+        let lut = thermal_gradient_lut(1);
+        assert_eq!(lut.len(), 1);
+        assert_eq!(lut[0], thermal_gradient(0.0));
+    }
+
+    #[test]
+    fn thermal_gradient_lut_two_endpoints() {
+        let lut = thermal_gradient_lut(2);
+        assert_eq!(lut.len(), 2);
+        assert_eq!(lut[0], thermal_gradient(0.0));
+        assert_eq!(lut[1], thermal_gradient(1.0));
+    }
+
+    #[test]
+    fn thermal_gradient_lut_length() {
+        for n in [3, 8, 16, 256] {
+            assert_eq!(thermal_gradient_lut(n).len(), n);
+        }
+    }
+
+    // --- thermal_gradient_f32 ---
+
+    #[test]
+    fn thermal_gradient_f32_at_zero() {
+        let arr = thermal_gradient_f32(0.0);
+        let expected = Color::COOL.to_f32_array();
+        for i in 0..4 {
+            assert!((arr[i] - expected[i]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn thermal_gradient_f32_at_one() {
+        let arr = thermal_gradient_f32(1.0);
+        let expected = Color::WHITE_HOT.to_f32_array();
+        for i in 0..4 {
+            assert!((arr[i] - expected[i]).abs() < 1e-6);
+        }
+    }
+
+    // --- heat_label ---
+
+    #[test]
+    fn heat_label_cryo() {
+        assert_eq!(heat_label(0.0), "CRYO");
+        assert_eq!(heat_label(0.14), "CRYO");
+    }
+
+    #[test]
+    fn heat_label_cold() {
+        assert_eq!(heat_label(0.15), "COLD");
+        assert_eq!(heat_label(0.29), "COLD");
+    }
+
+    #[test]
+    fn heat_label_mild() {
+        assert_eq!(heat_label(0.30), "MILD");
+        assert_eq!(heat_label(0.49), "MILD");
+    }
+
+    #[test]
+    fn heat_label_warm() {
+        assert_eq!(heat_label(0.50), "WARM");
+        assert_eq!(heat_label(0.64), "WARM");
+    }
+
+    #[test]
+    fn heat_label_hot() {
+        assert_eq!(heat_label(0.65), "HOT");
+        assert_eq!(heat_label(0.79), "HOT");
+    }
+
+    #[test]
+    fn heat_label_searing() {
+        assert_eq!(heat_label(0.80), "SEARING");
+        assert_eq!(heat_label(0.91), "SEARING");
+    }
+
+    #[test]
+    fn heat_label_white_hot() {
+        assert_eq!(heat_label(0.92), "WHITE-HOT");
+        assert_eq!(heat_label(1.0), "WHITE-HOT");
+    }
+
+    #[test]
+    fn heat_label_clamps_negative() {
+        assert_eq!(heat_label(-5.0), "CRYO");
+    }
+
+    #[test]
+    fn heat_label_clamps_above_one() {
+        assert_eq!(heat_label(99.0), "WHITE-HOT");
+    }
+
+    // --- ThermalPalette legacy constants ---
+
+    #[test]
+    fn thermal_palette_bg_alpha_is_one() {
+        assert_eq!(ThermalPalette::BG[3], 1.0);
+    }
+
+    #[test]
+    fn thermal_palette_bg_matches_color_bg() {
+        let expected = Color::BG.to_f32_array();
+        let palette = ThermalPalette::BG;
+        for i in 0..4 {
+            assert!((palette[i] - expected[i]).abs() < 1e-6,
+                "channel {i}: palette={} expected={}", palette[i], expected[i]);
+        }
+    }
+
+    #[test]
+    fn thermal_palette_searing_matches_color_searing() {
+        let expected = Color::SEARING.to_f32_array();
+        let palette = ThermalPalette::SEARING;
+        for i in 0..4 {
+            assert!((palette[i] - expected[i]).abs() < 1e-6);
+        }
+    }
+}
+
 impl ThermalPalette {
     // Void / Background
     pub const BG: [f32; 4] = Self::hex(0x0a, 0x00, 0x10);

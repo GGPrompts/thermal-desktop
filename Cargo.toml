@@ -21,6 +21,7 @@ repository = "https://github.com/GGPrompts/thermal-desktop"
 # Wayland
 smithay-client-toolkit = "0.19"
 wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = "0.3"
 winit = { version = "0.30", features = ["wayland"] }
 
@@ -34,7 +35,7 @@ alacritty_terminal = "0.25"
 vte = "0.14"
 
 # System
-nix = { version = "0.29", features = ["term", "signal", "event", "user"] }
+nix = { version = "0.29", features = ["term", "signal", "event", "user", "process", "fs", "poll"] }
 notify = "7"
 zbus = { version = "5", features = ["tokio"] }
 rodio = "0.20"

@@ -357,6 +357,8 @@ struct WgpuSurface {
     flash_pipeline: wgpu::RenderPipeline,
     flash_color_buf: wgpu::Buffer,
     flash_bind_group: wgpu::BindGroup,
+    /// Queue handle for requesting frame callbacks before each present.
+    qh: QueueHandle<LockApp>,
 }
 
 impl WgpuSurface {
@@ -669,6 +671,14 @@ impl WgpuSurface {
             self.queue.submit(Some(enc2.finish()));
         }
 
+        // Request the next frame callback before presenting.  Without this the
+        // compositor may stop sending frame events when the surface is occluded,
+        // causing the render loop to stall (blocking_dispatch never unblocks).
+        // wgpu's present() internally calls wl_surface.attach(buffer) + commit(),
+        // so this frame() request is picked up by that same commit.
+        let wl_surf = self.lock_surface.wl_surface();
+        wl_surf.frame(&self.qh, wl_surf.clone());
+
         surface_texture.present();
         self.text.atlas.trim();
 
@@ -939,7 +949,7 @@ impl SessionLockHandler for LockApp {
     fn configure(
         &mut self,
         conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         session_lock_surface: SessionLockSurface,
         configure: SessionLockSurfaceConfigure,
         _serial: u32,
@@ -1136,6 +1146,7 @@ impl SessionLockHandler for LockApp {
                 flash_pipeline,
                 flash_color_buf,
                 flash_bind_group,
+                qh: qh.clone(),
             });
 
             // All pending surfaces initialized — SHM fallback buffers no longer needed.

@@ -202,3 +202,205 @@ impl ClaudeStatePoller {
         path.extension().map_or(false, |ext| ext == "json")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: deserialise a JSON string into ClaudeSessionState.
+    fn parse(json: &str) -> ClaudeSessionState {
+        serde_json::from_str(json).expect("JSON should parse")
+    }
+
+    // --- ClaudeStatus deserialization ---
+
+    #[test]
+    fn status_idle_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"idle\"").unwrap();
+        assert_eq!(s, ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn status_processing_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"processing\"").unwrap();
+        assert_eq!(s, ClaudeStatus::Processing);
+    }
+
+    #[test]
+    fn status_tool_use_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"tool_use\"").unwrap();
+        assert_eq!(s, ClaudeStatus::ToolUse);
+    }
+
+    #[test]
+    fn status_awaiting_input_deserializes() {
+        let s: ClaudeStatus = serde_json::from_str("\"awaiting_input\"").unwrap();
+        assert_eq!(s, ClaudeStatus::AwaitingInput);
+    }
+
+    #[test]
+    fn status_unknown_string_fails() {
+        let result: Result<ClaudeStatus, _> = serde_json::from_str("\"unknown_variant\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn status_default_is_idle() {
+        assert_eq!(ClaudeStatus::default(), ClaudeStatus::Idle);
+    }
+
+    // --- ClaudeSessionState happy path ---
+
+    #[test]
+    fn session_full_deserializes() {
+        let json = r#"{
+            "session_id": "abc-123",
+            "status": "processing",
+            "current_tool": "Bash",
+            "subagent_count": 2,
+            "context_percent": 42.5,
+            "working_dir": "/home/user/project",
+            "last_updated": "2026-03-16T12:00:00Z",
+            "hook_type": "pre_tool",
+            "tmux_pane": "%1",
+            "pid": 9876
+        }"#;
+        let s = parse(json);
+        assert_eq!(s.session_id, "abc-123");
+        assert_eq!(s.status, ClaudeStatus::Processing);
+        assert_eq!(s.current_tool.as_deref(), Some("Bash"));
+        assert_eq!(s.subagent_count, Some(2));
+        assert!((s.context_percent.unwrap() - 42.5).abs() < 1e-5);
+        assert_eq!(s.working_dir.as_deref(), Some("/home/user/project"));
+        assert_eq!(s.hook_type.as_deref(), Some("pre_tool"));
+        assert_eq!(s.tmux_pane.as_deref(), Some("%1"));
+        assert_eq!(s.pid, Some(9876));
+    }
+
+    #[test]
+    fn session_minimal_uses_defaults() {
+        // Only session_id provided; all other fields should fall back to defaults.
+        let json = r#"{"session_id": "min-session"}"#;
+        let s = parse(json);
+        assert_eq!(s.session_id, "min-session");
+        assert_eq!(s.status, ClaudeStatus::Idle);
+        assert!(s.current_tool.is_none());
+        assert!(s.context_percent.is_none());
+        assert!(s.working_dir.is_none());
+    }
+
+    #[test]
+    fn session_empty_object_uses_defaults() {
+        let s: ClaudeSessionState = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.session_id, "");
+        assert_eq!(s.status, ClaudeStatus::Idle);
+    }
+
+    #[test]
+    fn session_default_subagent_count() {
+        // Default impl sets subagent_count to Some(0).
+        let s = ClaudeSessionState::default();
+        assert_eq!(s.subagent_count, Some(0));
+    }
+
+    // --- ToolDetails / ToolArgs deserialization ---
+
+    #[test]
+    fn session_with_tool_details_deserializes() {
+        let json = r#"{
+            "session_id": "td-session",
+            "status": "tool_use",
+            "details": {
+                "event": "tool_start",
+                "tool": "Read",
+                "args": {
+                    "file_path": "/some/file.rs",
+                    "command": null,
+                    "pattern": null,
+                    "description": "reading a file"
+                }
+            }
+        }"#;
+        let s = parse(json);
+        assert_eq!(s.status, ClaudeStatus::ToolUse);
+        let details = s.details.expect("details should be present");
+        assert_eq!(details.event.as_deref(), Some("tool_start"));
+        assert_eq!(details.tool.as_deref(), Some("Read"));
+        let args = details.args.expect("args should be present");
+        assert_eq!(args.file_path.as_deref(), Some("/some/file.rs"));
+        assert_eq!(args.description.as_deref(), Some("reading a file"));
+    }
+
+    #[test]
+    fn tool_args_all_none_when_omitted() {
+        let json = r#"{"session_id": "x", "details": {"event": "e"}}"#;
+        let s = parse(json);
+        let details = s.details.unwrap();
+        // args omitted → None
+        assert!(details.args.is_none());
+    }
+
+    #[test]
+    fn tool_args_partial_fields() {
+        let json = r#"{
+            "session_id": "partial",
+            "details": {
+                "args": {"command": "ls -la"}
+            }
+        }"#;
+        let s = parse(json);
+        let args = s.details.unwrap().args.unwrap();
+        assert_eq!(args.command.as_deref(), Some("ls -la"));
+        assert!(args.file_path.is_none());
+        assert!(args.pattern.is_none());
+        assert!(args.description.is_none());
+    }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn malformed_json_returns_error() {
+        let result: Result<ClaudeSessionState, _> = serde_json::from_str("not json at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn truncated_json_returns_error() {
+        let result: Result<ClaudeSessionState, _> = serde_json::from_str(r#"{"session_id":"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn context_percent_zero() {
+        let json = r#"{"session_id": "ctx", "context_percent": 0.0}"#;
+        let s = parse(json);
+        assert!((s.context_percent.unwrap() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn context_percent_one_hundred() {
+        let json = r#"{"session_id": "ctx", "context_percent": 100.0}"#;
+        let s = parse(json);
+        assert!((s.context_percent.unwrap() - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn pid_zero_is_valid() {
+        let json = r#"{"session_id": "p", "pid": 0}"#;
+        let s = parse(json);
+        assert_eq!(s.pid, Some(0));
+    }
+
+    #[test]
+    fn is_json_detects_json_extension() {
+        use std::path::Path;
+        assert!(ClaudeStatePoller::is_json(Path::new("state.json")));
+        assert!(!ClaudeStatePoller::is_json(Path::new("state.toml")));
+        assert!(!ClaudeStatePoller::is_json(Path::new("state")));
+        assert!(!ClaudeStatePoller::is_json(Path::new("")));
+    }
+}

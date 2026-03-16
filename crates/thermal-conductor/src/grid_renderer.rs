@@ -153,11 +153,14 @@ pub struct GridRenderer {
     // Per-row cache of cell data for damage-based rendering.
     row_cache: Vec<Option<CachedRow>>,
 
-    // Persistent per-row glyphon Buffers — only rebuilt for damaged rows.
-    row_buffers: Vec<Option<Buffer>>,
+    // Persistent per-cell glyphon Buffers — only rebuilt for damaged rows.
+    // Indexed as cell_buffers[row][col]. Each non-empty, non-space cell
+    // gets its own Buffer positioned at exact grid coordinates, ensuring
+    // pixel-perfect alignment even with emoji/wide chars.
+    cell_buffers: Vec<Vec<Option<Buffer>>>,
 
-    // Track last cursor row to rebuild affected buffers when cursor moves.
-    last_cursor_row: Option<usize>,
+    // Track last cursor position to rebuild affected cell buffers when cursor moves.
+    last_cursor_pos: Option<(usize, usize)>,
 
     // Frame counter for throttled atlas trimming.
     frame_count: u64,
@@ -296,8 +299,8 @@ impl GridRenderer {
             padding_x,
             padding_y,
             row_cache: Vec::new(),
-            row_buffers: Vec::new(),
-            last_cursor_row: None,
+            cell_buffers: Vec::new(),
+            last_cursor_pos: None,
             frame_count: 0,
         }
     }
@@ -326,10 +329,10 @@ impl GridRenderer {
         // Trim atlas on resize — glyph set may change.
         self.atlas.trim();
 
-        // Invalidate row cache and persistent text buffers — resize triggers a full damage anyway.
+        // Invalidate row cache and persistent cell buffers — resize triggers a full damage anyway.
         self.row_cache.clear();
-        self.row_buffers.clear();
-        self.last_cursor_row = None;
+        self.cell_buffers.clear();
+        self.last_cursor_pos = None;
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -719,25 +722,27 @@ impl GridRenderer {
             queue.write_buffer(&self.rect_buf, 0, data);
         }
 
-        // ── Rebuild only damaged per-row glyphon Buffers ────────────────
+        // ── Rebuild only damaged per-cell glyphon Buffers ────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
 
         let cursor_row = cursor.point.line.0 as usize;
         let cursor_col = cursor.point.column.0;
 
-        // Ensure row_buffers is sized to screen_lines.
-        if self.row_buffers.len() != screen_lines {
-            self.row_buffers.resize_with(screen_lines, || None);
+        // Ensure cell_buffers has enough rows.
+        while self.cell_buffers.len() < screen_lines {
+            self.cell_buffers.push(Vec::new());
         }
+        self.cell_buffers.truncate(screen_lines);
 
-        // Determine which rows need their glyphon Buffer rebuilt.
-        // Cursor row always needs rebuild (block cursor inverts fg color).
-        // Previous cursor row also needs rebuild (cursor moved away).
-        let prev_cursor_row = self.last_cursor_row;
+        // Determine which rows need their cell Buffers rebuilt.
+        let prev_cursor = self.last_cursor_pos;
         let full_rebuild = damaged_rows.is_none();
 
         for (row_idx, cached) in self.row_cache.iter().enumerate() {
-            // Decide if this row's Buffer needs rebuilding.
+            if row_idx >= screen_lines {
+                break;
+            }
+
             let needs_rebuild = if full_rebuild {
                 true
             } else {
@@ -745,59 +750,46 @@ impl GridRenderer {
                     .map(|set| set.contains(&row_idx))
                     .unwrap_or(false);
                 let is_cursor_row = row_idx == cursor_row;
-                let was_cursor_row = prev_cursor_row.map(|r| r == row_idx).unwrap_or(false);
+                let was_cursor_row = prev_cursor.map(|(r, _)| r == row_idx).unwrap_or(false);
                 in_damage_set || is_cursor_row || was_cursor_row
             };
 
             if !needs_rebuild {
-                // Reuse existing Buffer (if any).
                 continue;
             }
 
             let row = match cached {
                 Some(r) => r,
                 None => {
-                    // Row is empty — drop any existing buffer.
-                    self.row_buffers[row_idx] = None;
+                    self.cell_buffers[row_idx].clear();
                     continue;
                 }
             };
 
             let row_cells = &row.cells;
             if row_cells.is_empty() {
-                self.row_buffers[row_idx] = None;
+                self.cell_buffers[row_idx].clear();
                 continue;
             }
 
-            // Build rich text spans with per-character colors.
-            let mut rich_spans: Vec<(String, Attrs<'_>)> = Vec::new();
-            let mut current_fg: Option<[f32; 4]> = None;
-            let mut current_span = String::new();
-            let mut last_col: usize = 0;
+            // Determine max column to size the cell buffer row.
+            let max_col = row_cells.iter().map(|c| c.col).max().unwrap_or(0) + 1;
+            while self.cell_buffers[row_idx].len() < max_col {
+                self.cell_buffers[row_idx].push(None);
+            }
 
+            // Mark all columns as empty first (for cells that disappeared).
+            for slot in self.cell_buffers[row_idx].iter_mut() {
+                *slot = None;
+            }
+
+            // Build per-cell Buffers.
             for cell in row_cells {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                     continue;
                 }
 
-                // Fill gap spaces with default color.
-                while last_col < cell.col {
-                    let default_fg = PaletteColor::TEXT.to_f32_array();
-                    if current_fg.is_some() && current_fg != Some(default_fg) {
-                        if !current_span.is_empty() {
-                            let c = current_fg.unwrap_or(default_fg);
-                            rich_spans.push((
-                                std::mem::take(&mut current_span),
-                                Attrs::new()
-                                    .family(Family::Name(TERM_FONT_FAMILY))
-                                    .color(f32_to_glyph_color(c)),
-                            ));
-                        }
-                    }
-                    current_fg = Some(default_fg);
-                    current_span.push(' ');
-                    last_col += 1;
-                }
+                let ch = if cell.c == '\0' { ' ' } else { cell.c };
 
                 // Determine foreground color (with cursor inversion).
                 let is_block_cursor = cursor.shape == CursorShape::Block
@@ -811,100 +803,73 @@ impl GridRenderer {
                     ansi_to_glyphon_fg(&cell.fg)
                 };
 
-                if current_fg.is_some() && current_fg != Some(fg) {
-                    if !current_span.is_empty() {
-                        let c = current_fg.unwrap_or(fg);
-                        rich_spans.push((
-                            std::mem::take(&mut current_span),
-                            Attrs::new()
-                                .family(Family::Name(TERM_FONT_FAMILY))
-                                .color(f32_to_glyph_color(c)),
-                        ));
-                    }
+                // Skip pure spaces (no need to render — background handles them).
+                // Exception: cursor cell (needs inverted text rendered).
+                if ch == ' ' && !is_block_cursor {
+                    continue;
                 }
-                current_fg = Some(fg);
 
-                let ch = if cell.c == '\0' { ' ' } else { cell.c };
-                current_span.push(ch);
-
-                if cell.flags.contains(Flags::WIDE_CHAR) {
-                    current_span.push(' ');
-                    last_col += 2;
+                let buf_width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                    self.cell_width * 2.0
                 } else {
-                    last_col += 1;
-                }
+                    self.cell_width
+                };
+
+                let buf = self.cell_buffers[row_idx][cell.col]
+                    .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
+                buf.set_metrics(&mut self.font_system, metrics);
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(buf_width + 4.0),
+                    Some(self.cell_height + 4.0),
+                );
+
+                let s: String = ch.to_string();
+                let attrs = Attrs::new()
+                    .family(Family::Name(TERM_FONT_FAMILY))
+                    .color(f32_to_glyph_color(fg));
+                buf.set_text(&mut self.font_system, &s, attrs, Shaping::Advanced);
+                buf.shape_until_scroll(&mut self.font_system, false);
             }
-
-            // Flush remaining span.
-            if !current_span.is_empty() {
-                let fg = current_fg.unwrap_or(PaletteColor::TEXT.to_f32_array());
-                rich_spans.push((
-                    current_span,
-                    Attrs::new()
-                        .family(Family::Name(TERM_FONT_FAMILY))
-                        .color(f32_to_glyph_color(fg)),
-                ));
-            }
-
-            if rich_spans.is_empty() {
-                self.row_buffers[row_idx] = None;
-                continue;
-            }
-
-            // Reuse existing Buffer if available, otherwise create a new one.
-            let buf = self.row_buffers[row_idx]
-                .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
-            buf.set_metrics(&mut self.font_system, metrics);
-            buf.set_size(
-                &mut self.font_system,
-                Some(sw),
-                Some(self.cell_height + 4.0),
-            );
-
-            let borrowed_spans: Vec<(&str, Attrs<'_>)> = rich_spans
-                .iter()
-                .map(|(s, a)| (s.as_str(), *a))
-                .collect();
-            buf.set_rich_text(
-                &mut self.font_system,
-                borrowed_spans,
-                Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-                Shaping::Advanced,
-            );
-            buf.shape_until_scroll(&mut self.font_system, false);
         }
 
         // Update cursor tracking for next frame.
-        self.last_cursor_row = Some(cursor_row);
+        self.last_cursor_pos = Some((cursor_row, cursor_col));
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(queue, Resolution { width: surface_width, height: surface_height });
 
-        // ── Prepare glyphon text from persistent row_buffers ────────────
+        // ── Prepare glyphon text from persistent cell_buffers ────────────
+        let pad_x = self.padding_x;
+        let pad_y = self.padding_y;
+        let cw = self.cell_width;
+        let ch = self.cell_height;
         let text_areas: Vec<TextArea<'_>> = self
-            .row_buffers
+            .cell_buffers
             .iter()
             .enumerate()
-            .filter_map(|(row_idx, opt_buf)| {
-                let buf = opt_buf.as_ref()?;
-                Some(TextArea {
-                    buffer: buf,
-                    left: self.padding_x,
-                    top: self.padding_y + row_idx as f32 * self.cell_height,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: surface_width as i32,
-                        bottom: surface_height as i32,
-                    },
-                    default_color: GlyphColor::rgba(
-                        PaletteColor::TEXT.r,
-                        PaletteColor::TEXT.g,
-                        PaletteColor::TEXT.b,
-                        255,
-                    ),
-                    custom_glyphs: &[],
+            .flat_map(|(row_idx, row)| {
+                row.iter().enumerate().filter_map(move |(col_idx, opt_buf)| {
+                    let buf = opt_buf.as_ref()?;
+                    Some(TextArea {
+                        buffer: buf,
+                        left: pad_x + col_idx as f32 * cw,
+                        top: pad_y + row_idx as f32 * ch,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: surface_width as i32,
+                            bottom: surface_height as i32,
+                        },
+                        default_color: GlyphColor::rgba(
+                            PaletteColor::TEXT.r,
+                            PaletteColor::TEXT.g,
+                            PaletteColor::TEXT.b,
+                            255,
+                        ),
+                        custom_glyphs: &[],
+                    })
                 })
             })
             .collect();

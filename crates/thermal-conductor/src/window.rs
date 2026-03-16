@@ -320,12 +320,12 @@ pub fn run() -> anyhow::Result<()> {
         // Check whether the byte processor has produced new PTY output.
         if state.pty_dirty.swap(false, Ordering::AcqRel) {
             state.dirty = true;
-            // Set a coalescing deadline: wait up to 4ms for more PTY data
+            // Set a coalescing deadline: wait up to 8ms for more PTY data
             // to arrive before rendering. This avoids rendering dozens of
             // intermediate frames during TUI startup floods.
             if state.render_deadline.is_none() {
                 state.render_deadline =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(4));
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(8));
             }
         }
 

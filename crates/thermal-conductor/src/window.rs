@@ -45,7 +45,8 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::{TermDamage, TermMode};
+use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
@@ -448,7 +449,58 @@ impl ConductorWindow {
         // ── Render terminal grid ─────────────────────────────────────────
         // Lock the terminal and read renderable content.
         let term_handle = self.terminal.term_handle();
-        let term = term_handle.lock();
+        let mut term = term_handle.lock();
+
+        // Query damage BEFORE reading content — damage() requires &mut self.
+        let damaged_rows: Option<HashSet<usize>> = match term.damage() {
+            TermDamage::Full => None, // None means "full redraw"
+            TermDamage::Partial(iter) => {
+                let set: HashSet<usize> = iter
+                    .filter(|bounds| bounds.is_damaged())
+                    .map(|bounds| bounds.line)
+                    .collect();
+                if set.is_empty() {
+                    // Nothing damaged — reuse entire cache, skip cell collection.
+                    let screen_lines = term.screen_lines();
+                    let content = term.renderable_content();
+                    let display_offset = content.display_offset;
+                    let cursor = content.cursor;
+                    let selection_range = content.selection;
+                    term.reset_damage();
+                    drop(term);
+
+                    self.grid_renderer.render_cached(
+                        &cursor,
+                        screen_lines,
+                        selection_range.as_ref(),
+                        display_offset,
+                        &self.wgpu.device,
+                        &self.wgpu.queue,
+                        &mut encoder,
+                        &view,
+                        self.width,
+                        self.height,
+                    );
+
+                    // ── Scroll indicator overlay ─────────────────────────────
+                    self.grid_renderer.render_scroll_indicator(
+                        display_offset,
+                        &self.wgpu.device,
+                        &self.wgpu.queue,
+                        &mut encoder,
+                        &view,
+                        self.width,
+                        self.height,
+                    );
+
+                    self.wgpu.queue.submit(std::iter::once(encoder.finish()));
+                    output.present();
+                    return;
+                }
+                Some(set)
+            }
+        };
+
         let content = term.renderable_content();
 
         let screen_lines = term.screen_lines();
@@ -457,7 +509,7 @@ impl ConductorWindow {
         let selection_range = content.selection;
 
         // Collect cells into RenderCell snapshots while holding the lock.
-        // The display_iter borrows the grid, so we must collect before releasing.
+        // When we have partial damage, only collect cells from damaged rows.
         let cells: Vec<RenderCell> = content
             .display_iter
             .filter_map(|indexed| {
@@ -469,6 +521,13 @@ impl ConductorWindow {
                 let row = usize::try_from(viewport_line).ok()?;
                 if row >= screen_lines {
                     return None;
+                }
+
+                // Skip rows that aren't damaged (partial damage only).
+                if let Some(ref damaged) = damaged_rows {
+                    if !damaged.contains(&row) {
+                        return None;
+                    }
                 }
 
                 // Skip wide char spacers.
@@ -487,6 +546,9 @@ impl ConductorWindow {
             })
             .collect();
 
+        // Reset damage while we still hold the lock.
+        term.reset_damage();
+
         // Release the term lock before the (potentially slow) GPU work.
         drop(term);
 
@@ -496,6 +558,7 @@ impl ConductorWindow {
             screen_lines,
             selection_range.as_ref(),
             display_offset,
+            damaged_rows.as_ref(),
             &self.wgpu.device,
             &self.wgpu.queue,
             &mut encoder,

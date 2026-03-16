@@ -5,6 +5,8 @@
 //! passing truecolor through directly. Renders the cursor as a distinct
 //! visual element (inverted block).
 
+use std::collections::HashSet;
+
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::Flags;
@@ -37,6 +39,7 @@ const TERM_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
 /// A lightweight snapshot of a terminal cell, suitable for lock-free rendering.
 /// Created while holding the term lock, consumed by the renderer after release.
+#[derive(Clone)]
 pub struct RenderCell {
     /// Viewport row index (0-based).
     pub row: usize,
@@ -50,6 +53,13 @@ pub struct RenderCell {
     pub bg: AnsiColor,
     /// Cell flags (BOLD, INVERSE, WIDE_CHAR, etc.).
     pub flags: Flags,
+}
+
+// ── CachedRow — cached per-row cell data ─────────────────────────────────
+
+/// Cached cell data for a single row, used to avoid rebuilding undamaged rows.
+struct CachedRow {
+    cells: Vec<RenderCell>,
 }
 
 // ── Rect rendering (for cursor and cell backgrounds) ───────────────────────
@@ -130,6 +140,9 @@ pub struct GridRenderer {
     // Padding from top-left corner of the window
     padding_x: f32,
     padding_y: f32,
+
+    // Per-row cache of cell data for damage-based rendering.
+    row_cache: Vec<Option<CachedRow>>,
 }
 
 impl GridRenderer {
@@ -234,12 +247,15 @@ impl GridRenderer {
             cell_height,
             padding_x: 4.0,
             padding_y: 4.0,
+            row_cache: Vec::new(),
         }
     }
 
     /// Update the viewport resolution (call on resize).
     pub fn resize(&mut self, queue: &wgpu::Queue, width: u32, height: u32) {
         self.viewport.update(queue, Resolution { width, height });
+        // Invalidate row cache — resize triggers a full damage anyway.
+        self.row_cache.clear();
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -393,14 +409,113 @@ impl GridRenderer {
         self.atlas.trim();
     }
 
-    /// Render the terminal grid.
+    /// Render the terminal grid with damage tracking.
     ///
-    /// Takes pre-collected `RenderCell` snapshots and cursor info.
+    /// Takes pre-collected `RenderCell` snapshots (only from damaged rows when
+    /// partial damage is available) and cursor info.
+    /// `damaged_rows`: None means full redraw; Some(set) means only those rows changed.
     /// Renders cell backgrounds, cursor, and text into the given encoder.
     /// The target_view should already have been cleared to BG by the caller.
     pub fn render(
         &mut self,
         cells: &[RenderCell],
+        cursor: &RenderableCursor,
+        screen_lines: usize,
+        selection: Option<&SelectionRange>,
+        display_offset: usize,
+        damaged_rows: Option<&HashSet<usize>>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        // ── Update row cache ────────────────────────────────────────────
+        // Ensure the cache has the right number of rows.
+        if self.row_cache.len() != screen_lines {
+            self.row_cache.resize_with(screen_lines, || None);
+        }
+
+        // Group incoming cells by row and update cache.
+        let mut new_row_cells: Vec<Vec<RenderCell>> = vec![Vec::new(); screen_lines];
+        for cell in cells {
+            if cell.row < screen_lines {
+                new_row_cells[cell.row].push(RenderCell {
+                    row: cell.row,
+                    col: cell.col,
+                    c: cell.c,
+                    fg: cell.fg,
+                    bg: cell.bg,
+                    flags: cell.flags,
+                });
+            }
+        }
+
+        // Update damaged rows in the cache.
+        for (row_idx, row_cells) in new_row_cells.into_iter().enumerate() {
+            let is_damaged = match damaged_rows {
+                None => true, // Full redraw — update all rows.
+                Some(set) => set.contains(&row_idx),
+            };
+            if is_damaged {
+                if row_cells.is_empty() {
+                    self.row_cache[row_idx] = None;
+                } else {
+                    self.row_cache[row_idx] = Some(CachedRow { cells: row_cells });
+                }
+            }
+        }
+
+        // Render from the full cache.
+        self.render_from_cache(
+            cursor,
+            screen_lines,
+            selection,
+            display_offset,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_width,
+            surface_height,
+        );
+    }
+
+    /// Render using only the existing row cache (no new cell data).
+    ///
+    /// Used when damage tracking reports zero damaged lines — the cursor or
+    /// selection may still need re-rendering but the cell content is unchanged.
+    pub fn render_cached(
+        &mut self,
+        cursor: &RenderableCursor,
+        screen_lines: usize,
+        selection: Option<&SelectionRange>,
+        display_offset: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        self.render_from_cache(
+            cursor,
+            screen_lines,
+            selection,
+            display_offset,
+            device,
+            queue,
+            encoder,
+            target_view,
+            surface_width,
+            surface_height,
+        );
+    }
+
+    /// Internal: render the terminal grid from the row cache.
+    fn render_from_cache(
+        &mut self,
         cursor: &RenderableCursor,
         screen_lines: usize,
         selection: Option<&SelectionRange>,
@@ -415,20 +530,24 @@ impl GridRenderer {
         let sw = surface_width as f32;
         let sh = surface_height as f32;
 
-        // ── Collect background rects ─────────────────────────────────────
+        // ── Collect background rects from all cached rows ───────────────
         let mut bg_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
 
-        for cell in cells {
-            let bg_color = cell_bg_color(cell);
-            if let Some(bg) = bg_color {
-                let x = self.padding_x + cell.col as f32 * self.cell_width;
-                let y = self.padding_y + cell.row as f32 * self.cell_height;
-                let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                    self.cell_width * 2.0
-                } else {
-                    self.cell_width
-                };
-                bg_rects.push(([x, y, w, self.cell_height], bg));
+        for cached in &self.row_cache {
+            if let Some(row) = cached {
+                for cell in &row.cells {
+                    let bg_color = cell_bg_color(cell);
+                    if let Some(bg) = bg_color {
+                        let x = self.padding_x + cell.col as f32 * self.cell_width;
+                        let y = self.padding_y + cell.row as f32 * self.cell_height;
+                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                            self.cell_width * 2.0
+                        } else {
+                            self.cell_width
+                        };
+                        bg_rects.push(([x, y, w, self.cell_height], bg));
+                    }
+                }
             }
         }
 
@@ -468,22 +587,24 @@ impl GridRenderer {
         // Draw a semi-transparent highlight over selected cells.
         if let Some(sel) = selection {
             let sel_color = PaletteColor::ACCENT_COOL.to_f32_array();
-            // Use a semi-transparent version of the accent color for selection.
             let sel_highlight = [sel_color[0], sel_color[1], sel_color[2], 0.35];
 
-            for cell in cells {
-                // Convert viewport row back to grid line for selection check.
-                let grid_line = Line(cell.row as i32 - display_offset as i32);
-                let point = Point::new(grid_line, Column(cell.col));
-                if sel.contains(point) {
-                    let x = self.padding_x + cell.col as f32 * self.cell_width;
-                    let y = self.padding_y + cell.row as f32 * self.cell_height;
-                    let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                        self.cell_width * 2.0
-                    } else {
-                        self.cell_width
-                    };
-                    bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
+            for cached in &self.row_cache {
+                if let Some(row) = cached {
+                    for cell in &row.cells {
+                        let grid_line = Line(cell.row as i32 - display_offset as i32);
+                        let point = Point::new(grid_line, Column(cell.col));
+                        if sel.contains(point) {
+                            let x = self.padding_x + cell.col as f32 * self.cell_width;
+                            let y = self.padding_y + cell.row as f32 * self.cell_height;
+                            let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                                self.cell_width * 2.0
+                            } else {
+                                self.cell_width
+                            };
+                            bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
+                        }
+                    }
                 }
             }
         }
@@ -507,15 +628,7 @@ impl GridRenderer {
             None
         };
 
-        // ── Group cells by row ───────────────────────────────────────────
-        let mut rows: Vec<Vec<&RenderCell>> = vec![Vec::new(); screen_lines];
-        for cell in cells {
-            if cell.row < screen_lines && !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                rows[cell.row].push(cell);
-            }
-        }
-
-        // ── Build per-row text buffers ───────────────────────────────────
+        // ── Build per-row text buffers from cache ───────────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
         let mut text_buffers: Vec<Buffer> = Vec::new();
         let mut text_placements: Vec<(usize, f32, f32)> = Vec::new();
@@ -523,22 +636,30 @@ impl GridRenderer {
         let cursor_row = cursor.point.line.0 as usize;
         let cursor_col = cursor.point.column.0;
 
-        for (row_idx, row_cells) in rows.iter().enumerate() {
+        for (row_idx, cached) in self.row_cache.iter().enumerate() {
+            let row = match cached {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let row_cells = &row.cells;
             if row_cells.is_empty() {
                 continue;
             }
 
-            // Sort cells by column.
-            let mut sorted: Vec<&&RenderCell> = row_cells.iter().collect();
-            sorted.sort_by_key(|c| c.col);
-
             // Build rich text spans with per-character colors.
+            // Cells from display_iter are already in row-major, column order —
+            // no sort needed.
             let mut rich_spans: Vec<(String, Attrs<'_>)> = Vec::new();
             let mut current_fg: Option<[f32; 4]> = None;
             let mut current_span = String::new();
             let mut last_col: usize = 0;
 
-            for cell in &sorted {
+            for cell in row_cells {
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+
                 // Fill gap spaces with default color.
                 while last_col < cell.col {
                     let default_fg = PaletteColor::TEXT.to_f32_array();

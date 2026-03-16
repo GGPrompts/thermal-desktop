@@ -136,6 +136,12 @@ pub struct GridRenderer {
     viewport: Viewport,
     text_renderer: TextRenderer,
 
+    // Separate text renderer for overlays (HUD, scroll indicator, command labels)
+    // to avoid clobbering the cell text vertex buffer when prepare() is called
+    // multiple times within the same frame.
+    overlay_atlas: TextAtlas,
+    overlay_text_renderer: TextRenderer,
+
     // Rect pipeline for backgrounds and cursor
     rect_pipeline: wgpu::RenderPipeline,
 
@@ -197,6 +203,7 @@ impl GridRenderer {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, queue, &cache, surface_format);
+        let mut overlay_atlas = TextAtlas::new(device, queue, &cache, surface_format);
         let viewport = {
             let mut vp = Viewport::new(device, &cache);
             vp.update(queue, Resolution { width, height });
@@ -204,6 +211,8 @@ impl GridRenderer {
         };
         let text_renderer =
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let overlay_text_renderer =
+            TextRenderer::new(&mut overlay_atlas, device, wgpu::MultisampleState::default(), None);
 
         // ── Measure cell dimensions from font metrics ────────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
@@ -292,8 +301,10 @@ impl GridRenderer {
             swash_cache,
             cache,
             atlas,
+            overlay_atlas,
             viewport,
             text_renderer,
+            overlay_text_renderer,
             rect_pipeline,
             rect_buf,
             rect_buf_capacity,
@@ -329,8 +340,9 @@ impl GridRenderer {
             self.rect_buf_capacity = new_capacity;
         }
 
-        // Trim atlas on resize — glyph set may change.
+        // Trim atlases on resize — glyph set may change.
         self.atlas.trim();
+        self.overlay_atlas.trim();
 
         // Invalidate row cache and persistent cell buffers — resize triggers a full damage anyway.
         self.row_cache.clear();
@@ -452,11 +464,11 @@ impl GridRenderer {
             custom_glyphs: &[],
         }];
 
-        if let Err(e) = self.text_renderer.prepare(
+        if let Err(e) = self.overlay_text_renderer.prepare(
             device,
             queue,
             &mut self.font_system,
-            &mut self.atlas,
+            &mut self.overlay_atlas,
             &self.viewport,
             text_areas,
             &mut self.swash_cache,
@@ -481,7 +493,7 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
                 tracing::warn!("scroll indicator text render failed: {}", e);
             }
         }
@@ -528,7 +540,8 @@ impl GridRenderer {
         const SEP_ALPHA: f32 = 0.3;
 
         let mut rect_vertices: Vec<ColorVertex> = Vec::new();
-        let mut label_entries: Vec<(f32, f32, String, [f32; 4])> = Vec::new();
+        #[allow(unused)]
+        let label_entries: Vec<(f32, f32, String, [f32; 4])> = Vec::new();
 
         for (i, block) in blocks.iter().enumerate() {
             // Convert absolute grid line to viewport row.
@@ -613,25 +626,8 @@ impl GridRenderer {
                 rect_vertices.extend_from_slice(&sep_verts);
             }
 
-            // ── Command label ──────────────────────────────────────────────
-            // Render the command text as a faint label at the prompt line,
-            // offset to the right of the bar.
-            if let Some(ref cmd_text) = block.command {
-                if vis_start < screen_lines {
-                    let label_x = self.padding_x + BAR_WIDTH + 4.0;
-                    let label_y = self.padding_y + vis_start as f32 * self.cell_height;
-                    // Use the bar color but more faint for the label.
-                    let label_color = [bar_color[0], bar_color[1], bar_color[2], 0.5];
-                    // Truncate long commands.
-                    let max_chars = ((sw - label_x - self.padding_x) / self.cell_width) as usize;
-                    let display_cmd = if cmd_text.len() > max_chars && max_chars > 3 {
-                        format!("{}...", &cmd_text[..max_chars - 3])
-                    } else {
-                        cmd_text.clone()
-                    };
-                    label_entries.push((label_x, label_y, display_cmd, label_color));
-                }
-            }
+            // Command labels omitted — the left-edge color bars and separators
+            // provide sufficient visual cues without overlapping cell text.
         }
 
         // ── Render rect pass (bars + separators) ───────────────────────────
@@ -974,11 +970,11 @@ impl GridRenderer {
             })
             .collect();
 
-        if let Err(e) = self.text_renderer.prepare(
+        if let Err(e) = self.overlay_text_renderer.prepare(
             device,
             queue,
             &mut self.font_system,
-            &mut self.atlas,
+            &mut self.overlay_atlas,
             &self.viewport,
             text_areas,
             &mut self.swash_cache,
@@ -1003,7 +999,7 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
                 tracing::warn!("Claude HUD text render failed: {}", e);
             }
         }
@@ -1307,6 +1303,8 @@ impl GridRenderer {
                 *slot = None;
             }
 
+            // (debug logging removed)
+
             // Build per-cell Buffers.
             for cell in row_cells {
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -1463,6 +1461,7 @@ impl GridRenderer {
         self.frame_count += 1;
         if self.frame_count % ATLAS_TRIM_INTERVAL == 0 {
             self.atlas.trim();
+            self.overlay_atlas.trim();
         }
     }
 }

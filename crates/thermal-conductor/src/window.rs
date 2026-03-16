@@ -41,6 +41,7 @@ use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
     zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1},
 };
 
+use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
@@ -165,7 +166,7 @@ pub fn run() -> anyhow::Result<()> {
     // ── Terminal + PTY ────────────────────────────────────────────────────────
     // Calculate initial grid size from the renderer's cell metrics.
     let (init_cols, init_rows) = grid_renderer.grid_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    let terminal = Terminal::with_size(init_cols, init_rows);
+    let mut terminal = Terminal::with_size(init_cols, init_rows);
 
     // Start a tokio runtime for the async PTY reader and byte processor.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -201,6 +202,10 @@ pub fn run() -> anyhow::Result<()> {
     // The byte processor needs the tokio runtime to spawn its task.
     let _guard = tokio_rt.enter();
     terminal.spawn_byte_processor(pty_output_rx, Arc::clone(&pty_dirty), wakeup_write);
+
+    // Take the terminal event receiver — we need to relay PtyWrite responses
+    // (DA1, DA2, mode queries, etc.) back to the PTY so TUI apps don't timeout.
+    let term_event_rx = terminal.take_event_rx().expect("event_rx already taken");
 
     // Resize PTY to match grid.
     let _ = pty.resize(init_cols as u16, init_rows as u16);
@@ -248,6 +253,7 @@ pub fn run() -> anyhow::Result<()> {
         repeat_delay: std::time::Duration::from_millis(400),
         repeat_rate: std::time::Duration::from_millis(33),
         render_deadline: None,
+        term_event_rx,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -314,6 +320,24 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
                 // Don't set dirty — PTY echo will set pty_dirty.
+            }
+        }
+
+        // Drain terminal events — relay PtyWrite responses back to the PTY.
+        // This is critical: alacritty_terminal generates responses to DA1, DA2,
+        // mode queries, etc. via Event::PtyWrite. Without this, TUI apps like
+        // bubbletea timeout waiting for responses (~2-4 seconds).
+        while let Ok(event) = state.term_event_rx.try_recv() {
+            match event {
+                TermEvent::PtyWrite(text) => {
+                    if let Err(e) = state.pty.write(text.as_bytes()) {
+                        tracing::warn!("Failed to write terminal response to PTY: {e}");
+                    }
+                }
+                TermEvent::Title(title) => {
+                    state.window.set_title(&title);
+                }
+                _ => {}
             }
         }
 
@@ -413,6 +437,8 @@ struct ConductorWindow {
     /// When set, defer rendering until this deadline to coalesce PTY output
     /// (e.g. during TUI startup floods). Cleared after each render.
     render_deadline: Option<std::time::Instant>,
+    /// Terminal event receiver — relays PtyWrite responses back to the PTY.
+    term_event_rx: tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
 }
 
 impl ConductorWindow {

@@ -153,6 +153,12 @@ pub struct GridRenderer {
     // Per-row cache of cell data for damage-based rendering.
     row_cache: Vec<Option<CachedRow>>,
 
+    // Persistent per-row glyphon Buffers — only rebuilt for damaged rows.
+    row_buffers: Vec<Option<Buffer>>,
+
+    // Track last cursor row to rebuild affected buffers when cursor moves.
+    last_cursor_row: Option<usize>,
+
     // Frame counter for throttled atlas trimming.
     frame_count: u64,
 }
@@ -201,7 +207,7 @@ impl GridRenderer {
             &mut font_system,
             "M",
             Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-            Shaping::Advanced,
+            Shaping::Basic,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
 
@@ -290,6 +296,8 @@ impl GridRenderer {
             padding_x,
             padding_y,
             row_cache: Vec::new(),
+            row_buffers: Vec::new(),
+            last_cursor_row: None,
             frame_count: 0,
         }
     }
@@ -318,8 +326,10 @@ impl GridRenderer {
         // Trim atlas on resize — glyph set may change.
         self.atlas.trim();
 
-        // Invalidate row cache — resize triggers a full damage anyway.
+        // Invalidate row cache and persistent text buffers — resize triggers a full damage anyway.
         self.row_cache.clear();
+        self.row_buffers.clear();
+        self.last_cursor_row = None;
     }
 
     /// Calculate terminal grid dimensions (cols, rows) for a given pixel size.
@@ -530,12 +540,13 @@ impl GridRenderer {
             }
         }
 
-        // Render from the full cache.
+        // Render from the full cache, passing damage info for buffer reuse.
         self.render_from_cache(
             cursor,
             screen_lines,
             selection,
             display_offset,
+            damaged_rows,
             device,
             queue,
             encoder,
@@ -562,11 +573,14 @@ impl GridRenderer {
         surface_width: u32,
         surface_height: u32,
     ) {
+        // No cell damage — pass empty set so only cursor-affected rows rebuild.
+        let empty = HashSet::new();
         self.render_from_cache(
             cursor,
             screen_lines,
             selection,
             display_offset,
+            Some(&empty),
             device,
             queue,
             encoder,
@@ -577,12 +591,16 @@ impl GridRenderer {
     }
 
     /// Internal: render the terminal grid from the row cache.
+    ///
+    /// `damaged_rows`: `None` = full redraw (all buffers rebuilt),
+    /// `Some(set)` = only those rows (plus cursor-affected rows) are rebuilt.
     fn render_from_cache(
         &mut self,
         cursor: &RenderableCursor,
         screen_lines: usize,
         selection: Option<&SelectionRange>,
         display_offset: usize,
+        damaged_rows: Option<&HashSet<usize>>,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -701,28 +719,57 @@ impl GridRenderer {
             queue.write_buffer(&self.rect_buf, 0, data);
         }
 
-        // ── Build per-row text buffers from cache ───────────────────────
+        // ── Rebuild only damaged per-row glyphon Buffers ────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
-        let mut text_buffers: Vec<Buffer> = Vec::new();
-        let mut text_placements: Vec<(usize, f32, f32)> = Vec::new();
 
         let cursor_row = cursor.point.line.0 as usize;
         let cursor_col = cursor.point.column.0;
 
+        // Ensure row_buffers is sized to screen_lines.
+        if self.row_buffers.len() != screen_lines {
+            self.row_buffers.resize_with(screen_lines, || None);
+        }
+
+        // Determine which rows need their glyphon Buffer rebuilt.
+        // Cursor row always needs rebuild (block cursor inverts fg color).
+        // Previous cursor row also needs rebuild (cursor moved away).
+        let prev_cursor_row = self.last_cursor_row;
+        let full_rebuild = damaged_rows.is_none();
+
         for (row_idx, cached) in self.row_cache.iter().enumerate() {
+            // Decide if this row's Buffer needs rebuilding.
+            let needs_rebuild = if full_rebuild {
+                true
+            } else {
+                let in_damage_set = damaged_rows
+                    .map(|set| set.contains(&row_idx))
+                    .unwrap_or(false);
+                let is_cursor_row = row_idx == cursor_row;
+                let was_cursor_row = prev_cursor_row.map(|r| r == row_idx).unwrap_or(false);
+                in_damage_set || is_cursor_row || was_cursor_row
+            };
+
+            if !needs_rebuild {
+                // Reuse existing Buffer (if any).
+                continue;
+            }
+
             let row = match cached {
                 Some(r) => r,
-                None => continue,
+                None => {
+                    // Row is empty — drop any existing buffer.
+                    self.row_buffers[row_idx] = None;
+                    continue;
+                }
             };
 
             let row_cells = &row.cells;
             if row_cells.is_empty() {
+                self.row_buffers[row_idx] = None;
                 continue;
             }
 
             // Build rich text spans with per-character colors.
-            // Cells from display_iter are already in row-major, column order —
-            // no sort needed.
             let mut rich_spans: Vec<(String, Attrs<'_>)> = Vec::new();
             let mut current_fg: Option<[f32; 4]> = None;
             let mut current_span = String::new();
@@ -800,11 +847,14 @@ impl GridRenderer {
             }
 
             if rich_spans.is_empty() {
+                self.row_buffers[row_idx] = None;
                 continue;
             }
 
-            // Create the glyphon buffer.
-            let mut buf = Buffer::new(&mut self.font_system, metrics);
+            // Reuse existing Buffer if available, otherwise create a new one.
+            let buf = self.row_buffers[row_idx]
+                .get_or_insert_with(|| Buffer::new(&mut self.font_system, metrics));
+            buf.set_metrics(&mut self.font_system, metrics);
             buf.set_size(
                 &mut self.font_system,
                 Some(sw),
@@ -819,31 +869,28 @@ impl GridRenderer {
                 &mut self.font_system,
                 borrowed_spans,
                 Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-                Shaping::Advanced,
+                Shaping::Basic,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
-
-            let buf_idx = text_buffers.len();
-            text_buffers.push(buf);
-            text_placements.push((
-                buf_idx,
-                self.padding_x,
-                self.padding_y + row_idx as f32 * self.cell_height,
-            ));
         }
+
+        // Update cursor tracking for next frame.
+        self.last_cursor_row = Some(cursor_row);
 
         // ── Update viewport ──────────────────────────────────────────────
         self.viewport.update(queue, Resolution { width: surface_width, height: surface_height });
 
-        // ── Prepare glyphon text ─────────────────────────────────────────
-        let has_text = !text_buffers.is_empty();
-        if has_text {
-            let text_areas: Vec<TextArea<'_>> = text_placements
-                .iter()
-                .map(|(idx, x, y)| TextArea {
-                    buffer: &text_buffers[*idx],
-                    left: *x,
-                    top: *y,
+        // ── Prepare glyphon text from persistent row_buffers ────────────
+        let text_areas: Vec<TextArea<'_>> = self
+            .row_buffers
+            .iter()
+            .enumerate()
+            .filter_map(|(row_idx, opt_buf)| {
+                let buf = opt_buf.as_ref()?;
+                Some(TextArea {
+                    buffer: buf,
+                    left: self.padding_x,
+                    top: self.padding_y + row_idx as f32 * self.cell_height,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,
@@ -859,8 +906,11 @@ impl GridRenderer {
                     ),
                     custom_glyphs: &[],
                 })
-                .collect();
+            })
+            .collect();
 
+        let has_text = !text_areas.is_empty();
+        if has_text {
             if let Err(e) = self.text_renderer.prepare(
                 device,
                 queue,

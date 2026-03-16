@@ -120,6 +120,9 @@ fn rect_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 ///
 /// Renders the alacritty_terminal grid via glyphon text + colored rect pipeline
 /// for backgrounds and cursor.
+/// How many frames between atlas trim operations (~16s at 60fps).
+const ATLAS_TRIM_INTERVAL: u64 = 1000;
+
 pub struct GridRenderer {
     // Glyphon state
     font_system: FontSystem,
@@ -133,6 +136,12 @@ pub struct GridRenderer {
     // Rect pipeline for backgrounds and cursor
     rect_pipeline: wgpu::RenderPipeline,
 
+    // Persistent vertex buffer for cell backgrounds / cursor / selection rects.
+    // Sized to hold the maximum number of rects for the current grid dimensions.
+    rect_buf: wgpu::Buffer,
+    /// Maximum number of **vertices** the persistent rect buffer can hold.
+    rect_buf_capacity: u64,
+
     // Cell metrics (computed from font at init)
     pub cell_width: f32,
     pub cell_height: f32,
@@ -143,6 +152,20 @@ pub struct GridRenderer {
 
     // Per-row cache of cell data for damage-based rendering.
     row_cache: Vec<Option<CachedRow>>,
+
+    // Frame counter for throttled atlas trimming.
+    frame_count: u64,
+}
+
+/// Estimate the maximum number of vertices needed for the rect buffer.
+///
+/// Each cell can produce one background rect (6 vertices). The cursor can add
+/// up to 4 rects (hollow block). Selection overlays can double the cell count.
+/// We over-allocate by 2x + a constant to avoid frequent reallocation.
+fn estimate_rect_buf_vertices(cols: usize, rows: usize) -> u64 {
+    // cells + cursor (4 rects) + selection (cells again) + small margin
+    let max_rects = (rows * cols) * 2 + 8;
+    (max_rects as u64) * 6 // 6 vertices per rect
 }
 
 impl GridRenderer {
@@ -235,6 +258,23 @@ impl GridRenderer {
             cache: None,
         });
 
+        // ── Persistent rect vertex buffer ─────────────────────────────
+        let padding_x = 4.0_f32;
+        let padding_y = 4.0_f32;
+        let usable_w = width as f32 - padding_x * 2.0;
+        let usable_h = height as f32 - padding_y * 2.0;
+        let cols = (usable_w / cell_width).floor().max(2.0) as usize;
+        let rows = (usable_h / cell_height).floor().max(1.0) as usize;
+        let rect_buf_capacity = estimate_rect_buf_vertices(cols, rows);
+        let rect_buf_size = rect_buf_capacity * std::mem::size_of::<ColorVertex>() as u64;
+
+        let rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("grid_rect_vbuf_persistent"),
+            size: rect_buf_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             font_system,
             swash_cache,
@@ -243,17 +283,41 @@ impl GridRenderer {
             viewport,
             text_renderer,
             rect_pipeline,
+            rect_buf,
+            rect_buf_capacity,
             cell_width,
             cell_height,
-            padding_x: 4.0,
-            padding_y: 4.0,
+            padding_x,
+            padding_y,
             row_cache: Vec::new(),
+            frame_count: 0,
         }
     }
 
     /// Update the viewport resolution (call on resize).
-    pub fn resize(&mut self, queue: &wgpu::Queue, width: u32, height: u32) {
+    ///
+    /// Also recreates the persistent rect buffer to match the new grid
+    /// dimensions and trims the atlas (since the glyph set may change).
+    pub fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         self.viewport.update(queue, Resolution { width, height });
+
+        // Recompute persistent buffer capacity for new grid size.
+        let (cols, rows) = self.grid_size(width, height);
+        let new_capacity = estimate_rect_buf_vertices(cols, rows);
+        if new_capacity != self.rect_buf_capacity {
+            let buf_size = new_capacity * std::mem::size_of::<ColorVertex>() as u64;
+            self.rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("grid_rect_vbuf_persistent"),
+                size: buf_size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.rect_buf_capacity = new_capacity;
+        }
+
+        // Trim atlas on resize — glyph set may change.
+        self.atlas.trim();
+
         // Invalidate row cache — resize triggers a full damage anyway.
         self.row_cache.clear();
     }
@@ -405,8 +469,7 @@ impl GridRenderer {
                 tracing::warn!("scroll indicator text render failed: {}", e);
             }
         }
-
-        self.atlas.trim();
+        // Atlas trimming handled by render_from_cache frame counter; no per-call trim here.
     }
 
     /// Render the terminal grid with damage tracking.
@@ -609,24 +672,34 @@ impl GridRenderer {
             }
         }
 
-        // ── Build rect vertex buffer ─────────────────────────────────────
+        // ── Write rect vertices into persistent buffer ──────────────────
         let mut rect_vertices: Vec<ColorVertex> = Vec::new();
         for (xywh, color) in &bg_rects {
             let verts = pixel_rect_to_ndc(xywh[0], xywh[1], xywh[2], xywh[3], sw, sh, *color);
             rect_vertices.extend_from_slice(&verts);
         }
 
-        let rect_vbuf = if !rect_vertices.is_empty() {
+        let rect_vertex_count = rect_vertices.len() as u32;
+
+        if !rect_vertices.is_empty() {
+            let needed = rect_vertices.len() as u64;
+
+            // If the persistent buffer is too small, reallocate it.
+            if needed > self.rect_buf_capacity {
+                let new_capacity = needed * 2; // double to avoid frequent realloc
+                let buf_size = new_capacity * std::mem::size_of::<ColorVertex>() as u64;
+                self.rect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("grid_rect_vbuf_persistent"),
+                    size: buf_size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.rect_buf_capacity = new_capacity;
+            }
+
             let data = bytemuck::cast_slice::<ColorVertex, u8>(&rect_vertices);
-            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("grid_rect_vbuf"),
-                contents: data,
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            Some((buf, rect_vertices.len() as u32))
-        } else {
-            None
-        };
+            queue.write_buffer(&self.rect_buf, 0, data);
+        }
 
         // ── Build per-row text buffers from cache ───────────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
@@ -818,10 +891,10 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Some((vbuf, count)) = &rect_vbuf {
+            if rect_vertex_count > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.draw(0..*count, 0..1);
+                pass.set_vertex_buffer(0, self.rect_buf.slice(..));
+                pass.draw(0..rect_vertex_count, 0..1);
             }
         }
 
@@ -847,8 +920,11 @@ impl GridRenderer {
             }
         }
 
-        // Trim atlas to free unused glyphs.
-        self.atlas.trim();
+        // Trim atlas periodically to free unused glyphs (not every frame).
+        self.frame_count += 1;
+        if self.frame_count % ATLAS_TRIM_INTERVAL == 0 {
+            self.atlas.trim();
+        }
     }
 }
 

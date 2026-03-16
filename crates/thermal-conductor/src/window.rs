@@ -312,7 +312,7 @@ pub fn run() -> anyhow::Result<()> {
                     }
                 }
                 state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
-                state.dirty = true;
+                // Don't set dirty — PTY echo will set pty_dirty.
             }
         }
 
@@ -946,7 +946,7 @@ impl WindowHandler for ConductorWindow {
             self.wgpu.surface.configure(&self.wgpu.device, &self.wgpu.config);
 
             // Resize the grid renderer viewport.
-            self.grid_renderer.resize(&self.wgpu.queue, w, h);
+            self.grid_renderer.resize(&self.wgpu.device, &self.wgpu.queue, w, h);
 
             // Recalculate terminal grid dimensions and resize.
             let (cols, rows) = self.grid_renderer.grid_size(w, h);
@@ -1129,7 +1129,9 @@ impl KeyboardHandler for ConductorWindow {
             self.repeat_next = Some(std::time::Instant::now() + self.repeat_delay);
         }
 
-        self.dirty = true;
+        // Don't set dirty here — the PTY echo will set pty_dirty and
+        // trigger a render when the shell response arrives, avoiding an
+        // unnecessary extra GPU frame on every keypress.
     }
 
     fn release_key(

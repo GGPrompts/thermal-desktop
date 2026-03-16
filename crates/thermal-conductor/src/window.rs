@@ -46,6 +46,7 @@ use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermMode;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -183,9 +184,22 @@ pub fn run() -> anyhow::Result<()> {
     // Shared dirty flag: the byte processor sets this to true whenever new
     // PTY output has been processed, so the render loop knows to re-render.
     let pty_dirty = Arc::new(AtomicBool::new(false));
+    // Wakeup pipe: the byte processor writes a byte here after processing
+    // PTY output so the poll() in the event loop wakes immediately.
+    let (wakeup_read, wakeup_write) = nix::unistd::pipe().expect("Failed to create wakeup pipe");
+    // Set read end to non-blocking so we can drain it without blocking.
+    {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        let flags = fcntl(wakeup_read.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0);
+        let _ = fcntl(
+            wakeup_read.as_raw_fd(),
+            FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+        );
+    }
+    let wakeup_read_fd = wakeup_read.as_raw_fd();
     // The byte processor needs the tokio runtime to spawn its task.
     let _guard = tokio_rt.enter();
-    terminal.spawn_byte_processor(pty_output_rx, Arc::clone(&pty_dirty));
+    terminal.spawn_byte_processor(pty_output_rx, Arc::clone(&pty_dirty), wakeup_write);
 
     // Resize PTY to match grid.
     let _ = pty.resize(init_cols as u16, init_rows as u16);
@@ -228,32 +242,58 @@ pub fn run() -> anyhow::Result<()> {
         mouse_left_held: false,
         shortcuts_inhibit_manager,
         shortcuts_inhibitor: None,
+        repeat_key: None,
+        repeat_next: None,
+        repeat_delay: std::time::Duration::from_millis(400),
+        repeat_rate: std::time::Duration::from_millis(33),
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
-    // Use non-blocking dispatch so we can render when PTY output arrives,
-    // not just when Wayland events come in. We dispatch pending events first,
-    // then use prepare_read + poll with a short timeout to wait for new data
-    // from either Wayland or the PTY (via the 16ms timeout).
+    // Non-blocking dispatch with short poll timeout for low-latency input
+    // and PTY output. Key repeat is driven by our own timer since we don't
+    // use calloop (which SCTK's built-in repeat requires).
     loop {
         // Flush outgoing Wayland requests.
         if let Err(e) = conn.flush() {
             tracing::warn!("Wayland flush failed: {e}");
         }
 
+        // Determine poll timeout based on whether key repeat is active.
+        // When idle, use 16ms (~60fps). When repeat is pending, wake at
+        // the exact repeat time. This avoids busy-spinning while idle.
+        let poll_ms: u16 = if let Some(next) = state.repeat_next {
+            let until = next.saturating_duration_since(std::time::Instant::now());
+            (until.as_millis().min(16) as u16).max(1)
+        } else {
+            16
+        };
+
         // Try to prepare a read guard. If None, there are already pending events.
         if let Some(guard) = conn.prepare_read() {
-            // Poll the Wayland fd with a 16ms timeout (~60fps) so we also
-            // wake up to render PTY output even without Wayland events.
             use std::os::fd::AsRawFd;
-            let fd = guard.connection_fd().as_raw_fd();
-            let mut pollfd = [nix::poll::PollFd::new(
-                unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) },
-                nix::poll::PollFlags::POLLIN,
-            )];
-            let _ = nix::poll::poll(&mut pollfd, nix::poll::PollTimeout::from(16u16));
-            // Read any new Wayland data (non-blocking after poll).
+            let wl_fd = guard.connection_fd().as_raw_fd();
+            // Poll BOTH the Wayland fd AND the wakeup pipe. This way we
+            // wake instantly when either Wayland events or PTY data arrive,
+            // instead of waiting for the timeout.
+            let mut pollfds = [
+                nix::poll::PollFd::new(
+                    unsafe { std::os::fd::BorrowedFd::borrow_raw(wl_fd) },
+                    nix::poll::PollFlags::POLLIN,
+                ),
+                nix::poll::PollFd::new(
+                    unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_read_fd) },
+                    nix::poll::PollFlags::POLLIN,
+                ),
+            ];
+            let _ = nix::poll::poll(&mut pollfds, nix::poll::PollTimeout::from(poll_ms));
             let _ = guard.read();
+            // Drain the wakeup pipe (non-blocking).
+            let mut drain_buf = [0u8; 64];
+            use std::io::Read;
+            let mut wakeup_file = unsafe { std::fs::File::from_raw_fd(wakeup_read_fd) };
+            let _ = wakeup_file.read(&mut drain_buf);
+            // Don't let File close the fd — we need it for the next iteration.
+            std::mem::forget(wakeup_file);
         }
 
         // Dispatch all pending Wayland events.
@@ -261,24 +301,26 @@ pub fn run() -> anyhow::Result<()> {
             .dispatch_pending(&mut state)
             .expect("Wayland event dispatch failed");
 
+        // ── Key repeat ──────────────────────────────────────────────────
+        if let (Some(key), Some(next)) = (&state.repeat_key, state.repeat_next) {
+            if std::time::Instant::now() >= next {
+                let key_clone = key.clone();
+                if let Some(bytes) = input::encode_key(&key_clone, &state.modifiers) {
+                    if let Err(e) = state.pty.write(&bytes) {
+                        tracing::warn!("Failed to write repeat key to PTY: {e}");
+                    }
+                }
+                state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
+                state.dirty = true;
+            }
+        }
+
         // Check whether the byte processor has produced new PTY output.
         if state.pty_dirty.swap(false, Ordering::AcqRel) {
             state.dirty = true;
         }
 
         if state.configured && state.dirty {
-            // Check if terminal has content (debug).
-            {
-                let th = state.terminal.term_handle();
-                let t = th.lock();
-                let cols = t.columns();
-                let lines = t.screen_lines();
-                let cursor = t.grid().cursor.point;
-                static ONCE: std::sync::Once = std::sync::Once::new();
-                ONCE.call_once(|| {
-                    tracing::info!(cols, lines, ?cursor, "First render: term grid state");
-                });
-            }
             state.render_frame();
             state.dirty = false;
         }
@@ -342,6 +384,15 @@ struct ConductorWindow {
     shortcuts_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
     /// Active inhibitor — created on keyboard focus, destroyed on blur.
     shortcuts_inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
+    // Key repeat state
+    /// The last key event that should repeat, or None if no repeat is active.
+    repeat_key: Option<KeyEvent>,
+    /// When key repeat should next fire.
+    repeat_next: Option<std::time::Instant>,
+    /// Delay before first repeat (typically ~400ms).
+    repeat_delay: std::time::Duration,
+    /// Interval between repeats (typically ~33ms for 30 chars/sec).
+    repeat_rate: std::time::Duration,
 }
 
 impl ConductorWindow {
@@ -1009,6 +1060,12 @@ impl KeyboardHandler for ConductorWindow {
             }
         }
 
+        // Start key repeat for this key. Modifier-only keys don't repeat.
+        if input::encode_key(&event, &self.modifiers).is_some() {
+            self.repeat_key = Some(event);
+            self.repeat_next = Some(std::time::Instant::now() + self.repeat_delay);
+        }
+
         self.dirty = true;
     }
 
@@ -1020,6 +1077,9 @@ impl KeyboardHandler for ConductorWindow {
         _: u32,
         _event: KeyEvent,
     ) {
+        // Stop key repeat when any key is released.
+        self.repeat_key = None;
+        self.repeat_next = None;
     }
 
     fn update_modifiers(
@@ -1045,40 +1105,135 @@ impl PointerHandler for ConductorWindow {
         _pointer: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        // Check if the terminal program wants mouse events (SGR mouse mode).
+        let mouse_mode = {
+            let th = self.terminal.term_handle();
+            let t = th.lock();
+            let mode = t.mode();
+            // Any of: MOUSE_REPORT_CLICK (1000), MOUSE_DRAG (1002),
+            // MOUSE_MOTION (1003), or SGR_MOUSE (1006)
+            mode.contains(TermMode::MOUSE_REPORT_CLICK)
+                || mode.contains(TermMode::MOUSE_DRAG)
+                || mode.contains(TermMode::MOUSE_MOTION)
+        };
+
         for event in events {
             let (px, py) = event.position;
+            let (col, line, _side) = self.pixel_to_grid(px, py);
+            let cx = col.0 + 1; // SGR is 1-based
+            let cy = line.0 + 1;
 
-            match event.kind {
-                PointerEventKind::Press { button, .. } => {
-                    if button == BTN_LEFT {
-                        // Start a new selection at the click position.
-                        let (col, line, side) = self.pixel_to_grid(px, py);
-                        self.selection_start(col, line, side);
+            if mouse_mode {
+                // Forward mouse events to PTY as SGR escape sequences.
+                // Format: \x1b[<btn;col;row M (press) or m (release)
+                let sgr = match event.kind {
+                    PointerEventKind::Press { button, .. } => {
+                        let btn = match button {
+                            BTN_LEFT => 0,
+                            BTN_MIDDLE => 1,
+                            0x111 => 2, // BTN_RIGHT
+                            _ => continue,
+                        };
+                        Some(format!("\x1b[<{btn};{cx};{cy}M"))
+                    }
+                    PointerEventKind::Release { button, .. } => {
+                        let btn = match button {
+                            BTN_LEFT => 0,
+                            BTN_MIDDLE => 1,
+                            0x111 => 2,
+                            _ => continue,
+                        };
+                        Some(format!("\x1b[<{btn};{cx};{cy}m"))
+                    }
+                    PointerEventKind::Motion { .. } => {
+                        // Motion reporting (mode 1003) or drag (1002 + button held)
+                        if self.mouse_left_held {
+                            Some(format!("\x1b[<32;{cx};{cy}M"))
+                        } else {
+                            let th = self.terminal.term_handle();
+                            let t = th.lock();
+                            if t.mode().contains(TermMode::MOUSE_MOTION) {
+                                Some(format!("\x1b[<35;{cx};{cy}M"))
+                            } else {
+                                None
+                            }
+                        }
+                    }
+                    PointerEventKind::Axis {
+                        vertical,
+                        ..
+                    } => {
+                        // Scroll: button 64 (up) / 65 (down) in SGR mode.
+                        let btn = if vertical.discrete > 0 { 65 } else { 64 };
+                        let steps = vertical.discrete.unsigned_abs().max(1);
+                        let mut seq = String::new();
+                        for _ in 0..steps {
+                            seq.push_str(&format!("\x1b[<{btn};{cx};{cy}M"));
+                        }
+                        Some(seq)
+                    }
+                    _ => None,
+                };
+
+                if let Some(seq) = sgr {
+                    if let Err(e) = self.pty.write(seq.as_bytes()) {
+                        tracing::warn!("Failed to write mouse event to PTY: {e}");
+                    }
+                    self.dirty = true;
+                }
+
+                // Track left button state for drag reporting.
+                match event.kind {
+                    PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
                         self.mouse_left_held = true;
-                        self.dirty = true;
-                    } else if button == BTN_MIDDLE {
-                        // Middle-click: paste from primary selection.
-                        self.primary_paste();
-                        self.dirty = true;
                     }
-                }
-                PointerEventKind::Release { button, .. } => {
-                    if button == BTN_LEFT {
+                    PointerEventKind::Release { button, .. } if button == BTN_LEFT => {
                         self.mouse_left_held = false;
-                        // Finalize: copy selection text to primary clipboard.
-                        self.selection_finalize();
+                    }
+                    _ => {}
+                }
+            } else {
+                // No mouse mode — use mouse for selection and scroll.
+                match event.kind {
+                    PointerEventKind::Press { button, .. } => {
+                        if button == BTN_LEFT {
+                            self.selection_start(col, line, _side);
+                            self.mouse_left_held = true;
+                            self.dirty = true;
+                        } else if button == BTN_MIDDLE {
+                            self.primary_paste();
+                            self.dirty = true;
+                        }
+                    }
+                    PointerEventKind::Release { button, .. } => {
+                        if button == BTN_LEFT {
+                            self.mouse_left_held = false;
+                            self.selection_finalize();
+                            self.dirty = true;
+                        }
+                    }
+                    PointerEventKind::Motion { .. } => {
+                        if self.mouse_left_held {
+                            self.selection_update(col, line, _side);
+                            self.dirty = true;
+                        }
+                    }
+                    PointerEventKind::Axis {
+                        vertical,
+                        ..
+                    } => {
+                        // Scroll the terminal scrollback when not in mouse mode.
+                        let th = self.terminal.term_handle();
+                        let mut t = th.lock();
+                        if vertical.discrete > 0 {
+                            t.scroll_display(Scroll::Delta(3));
+                        } else if vertical.discrete < 0 {
+                            t.scroll_display(Scroll::Delta(-3));
+                        }
                         self.dirty = true;
                     }
+                    _ => {}
                 }
-                PointerEventKind::Motion { .. } => {
-                    if self.mouse_left_held {
-                        // Update selection end point while dragging.
-                        let (col, line, side) = self.pixel_to_grid(px, py);
-                        self.selection_update(col, line, side);
-                        self.dirty = true;
-                    }
-                }
-                _ => {}
             }
         }
     }

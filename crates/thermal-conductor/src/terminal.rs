@@ -11,6 +11,7 @@
 //! stored in the `Terminal` struct for future Phase 4 semantic scrollback
 //! rendering.
 
+use std::os::fd::AsRawFd;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -186,6 +187,7 @@ impl Terminal {
         &self,
         mut pty_rx: mpsc::Receiver<Vec<u8>>,
         pty_dirty: Arc<AtomicBool>,
+        wakeup_fd: std::os::fd::OwnedFd,
     ) {
         let term = Arc::clone(&self.term);
         let tracker = Arc::clone(&self.command_tracker);
@@ -193,42 +195,51 @@ impl Terminal {
         tokio::spawn(async move {
             let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
             let mut osc_parser = Osc633Parser::new();
+            let wakeup_raw = {
+                use std::os::fd::AsRawFd;
+                wakeup_fd.as_raw_fd()
+            };
 
             info!("Terminal byte processor started");
 
-            while let Some(bytes) = pty_rx.recv().await {
-                // ── OSC 633 interception (non-destructive) ─────────────────
-                // The parser scans for shell-integration marks but does NOT
-                // remove them from the byte stream.  alacritty will just log
-                // them as "unhandled osc" at debug level — harmless.
-                let marks = osc_parser.feed(&bytes);
-                if !marks.is_empty() {
-                    let mut t = tracker.lock();
-                    // Update the current-line hint from the grid cursor.
-                    // We read it under the Term lock then immediately drop
-                    // it before taking the tracker lock to keep locking
-                    // order consistent.
-                    let cursor_line = {
-                        let term_guard = term.lock();
-                        // `Line` wraps an `i32`; negative values occur in
-                        // scrollback, which can't happen while the shell is
-                        // actively writing, so clamping to 0 is safe.
-                        term_guard.grid().cursor.point.line.0.max(0) as usize
-                    };
-                    t.set_current_line(cursor_line);
-                    for mark in &marks {
-                        t.apply(mark);
-                    }
+            while let Some(first_bytes) = pty_rx.recv().await {
+                // Batch all available chunks before processing. This avoids
+                // rendering intermediate frames during burst output (e.g. TUI
+                // startup that dumps 50-100KB of escape sequences at once).
+                let mut batched = vec![first_bytes];
+                while let Ok(more) = pty_rx.try_recv() {
+                    batched.push(more);
                 }
 
-                // ── Normal VTE processing ───────────────────────────────────
+                // Process all batched chunks under a single term lock.
                 {
-                    let mut term = term.lock();
-                    processor.advance(&mut *term, &bytes);
+                    let mut term_guard = term.lock();
+                    for bytes in &batched {
+                        // OSC 633 interception (non-destructive).
+                        let marks = osc_parser.feed(bytes);
+                        if !marks.is_empty() {
+                            let cursor_line =
+                                term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            drop(term_guard);
+                            let mut t = tracker.lock();
+                            t.set_current_line(cursor_line);
+                            for mark in &marks {
+                                t.apply(mark);
+                            }
+                            drop(t);
+                            term_guard = term.lock();
+                        }
+                        processor.advance(&mut *term_guard, bytes);
+                    }
                 }
 
                 // Signal the render loop that new content is available.
                 pty_dirty.store(true, Ordering::Release);
+                // Wake the poll() immediately so we don't wait for timeout.
+                let _ = nix::unistd::write(
+                    unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_raw) },
+                    &[1u8],
+                );
             }
 
             info!("Terminal byte processor exiting (PTY channel closed)");

@@ -23,6 +23,8 @@ use wgpu::util::DeviceExt;
 
 use tracing::debug;
 
+use crate::osc633::{CommandBlock, CommandState};
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Font size in points for the terminal grid.
@@ -484,6 +486,285 @@ impl GridRenderer {
             }
         }
         // Atlas trimming handled by render_from_cache frame counter; no per-call trim here.
+    }
+
+    /// Render semantic command block boundaries from OSC 633 shell integration.
+    ///
+    /// For each CommandBlock visible in the current viewport, draws:
+    /// - A left-edge color bar (green=success, red=failure, muted=in-progress)
+    /// - A thin horizontal separator line between command blocks
+    /// - A faint command label at the prompt line (from the E mark text)
+    ///
+    /// `blocks` is a snapshot of the CommandTracker's blocks taken while the
+    /// tracker lock was held briefly. `display_offset` converts absolute grid
+    /// line numbers to viewport coordinates. `screen_lines` is the number of
+    /// visible rows in the viewport.
+    pub fn render_command_blocks(
+        &mut self,
+        blocks: &[CommandBlock],
+        _display_offset: usize,
+        screen_lines: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        if blocks.is_empty() {
+            return;
+        }
+
+        let sw = surface_width as f32;
+        let sh = surface_height as f32;
+
+        // Width of the left-edge color bar in pixels.
+        const BAR_WIDTH: f32 = 3.0;
+        // Separator line height in pixels.
+        const SEP_HEIGHT: f32 = 1.0;
+        // Alpha for the left-edge bar.
+        const BAR_ALPHA: f32 = 0.6;
+        // Alpha for separator lines.
+        const SEP_ALPHA: f32 = 0.3;
+
+        let mut rect_vertices: Vec<ColorVertex> = Vec::new();
+        let mut label_entries: Vec<(f32, f32, String, [f32; 4])> = Vec::new();
+
+        for (i, block) in blocks.iter().enumerate() {
+            // Convert absolute grid line to viewport row.
+            // In alacritty, line 0 is the top of the visible area when
+            // display_offset is 0. With scrollback, the viewport starts at
+            // `display_offset` lines back from the bottom. Command blocks
+            // store absolute grid lines counted from the top of the
+            // scrollback, so we convert by subtracting the offset of the
+            // first visible line.
+            //
+            // The grid has `total_lines` of history. The viewport shows
+            // lines from `total_lines - screen_lines - display_offset` to
+            // `total_lines - 1 - display_offset` (inclusive). But
+            // CommandTracker stores lines as cursor.point.line.0, which is
+            // relative to the visible viewport (0 = first visible line in
+            // the active screen area). So for blocks created while the
+            // terminal was NOT scrolled, start_line is a small number
+            // (0..screen_lines). When display_offset > 0, old blocks that
+            // have scrolled into history would have had a line number that
+            // is now screen_lines + display_offset away.
+            //
+            // Simplification: CommandTracker records line numbers from
+            // `term.grid().cursor.point.line.0` which is the viewport-
+            // relative line at the time the mark was received. To map these
+            // to the current viewport, we just use the raw values. If the
+            // terminal has since scrolled (display_offset > 0), blocks that
+            // were at viewport row N are now at viewport row N (they refer
+            // to the active screen, not scrollback). For now, only render
+            // blocks whose start_line falls within 0..screen_lines.
+
+            let start_row = block.start_line;
+            let end_row = block.end_line.unwrap_or(screen_lines.saturating_sub(1));
+
+            // Skip blocks entirely outside the viewport.
+            if start_row >= screen_lines && end_row >= screen_lines {
+                continue;
+            }
+
+            // Clamp to viewport bounds.
+            let vis_start = start_row.min(screen_lines.saturating_sub(1));
+            let vis_end = end_row.min(screen_lines.saturating_sub(1));
+
+            // Determine color based on exit code.
+            let bar_color = match (&block.state, block.exit_code) {
+                (CommandState::Finished, Some(0)) => {
+                    let c = PaletteColor::WARM.to_f32_array();
+                    [c[0], c[1], c[2], BAR_ALPHA]
+                }
+                (CommandState::Finished, Some(_)) => {
+                    let c = PaletteColor::SEARING.to_f32_array();
+                    [c[0], c[1], c[2], BAR_ALPHA]
+                }
+                _ => {
+                    // In-progress or no exit code yet.
+                    let c = PaletteColor::TEXT_MUTED.to_f32_array();
+                    [c[0], c[1], c[2], BAR_ALPHA * 0.7]
+                }
+            };
+
+            // ── Left-edge color bar ────────────────────────────────────────
+            let bar_x = self.padding_x;
+            let bar_y = self.padding_y + vis_start as f32 * self.cell_height;
+            let bar_h = (vis_end - vis_start + 1) as f32 * self.cell_height;
+            let verts = pixel_rect_to_ndc(bar_x, bar_y, BAR_WIDTH, bar_h, sw, sh, bar_color);
+            rect_vertices.extend_from_slice(&verts);
+
+            // ── Separator line between this block and the next ─────────────
+            // Draw a separator at the top of each block except the first.
+            if i > 0 && vis_start < screen_lines {
+                let sep_y = self.padding_y + vis_start as f32 * self.cell_height;
+                let sep_w = surface_width as f32 - self.padding_x * 2.0;
+                let sep_color = [bar_color[0], bar_color[1], bar_color[2], SEP_ALPHA];
+                let sep_verts = pixel_rect_to_ndc(
+                    self.padding_x,
+                    sep_y,
+                    sep_w,
+                    SEP_HEIGHT,
+                    sw,
+                    sh,
+                    sep_color,
+                );
+                rect_vertices.extend_from_slice(&sep_verts);
+            }
+
+            // ── Command label ──────────────────────────────────────────────
+            // Render the command text as a faint label at the prompt line,
+            // offset to the right of the bar.
+            if let Some(ref cmd_text) = block.command {
+                if vis_start < screen_lines {
+                    let label_x = self.padding_x + BAR_WIDTH + 4.0;
+                    let label_y = self.padding_y + vis_start as f32 * self.cell_height;
+                    // Use the bar color but more faint for the label.
+                    let label_color = [bar_color[0], bar_color[1], bar_color[2], 0.5];
+                    // Truncate long commands.
+                    let max_chars = ((sw - label_x - self.padding_x) / self.cell_width) as usize;
+                    let display_cmd = if cmd_text.len() > max_chars && max_chars > 3 {
+                        format!("{}...", &cmd_text[..max_chars - 3])
+                    } else {
+                        cmd_text.clone()
+                    };
+                    label_entries.push((label_x, label_y, display_cmd, label_color));
+                }
+            }
+        }
+
+        // ── Render rect pass (bars + separators) ───────────────────────────
+        if !rect_vertices.is_empty() {
+            let data = bytemuck::cast_slice::<ColorVertex, u8>(&rect_vertices);
+            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cmd_block_rects"),
+                contents: data,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            let vert_count = rect_vertices.len() as u32;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cmd_block_rect_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..vert_count, 0..1);
+        }
+
+        // ── Render command labels via glyphon ──────────────────────────────
+        if !label_entries.is_empty() {
+            let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+            let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
+
+            for (_, _, text, color) in &label_entries {
+                let mut buf = Buffer::new(&mut self.font_system, metrics);
+                let available_w = sw - self.padding_x;
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(available_w),
+                    Some(self.cell_height + 4.0),
+                );
+                buf.set_text(
+                    &mut self.font_system,
+                    text,
+                    Attrs::new()
+                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .color(GlyphColor::rgba(
+                            (color[0] * 255.0) as u8,
+                            (color[1] * 255.0) as u8,
+                            (color[2] * 255.0) as u8,
+                            (color[3] * 255.0) as u8,
+                        )),
+                    Shaping::Advanced,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                label_buffers.push(buf);
+            }
+
+            self.viewport.update(
+                queue,
+                Resolution {
+                    width: surface_width,
+                    height: surface_height,
+                },
+            );
+
+            let text_areas: Vec<TextArea<'_>> = label_buffers
+                .iter()
+                .enumerate()
+                .map(|(i, buf)| {
+                    let (lx, ly, _, _) = &label_entries[i];
+                    TextArea {
+                        buffer: buf,
+                        left: *lx,
+                        top: *ly,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: surface_width as i32,
+                            bottom: surface_height as i32,
+                        },
+                        default_color: GlyphColor::rgba(
+                            PaletteColor::TEXT_MUTED.r,
+                            PaletteColor::TEXT_MUTED.g,
+                            PaletteColor::TEXT_MUTED.b,
+                            128,
+                        ),
+                        custom_glyphs: &[],
+                    }
+                })
+                .collect();
+
+            if let Err(e) = self.text_renderer.prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            ) {
+                tracing::warn!("Command block label text prepare failed: {}", e);
+                return;
+            }
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("cmd_block_text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                if let Err(e) =
+                    self.text_renderer
+                        .render(&self.atlas, &self.viewport, &mut pass)
+                {
+                    tracing::warn!("Command block label text render failed: {}", e);
+                }
+            }
+        }
     }
 
     /// Render a Claude session HUD overlay in the bottom-right corner.

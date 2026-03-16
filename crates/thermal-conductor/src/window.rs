@@ -558,6 +558,23 @@ impl ConductorWindow {
                         self.height,
                     );
 
+                    // ── Command block overlays ──────────────────────────────
+                    {
+                        let tracker = self.terminal.command_tracker();
+                        let blocks = tracker.lock().blocks.clone();
+                        self.grid_renderer.render_command_blocks(
+                            &blocks,
+                            display_offset,
+                            screen_lines,
+                            &self.wgpu.device,
+                            &self.wgpu.queue,
+                            &mut encoder,
+                            &view,
+                            self.width,
+                            self.height,
+                        );
+                    }
+
                     // ── Scroll indicator overlay ─────────────────────────────
                     self.grid_renderer.render_scroll_indicator(
                         display_offset,
@@ -655,6 +672,23 @@ impl ConductorWindow {
             self.width,
             self.height,
         );
+
+        // ── Command block overlays ──────────────────────────────────────
+        {
+            let tracker = self.terminal.command_tracker();
+            let blocks = tracker.lock().blocks.clone();
+            self.grid_renderer.render_command_blocks(
+                &blocks,
+                display_offset,
+                screen_lines,
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
 
         // ── Scroll indicator overlay ─────────────────────────────────────
         self.grid_renderer.render_scroll_indicator(

@@ -17,15 +17,15 @@ use smithay_client_toolkit::{
         SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
         SessionLockSurfaceConfigure,
     },
-    shm::{Shm, ShmHandler},
+    shm::{slot::{SlotPool, Buffer as ShmBuffer}, Shm, ShmHandler},
 };
-use std::{ptr::NonNull, time::{Instant, SystemTime, UNIX_EPOCH}};
+use std::{ptr::NonNull, rc::Rc, time::{Instant, SystemTime, UNIX_EPOCH}};
 use thermal_core::ThermalPalette;
 use tracing::{info, warn, error};
 use zeroize::Zeroizing;
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
     Connection, Proxy, QueueHandle,
 };
 
@@ -336,8 +336,8 @@ fn palette_to_glyph(p: [f32; 4]) -> GlyphColor {
 struct WgpuSurface {
     lock_surface: SessionLockSurface,
     wgpu_surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Rc<wgpu::Device>,
+    queue: Rc<wgpu::Queue>,
     config: wgpu::SurfaceConfiguration,
     width: u32,
     height: u32,
@@ -421,6 +421,11 @@ impl WgpuSurface {
 
         let surface_texture = match self.wgpu_surface.get_current_texture() {
             Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                info!("wgpu: surface lost/outdated, reconfiguring");
+                self.wgpu_surface.configure(&self.device, &self.config);
+                return;
+            }
             Err(e) => {
                 warn!("wgpu: failed to get surface texture: {:?}", e);
                 return;
@@ -707,20 +712,37 @@ struct LockApp {
     wgpu_surfaces: Vec<WgpuSurface>,
     auth: AuthState,
     exit: bool,
+    denied: bool,
     username: String,
     wgpu_instance: wgpu::Instance,
+    shared_device: Rc<wgpu::Device>,
+    shared_queue: Rc<wgpu::Queue>,
     display_ptr: *mut std::ffi::c_void,
     last_tick: Instant,
+    shm_pool: SlotPool,
+    /// SHM fallback buffers kept alive until wgpu takes over rendering
+    fallback_buffers: Vec<ShmBuffer>,
+}
+
+/// Persistent log path that survives reboots (unlike /run tmpfs).
+fn dirs() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = format!("{}/.local/state/thermal-lock", home);
+    let _ = std::fs::create_dir_all(&dir);
+    format!("{}/thermal-lock.log", dir)
 }
 
 fn main() {
+    // Use a persistent log path that survives reboots (tmpfs at /run is cleared)
+    let log_path = dirs();
+
     // Install a panic hook that logs to the log file instead of stderr
-    std::panic::set_hook(Box::new(|info| {
-        let path = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    let panic_log = log_path.clone();
+    std::panic::set_hook(Box::new(move |info| {
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(format!("{}/thermal-lock.log", path))
+            .open(&panic_log)
         {
             use std::io::Write;
             let _ = writeln!(f, "PANIC: {}", info);
@@ -741,14 +763,12 @@ fn run_lock() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .with_writer(|| {
-            // Log to file so we can debug crashes launched by hypridle
             use std::fs::OpenOptions;
-            let path = std::env::var("XDG_RUNTIME_DIR")
-                .unwrap_or_else(|_| "/tmp".into());
+            let path = dirs();
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(format!("{}/thermal-lock.log", path))
+                .open(&path)
                 .unwrap_or_else(|_| OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -776,10 +796,33 @@ fn run_lock() {
     let seat_state = SeatState::new(&globals, &qh);
     let session_lock_state = SessionLockState::new(&globals, &qh);
 
+    // SHM pool for immediate fallback buffers in configure (satisfies protocol timeout)
+    let shm_pool = SlotPool::new(3840 * 2160 * 4, &shm)
+        .expect("Failed to create SHM slot pool");
+
     let wgpu_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
         ..Default::default()
     });
+
+    // Pre-create shared adapter+device so all surfaces use one Vulkan device.
+    // NVIDIA fails with Device(Lost) if you create multiple devices.
+    let adapter = pollster::block_on(wgpu_instance.request_adapter(
+        &wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        },
+    )).expect("No wgpu adapter available");
+    info!("adapter: {:?}", adapter.get_info());
+
+    let (device, queue) = pollster::block_on(
+        adapter.request_device(&Default::default(), None),
+    ).expect("Failed to create wgpu device");
+    info!("wgpu device ready (shared)");
+
+    let shared_device = Rc::new(device);
+    let shared_queue = Rc::new(queue);
 
     let mut app = LockApp {
         compositor_state,
@@ -793,17 +836,37 @@ fn run_lock() {
         wgpu_surfaces: Vec::new(),
         auth: AuthState::new(),
         exit: false,
+        denied: false,
         username,
         wgpu_instance,
+        shared_device,
+        shared_queue,
         display_ptr,
         last_tick: Instant::now(),
+        shm_pool,
+        fallback_buffers: Vec::new(),
     };
 
-    app.session_lock = Some(
-        app.session_lock_state
-            .lock(&qh)
-            .expect("ext-session-lock-v1 not supported by compositor"),
-    );
+    // Roundtrip to ensure all outputs are enumerated before we lock
+    event_queue.roundtrip(&mut app).expect("pre-lock roundtrip failed");
+    let output_count = app.output_state.outputs().count();
+    info!("pre-lock: {} outputs detected", output_count);
+
+    let session_lock = app.session_lock_state
+        .lock(&qh)
+        .expect("ext-session-lock-v1 not supported by compositor");
+
+    // Create lock surfaces IMMEDIATELY after lock() — Hyprland only sends
+    // the `locked` event after all surfaces have committed buffers, so we
+    // cannot wait for the `locked` callback to create them (deadlock).
+    for output in app.output_state.outputs() {
+        let surface = app.compositor_state.create_surface(&qh);
+        let lock_surface = session_lock.create_lock_surface(surface, &output, &qh);
+        app.pending_surfaces.push(lock_surface);
+    }
+    info!("lock request sent, {} surfaces created", app.pending_surfaces.len());
+
+    app.session_lock = Some(session_lock);
 
     loop {
         if let Err(e) = event_queue.blocking_dispatch(&mut app) {
@@ -812,6 +875,11 @@ fn run_lock() {
             if let Some(lock) = &app.session_lock {
                 lock.unlock();
             }
+            break;
+        }
+
+        if app.denied {
+            info!("lock was denied, exiting gracefully");
             break;
         }
 
@@ -872,13 +940,11 @@ fn run_lock() {
 // ── SessionLockHandler ───────────────────────────────────────────────────────
 
 impl SessionLockHandler for LockApp {
-    fn locked(&mut self, _conn: &Connection, qh: &QueueHandle<Self>, session_lock: SessionLock) {
-        info!("LOCKED");
-        for output in self.output_state.outputs() {
-            let surface = self.compositor_state.create_surface(qh);
-            let lock_surface = session_lock.create_lock_surface(surface, &output, qh);
-            self.pending_surfaces.push(lock_surface);
-        }
+    fn locked(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, session_lock: SessionLock) {
+        info!("LOCKED — compositor confirmed lock");
+        // Surfaces were already created in run_lock() right after lock().
+        // Hyprland only sends `locked` after all surfaces commit buffers,
+        // so creating surfaces here would deadlock.
         self.session_lock = Some(session_lock);
     }
 
@@ -888,13 +954,13 @@ impl SessionLockHandler for LockApp {
         _qh: &QueueHandle<Self>,
         _session_lock: SessionLock,
     ) {
-        warn!("LOCK DENIED — exiting");
-        std::process::exit(1);
+        warn!("LOCK DENIED — compositor refused or timed out");
+        self.denied = true;
     }
 
     fn configure(
         &mut self,
-        _conn: &Connection,
+        conn: &Connection,
         _qh: &QueueHandle<Self>,
         session_lock_surface: SessionLockSurface,
         configure: SessionLockSurfaceConfigure,
@@ -913,6 +979,44 @@ impl SessionLockHandler for LockApp {
             .iter()
             .position(|s| s.wl_surface().id() == surface_id)
         {
+            // Immediately commit a solid-color SHM buffer so the compositor
+            // sees content before GPU init (which can exceed lockdead_screen_delay).
+            {
+                let stride = (width * 4) as i32;
+                match self.shm_pool.create_buffer(
+                    width as i32, height as i32, stride, wl_shm::Format::Argb8888,
+                ) {
+                    Ok((buffer, canvas)) => {
+                        let bg = ThermalPalette::BG;
+                        let pixel: [u8; 4] = [
+                            (bg[2] * 255.0) as u8, // B
+                            (bg[1] * 255.0) as u8, // G
+                            (bg[0] * 255.0) as u8, // R
+                            (bg[3] * 255.0) as u8, // A
+                        ];
+                        for chunk in canvas.chunks_exact_mut(4) {
+                            chunk.copy_from_slice(&pixel);
+                        }
+                        let wl_surf = session_lock_surface.wl_surface();
+                        match buffer.attach_to(wl_surf) {
+                            Ok(()) => {
+                                wl_surf.damage_buffer(0, 0, width as i32, height as i32);
+                                wl_surf.commit();
+                                // Flush immediately so the compositor sees the buffer
+                                // before we spend seconds on GPU init below.
+                                if let Err(e) = conn.flush() {
+                                    error!("Wayland flush after SHM commit failed: {:?}", e);
+                                }
+                                info!("SHM fallback committed+flushed for {}x{}", width, height);
+                                self.fallback_buffers.push(buffer);
+                            }
+                            Err(e) => error!("SHM attach failed: {:?}", e),
+                        }
+                    }
+                    Err(e) => error!("SHM fallback failed for {}x{}: {:?}", width, height, e),
+                }
+            }
+
             let lock_surface = self.pending_surfaces.remove(pos);
             let raw_surface_ptr: *mut std::ffi::c_void = lock_surface.wl_surface().id().as_ptr().cast();
 
@@ -936,38 +1040,19 @@ impl SessionLockHandler for LockApp {
                 }
             };
 
-            let adapter = match pollster::block_on(self.wgpu_instance.request_adapter(
-                &wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: Some(&wgpu_surface),
-                    force_fallback_adapter: false,
-                },
-            )) {
-                Some(a) => {
-                    info!("adapter: {:?}", a.get_info());
-                    a
-                }
-                None => {
-                    error!("no suitable wgpu adapter for lock surface {}x{}", width, height);
-                    self.pending_surfaces.push(lock_surface);
-                    return;
-                }
-            };
+            // Use the shared device+queue (NVIDIA can't create multiple VkDevices)
+            let device = Rc::clone(&self.shared_device);
+            let queue = Rc::clone(&self.shared_queue);
 
-            let (device, queue) = match pollster::block_on(
-                adapter.request_device(&Default::default(), None),
-            ) {
-                Ok(dq) => dq,
-                Err(e) => {
-                    error!("request_device failed for {}x{}: {:?}", width, height, e);
-                    self.pending_surfaces.push(lock_surface);
-                    return;
-                }
-            };
-
-            info!("wgpu device ready for surface {}x{}", width, height);
-
-            let caps = wgpu_surface.get_capabilities(&adapter);
+            let caps = wgpu_surface.get_capabilities(
+                &pollster::block_on(self.wgpu_instance.request_adapter(
+                    &wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: Some(&wgpu_surface),
+                        force_fallback_adapter: false,
+                    },
+                )).expect("no adapter for surface capabilities"),
+            );
             let format = caps
                 .formats
                 .iter()
@@ -1074,6 +1159,13 @@ impl SessionLockHandler for LockApp {
                 flash_color_buf,
                 flash_bind_group,
             });
+
+            // All pending surfaces initialized — SHM fallback buffers no longer needed.
+            // Clearing them lets the compositor release the SHM memory once it
+            // processes the next wgpu-committed frame.
+            if self.pending_surfaces.is_empty() {
+                self.fallback_buffers.clear();
+            }
         } else if let Some(ws) = self
             .wgpu_surfaces
             .iter_mut()

@@ -17,7 +17,8 @@ use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
-use thermal_core::palette::Color as PaletteColor;
+use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatus};
+use thermal_core::palette::{thermal_gradient, Color as PaletteColor};
 use wgpu::util::DeviceExt;
 
 use tracing::debug;
@@ -483,6 +484,248 @@ impl GridRenderer {
             }
         }
         // Atlas trimming handled by render_from_cache frame counter; no per-call trim here.
+    }
+
+    /// Render a Claude session HUD overlay in the bottom-right corner.
+    ///
+    /// Shows status, context percentage (thermal-gradient colored), current tool,
+    /// and subagent count. Only renders when a matching session is provided.
+    /// Follows the same rect-bg + glyphon-text pattern as render_scroll_indicator.
+    pub fn render_claude_hud(
+        &mut self,
+        session: &ClaudeSessionState,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        let sw = surface_width as f32;
+        let sh = surface_height as f32;
+
+        // ── Build HUD text lines ───────────────────────────────────────────
+        let status_str = match session.status {
+            ClaudeStatus::Idle => "IDLE",
+            ClaudeStatus::Processing => "PROCESSING",
+            ClaudeStatus::ToolUse => "TOOL_USE",
+            ClaudeStatus::AwaitingInput => "AWAITING",
+        };
+
+        let context_pct = session.context_percent.unwrap_or(0.0);
+        let context_str = format!("CTX {:.0}%", context_pct);
+
+        let tool_str = session
+            .current_tool
+            .as_deref()
+            .map(|t| format!("TOOL {}", t))
+            .unwrap_or_default();
+
+        let agents = session.subagent_count.unwrap_or(0);
+        let agent_str = if agents > 0 {
+            format!("AGENTS {}", agents)
+        } else {
+            String::new()
+        };
+
+        // Build lines with owned strings for lifetime safety.
+        let mut hud_lines: Vec<String> = Vec::with_capacity(4);
+        hud_lines.push(format!(" {} ", status_str));
+        hud_lines.push(format!(" {} ", context_str));
+        if !tool_str.is_empty() {
+            hud_lines.push(format!(" {} ", tool_str));
+        }
+        if !agent_str.is_empty() {
+            hud_lines.push(format!(" {} ", agent_str));
+        }
+
+        // ── Compute badge dimensions ───────────────────────────────────────
+        let max_chars = hud_lines.iter().map(|l| l.len()).max().unwrap_or(10) as f32;
+        let badge_w = max_chars * self.cell_width;
+        let line_count = hud_lines.len() as f32;
+        let badge_h = line_count * self.cell_height + 6.0; // 6px vertical padding
+        let badge_x = sw - badge_w - self.padding_x - 4.0;
+        let badge_y = sh - badge_h - self.padding_y - 4.0;
+
+        // ── Badge background rect (BG_SURFACE at ~0.85 alpha) ──────────────
+        let bg = PaletteColor::BG_SURFACE.to_f32_array();
+        let bg_color = [bg[0], bg[1], bg[2], 0.85];
+        let verts = pixel_rect_to_ndc(badge_x, badge_y, badge_w, badge_h, sw, sh, bg_color);
+        let data = bytemuck::cast_slice::<ColorVertex, u8>(&verts);
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("claude_hud_bg"),
+            contents: data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("claude_hud_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── Context bar (thin thermal-gradient colored strip) ──────────────
+        let bar_h = 3.0_f32;
+        let bar_w = (badge_w - 8.0) * (context_pct / 100.0).clamp(0.0, 1.0);
+        let bar_x = badge_x + 4.0;
+        let bar_y = badge_y + self.cell_height + 2.0; // below status line
+        if bar_w > 0.5 {
+            let heat = (context_pct / 100.0).clamp(0.0, 1.0);
+            let bar_color = thermal_gradient(heat).to_f32_array();
+            let bar_verts = pixel_rect_to_ndc(bar_x, bar_y, bar_w, bar_h, sw, sh, bar_color);
+            let bar_data = bytemuck::cast_slice::<ColorVertex, u8>(&bar_verts);
+            let bar_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("claude_hud_ctx_bar"),
+                contents: bar_data,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("claude_hud_ctx_bar_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, bar_vbuf.slice(..));
+                pass.draw(0..6, 0..1);
+            }
+        }
+
+        // ── Badge text (all lines) ─────────────────────────────────────────
+        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+
+        // Determine per-line text colors.
+        let status_color = match session.status {
+            ClaudeStatus::Idle => PaletteColor::ACCENT_COLD,
+            ClaudeStatus::Processing => PaletteColor::ACCENT_WARM,
+            ClaudeStatus::ToolUse => PaletteColor::SEARING,
+            ClaudeStatus::AwaitingInput => PaletteColor::ACCENT_COOL,
+        };
+
+        let heat = (context_pct / 100.0).clamp(0.0, 1.0);
+        let ctx_color = thermal_gradient(heat);
+
+        let line_colors: Vec<PaletteColor> = hud_lines
+            .iter()
+            .enumerate()
+            .map(|(i, _)| match i {
+                0 => status_color,
+                1 => ctx_color,
+                _ => PaletteColor::TEXT_MUTED,
+            })
+            .collect();
+
+        // Build per-line glyphon buffers and text areas.
+        let mut line_buffers: Vec<Buffer> = Vec::with_capacity(hud_lines.len());
+        for (i, line) in hud_lines.iter().enumerate() {
+            let color = line_colors[i];
+            let mut buf = Buffer::new(&mut self.font_system, metrics);
+            buf.set_size(
+                &mut self.font_system,
+                Some(badge_w + 8.0),
+                Some(self.cell_height + 4.0),
+            );
+            buf.set_text(
+                &mut self.font_system,
+                line,
+                Attrs::new()
+                    .family(Family::Name(TERM_FONT_FAMILY))
+                    .color(GlyphColor::rgba(color.r, color.g, color.b, 255)),
+                Shaping::Advanced,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            line_buffers.push(buf);
+        }
+
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: surface_width,
+                height: surface_height,
+            },
+        );
+
+        let text_areas: Vec<TextArea<'_>> = line_buffers
+            .iter()
+            .enumerate()
+            .map(|(i, buf)| TextArea {
+                buffer: buf,
+                left: badge_x,
+                top: badge_y + 3.0 + i as f32 * self.cell_height,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: surface_width as i32,
+                    bottom: surface_height as i32,
+                },
+                default_color: GlyphColor::rgba(
+                    PaletteColor::TEXT.r,
+                    PaletteColor::TEXT.g,
+                    PaletteColor::TEXT.b,
+                    255,
+                ),
+                custom_glyphs: &[],
+            })
+            .collect();
+
+        if let Err(e) = self.text_renderer.prepare(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        ) {
+            tracing::warn!("Claude HUD text prepare failed: {}", e);
+            return;
+        }
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("claude_hud_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+                tracing::warn!("Claude HUD text render failed: {}", e);
+            }
+        }
     }
 
     /// Render the terminal grid with damage tracking.

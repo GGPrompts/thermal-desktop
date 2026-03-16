@@ -54,6 +54,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
 use thermal_core::ThermalPalette;
 
 use crate::grid_renderer::{GridRenderer, RenderCell};
@@ -212,6 +213,20 @@ pub fn run() -> anyhow::Result<()> {
 
     tracing::info!(cols = init_cols, rows = init_rows, "Terminal initialized");
 
+    // ── Claude state poller ──────────────────────────────────────────────────
+    let claude_poller = match ClaudeStatePoller::new() {
+        Ok(poller) => {
+            tracing::info!("Claude state poller initialized");
+            Some(poller)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create Claude state poller: {e} — HUD disabled");
+            None
+        }
+    };
+
+    let pty_child_pid = pty.child_pid().as_raw();
+
     // ── Build state ───────────────────────────────────────────────────────────
     let mut state = ConductorWindow {
         registry_state: RegistryState::new(&globals),
@@ -254,6 +269,9 @@ pub fn run() -> anyhow::Result<()> {
         repeat_rate: std::time::Duration::from_millis(33),
         render_deadline: None,
         term_event_rx,
+        claude_poller,
+        claude_session: None,
+        pty_child_pid,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -339,6 +357,13 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 _ => {}
             }
+        }
+
+        // ── Poll Claude state ──────────────────────────────────────────
+        // Non-blocking: drains file-watch events and re-reads changed files.
+        if let Some(ref mut poller) = state.claude_poller {
+            let sessions = poller.poll();
+            state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
         }
 
         // Check whether the byte processor has produced new PTY output.
@@ -439,6 +464,12 @@ struct ConductorWindow {
     render_deadline: Option<std::time::Instant>,
     /// Terminal event receiver — relays PtyWrite responses back to the PTY.
     term_event_rx: tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
+    /// Claude state poller — watches /tmp/claude-code-state/ for session files.
+    claude_poller: Option<ClaudeStatePoller>,
+    /// Cached matching Claude session for the HUD overlay.
+    claude_session: Option<ClaudeSessionState>,
+    /// PID of the PTY child process, used to read cwd via /proc/<pid>/cwd.
+    pty_child_pid: i32,
 }
 
 impl ConductorWindow {
@@ -538,6 +569,19 @@ impl ConductorWindow {
                         self.height,
                     );
 
+                    // ── Claude HUD overlay ──────────────────────────────────
+                    if let Some(ref session) = self.claude_session {
+                        self.grid_renderer.render_claude_hud(
+                            session,
+                            &self.wgpu.device,
+                            &self.wgpu.queue,
+                            &mut encoder,
+                            &view,
+                            self.width,
+                            self.height,
+                        );
+                    }
+
                     self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                     output.present();
                     return;
@@ -622,6 +666,19 @@ impl ConductorWindow {
             self.width,
             self.height,
         );
+
+        // ── Claude HUD overlay ──────────────────────────────────────────
+        if let Some(ref session) = self.claude_session {
+            self.grid_renderer.render_claude_hud(
+                session,
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -875,6 +932,56 @@ impl ConductorWindow {
             "Clipboard paste: sent to PTY"
         );
     }
+}
+
+// ── Claude session matching ───────────────────────────────────────────────────
+
+/// Read the working directory of a process via `/proc/<pid>/cwd`.
+///
+/// Returns `None` if the process doesn't exist or the symlink can't be read.
+fn read_proc_cwd(pid: i32) -> Option<String> {
+    let link = format!("/proc/{}/cwd", pid);
+    std::fs::read_link(link)
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+}
+
+/// Find a Claude session whose `working_dir` matches the PTY child's cwd.
+///
+/// Reads the PTY child's working directory from `/proc/<pid>/cwd` and compares
+/// it against each session's `working_dir` field. Returns the first match, or
+/// `None` if no session matches.
+fn find_matching_session(
+    sessions: &[ClaudeSessionState],
+    pty_child_pid: i32,
+) -> Option<ClaudeSessionState> {
+    if sessions.is_empty() {
+        return None;
+    }
+
+    // Read the PTY child's current working directory.
+    let pty_cwd = read_proc_cwd(pty_child_pid)?;
+
+    // Try exact match first.
+    for session in sessions {
+        if let Some(ref working_dir) = session.working_dir {
+            if working_dir == &pty_cwd {
+                return Some(session.clone());
+            }
+        }
+    }
+
+    // Try prefix match: the PTY cwd may be a subdirectory of the session's
+    // working_dir (e.g. PTY in /home/user/project/src, session in /home/user/project).
+    for session in sessions {
+        if let Some(ref working_dir) = session.working_dir {
+            if pty_cwd.starts_with(working_dir) {
+                return Some(session.clone());
+            }
+        }
+    }
+
+    None
 }
 
 // ── Compositor handler ────────────────────────────────────────────────────────

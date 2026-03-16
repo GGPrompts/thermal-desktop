@@ -19,6 +19,7 @@ use smithay_client_toolkit::{
     },
     shm::{slot::{SlotPool, Buffer as ShmBuffer}, Shm, ShmHandler},
 };
+use nix::libc;
 use std::{ptr::NonNull, rc::Rc, time::{Instant, SystemTime, UNIX_EPOCH}};
 use thermal_core::ThermalPalette;
 use tracing::{info, warn, error};
@@ -89,8 +90,8 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let uv = frag_coord.xy / vec2<f32>(u_time.width, u_time.height);
     let t = u_time.time;
     let noise = heat_noise(uv, t);
-    let color = thermal_color(noise);
-    return vec4<f32>(color, 0.85);
+    let color = thermal_color(noise) * 0.12;
+    return vec4<f32>(color, 0.7);
 }
 "#;
 
@@ -370,14 +371,21 @@ impl WgpuSurface {
         }
         self.last_second = now;
 
-        let secs = now % 60;
-        let mins = (now / 60) % 60;
-        let hours = (now / 3600) % 24;
+        // Use libc localtime to get timezone-aware time
+        let ts = now as i64;
+        let (hours, mins, secs, year, month, day) = unsafe {
+            let mut tm: libc::tm = std::mem::zeroed();
+            libc::localtime_r(&ts, &mut tm);
+            (
+                tm.tm_hour as u64,
+                tm.tm_min as u64,
+                tm.tm_sec as u64,
+                (tm.tm_year + 1900) as u64,
+                (tm.tm_mon + 1) as u64,
+                tm.tm_mday as u64,
+            )
+        };
         let time_str = format!("{:02}:{:02}:{:02}", hours, mins, secs);
-
-        // days since epoch to date
-        let days = now / 86400;
-        let (year, month, day) = days_to_date(days);
         let date_str = format!("{:04}-{:02}-{:02}", year, month, day);
 
         let warm = palette_to_glyph(ThermalPalette::WARM);
@@ -666,36 +674,6 @@ impl WgpuSurface {
 
         let _ = delta;
     }
-}
-
-// ── Date arithmetic (no external crate) ──────────────────────────────────────
-
-fn days_to_date(days: u64) -> (u64, u64, u64) {
-    // Gregorian calendar from days since 1970-01-01
-    let mut y = 1970u64;
-    let mut d = days;
-    loop {
-        let dy = if is_leap(y) { 366 } else { 365 };
-        if d < dy { break; }
-        d -= dy;
-        y += 1;
-    }
-    let months = if is_leap(y) {
-        [31u64, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 1u64;
-    for dm in &months {
-        if d < *dm { break; }
-        d -= dm;
-        m += 1;
-    }
-    (y, m, d + 1)
-}
-
-fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 // ── Application state ─────────────────────────────────────────────────────────

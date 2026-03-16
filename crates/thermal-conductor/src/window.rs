@@ -247,6 +247,7 @@ pub fn run() -> anyhow::Result<()> {
         repeat_next: None,
         repeat_delay: std::time::Duration::from_millis(400),
         repeat_rate: std::time::Duration::from_millis(33),
+        render_deadline: None,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -319,11 +320,26 @@ pub fn run() -> anyhow::Result<()> {
         // Check whether the byte processor has produced new PTY output.
         if state.pty_dirty.swap(false, Ordering::AcqRel) {
             state.dirty = true;
+            // Set a coalescing deadline: wait up to 4ms for more PTY data
+            // to arrive before rendering. This avoids rendering dozens of
+            // intermediate frames during TUI startup floods.
+            if state.render_deadline.is_none() {
+                state.render_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(4));
+            }
         }
 
         if state.configured && state.dirty {
+            // If we have a coalescing deadline and it hasn't expired yet,
+            // skip this frame to accumulate more PTY output.
+            if let Some(deadline) = state.render_deadline {
+                if std::time::Instant::now() < deadline {
+                    continue;
+                }
+            }
             state.render_frame();
             state.dirty = false;
+            state.render_deadline = None;
         }
 
         // Exit if the shell process died (e.g. user typed `exit`).
@@ -394,6 +410,9 @@ struct ConductorWindow {
     repeat_delay: std::time::Duration,
     /// Interval between repeats (typically ~33ms for 30 chars/sec).
     repeat_rate: std::time::Duration,
+    /// When set, defer rendering until this deadline to coalesce PTY output
+    /// (e.g. during TUI startup floods). Cleared after each render.
+    render_deadline: Option<std::time::Instant>,
 }
 
 impl ConductorWindow {

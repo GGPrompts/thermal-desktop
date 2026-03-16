@@ -207,7 +207,7 @@ impl GridRenderer {
             &mut font_system,
             "M",
             Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-            Shaping::Basic,
+            Shaping::Advanced,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
 
@@ -869,7 +869,7 @@ impl GridRenderer {
                 &mut self.font_system,
                 borrowed_spans,
                 Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-                Shaping::Basic,
+                Shaping::Advanced,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
         }

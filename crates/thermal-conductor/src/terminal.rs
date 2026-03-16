@@ -11,7 +11,6 @@
 //! stored in the `Terminal` struct for future Phase 4 semantic scrollback
 //! rendering.
 
-use std::os::fd::AsRawFd;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -32,7 +31,9 @@ use crate::osc633::{CommandTracker, Osc633Parser};
 
 // ── Default terminal dimensions ──────────────────────────────────────────────
 
+#[allow(dead_code)]
 const DEFAULT_COLS: usize = 120;
+#[allow(dead_code)]
 const DEFAULT_ROWS: usize = 36;
 
 // ── Event listener ───────────────────────────────────────────────────────────
@@ -102,6 +103,7 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<ThermalEventListener>>>,
 
     /// Receiver for terminal events (title changes, wakeup, bell, etc.).
+    #[allow(dead_code)]
     event_rx: mpsc::UnboundedReceiver<Event>,
 
     /// Tracks command blocks extracted from OSC 633 shell-integration marks.
@@ -111,6 +113,7 @@ pub struct Terminal {
     command_tracker: Arc<Mutex<CommandTracker>>,
 }
 
+#[allow(dead_code)]
 impl Terminal {
     /// Create a new terminal emulator with default dimensions (120x36).
     pub fn new() -> Self {

@@ -60,6 +60,7 @@ pub enum CommandState {
 
 /// A single command captured in the terminal scrollback.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CommandBlock {
     /// Grid line where the prompt started (`A` mark).
     pub start_line: usize,
@@ -83,6 +84,7 @@ pub struct CommandTracker {
     current_line: usize,
 }
 
+#[allow(dead_code)]
 impl CommandTracker {
     pub fn new() -> Self {
         Self::default()

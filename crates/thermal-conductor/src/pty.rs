@@ -37,6 +37,7 @@ pub struct PtySession {
     exited: Arc<AtomicBool>,
 }
 
+#[allow(dead_code)]
 impl PtySession {
     /// Spawn a new PTY session running the given shell.
     ///

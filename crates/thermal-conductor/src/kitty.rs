@@ -12,6 +12,7 @@ pub struct KittyController {
     sockets: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl KittyController {
     /// Create a new KittyController.
     ///

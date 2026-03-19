@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -377,9 +377,13 @@ impl App {
                 } else {
                     &row.session.session_id
                 };
-                let _ = Command::new("tmux")
-                    .args(["switch-client", "-t", target])
-                    .status();
+                // Try kitty remote control first, fall back to tmux
+                let _ = Command::new("kitty")
+                    .args(["@", "focus-window", "--match", &format!("pid:{}", row.session.pid.unwrap_or(0))])
+                    .status()
+                    .or_else(|_| Command::new("tmux")
+                        .args(["switch-client", "-t", target])
+                        .status());
             }
         }
     }
@@ -640,25 +644,32 @@ fn main() -> anyhow::Result<()> {
         terminal.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if app.history_popup.is_some() {
-                    // In popup: Escape or h closes it
-                    match key.code {
-                        KeyCode::Esc | KeyCode::Char('h') => app.history_popup = None,
-                        KeyCode::Char('q') => app.should_quit = true,
-                        _ => {}
-                    }
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-                        KeyCode::Char('j') | KeyCode::Down => app.nav_down(),
-                        KeyCode::Char('k') | KeyCode::Up => app.nav_up(),
-                        KeyCode::Enter => app.attach_selected(),
-                        KeyCode::Char('h') => app.toggle_history(),
-                        KeyCode::Char('r') => app.force_refresh(),
-                        _ => {}
+            match event::read()? {
+                Event::Key(key) => {
+                    if app.history_popup.is_some() {
+                        match key.code {
+                            KeyCode::Esc | KeyCode::Char('h') => app.history_popup = None,
+                            KeyCode::Char('q') => app.should_quit = true,
+                            _ => {}
+                        }
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                            KeyCode::Char('j') | KeyCode::Down => app.nav_down(),
+                            KeyCode::Char('k') | KeyCode::Up => app.nav_up(),
+                            KeyCode::Enter => app.attach_selected(),
+                            KeyCode::Char('h') => app.toggle_history(),
+                            KeyCode::Char('r') => app.force_refresh(),
+                            _ => {}
+                        }
                     }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => app.nav_down(),
+                    MouseEventKind::ScrollUp => app.nav_up(),
+                    _ => {}
+                },
+                _ => {}
             }
         }
 

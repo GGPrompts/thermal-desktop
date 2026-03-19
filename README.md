@@ -9,7 +9,9 @@ cargo build                    # Build everything
 thermal-bar &                  # Status bar (auto-starts at login)
 thermal-audio &                # TTS announcements (auto-starts at login)
 thermal-launch                 # App launcher (Super+D)
-thermal-monitor                # TUI dashboard (run in kitty)
+thermal-monitor                # TUI dashboard (standalone)
+thc                            # TUI dashboard (full-featured, with spawn profiles)
+thc tui                        # Same as above, explicit subcommand
 thermal-conductor window       # GPU terminal (standalone mode)
 ```
 
@@ -27,7 +29,8 @@ These launch automatically at login via Hyprland `exec-once`:
 | Component | How to Launch | What It Does |
 |-----------|--------------|-------------|
 | **thermal-launch** | Super+D | Fuzzy app launcher overlay with thermal components at the top |
-| **thermal-monitor** | `thermal-monitor` in kitty, or Super+T | Ratatui TUI showing all Claude sessions with status, context %, tools |
+| **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all Claude sessions with subagent nesting, context %, tools |
+| **thermal-conductor** | `thc` or `thc tui` | Tabbed ratatui TUI dashboard — Sessions page (monitors all Claude sessions) + Spawn page (profile-based session launcher) |
 | **thermal-conductor** | `thermal-conductor window` | GPU-rendered terminal with agent overlays (HUD badge, timeline bar) |
 | **thermal-hud** | `thermal-hud` | Layer-shell overlay showing Claude session tabs or voice assistant state |
 | **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
@@ -35,37 +38,74 @@ These launch automatically at login via Hyprland `exec-once`:
 
 ### CLI Tools
 ```bash
+# Interactive TUI dashboard (default when no subcommand given)
+thc                            # Launch tabbed TUI (Sessions + Spawn pages)
+thc tui                        # Same, explicit subcommand
+
 # Session management
-thermal-conductor daemon       # Start session daemon
-thermal-conductor spawn        # Spawn a shell session
-thermal-conductor spawn -n 3   # Spawn 3 sessions
-thermal-conductor list         # List sessions
-thermal-conductor status       # Show Claude state for all sessions
-thermal-conductor kill ID      # Kill a session
+thc daemon                     # Start session daemon
+thc spawn                      # Spawn a shell session
+thc spawn -n 3                 # Spawn 3 sessions
+thc list                       # List sessions
+thc status                     # Show Claude state for all sessions
+thc kill ID                    # Kill a session
 
 # Audio control
-thermal-conductor audio on     # Start TTS daemon
-thermal-conductor audio off    # Stop TTS daemon
-thermal-conductor audio status # Check if running
-thermal-conductor audio test "hello world"  # Test TTS
+thc audio on                   # Start TTS daemon
+thc audio off                  # Stop TTS daemon
+thc audio status               # Check if running
+thc audio test "hello world"   # Test TTS
 
 # MCP server (used by Claude for desktop control)
 thermal-commander              # 20 tools: screenshots, window mgmt, app launch, clipboard
 ```
 
-### Voice Assistant (WIP)
-Push-to-talk voice input with Whisper transcription:
+### Voice Assistant Pipeline
+Push-to-talk voice input with Whisper transcription, routed through Claude Haiku for tool execution:
+
+```
+Voice (Super+\) → thermal-voice (Whisper STT) → thermal-dispatcher (Haiku API)
+    → tool execution (trust-tier gated) → thermal-audio (TTS response)
+```
 
 ```bash
 # Install dependencies
 pip install faster-whisper sounddevice numpy
 
-# Start daemon
-python3 scripts/thermal-voice.py --daemon
+# Start daemons
+python3 scripts/thermal-voice.py --daemon   # STT daemon (voice.sock)
+thermal-dispatcher &                         # Command routing (dispatcher.sock)
+thermal-audio &                              # TTS playback (audio.sock)
 
 # Toggle recording: Super+Backslash
-# Transcript is copied to clipboard on stop
 ```
+
+**Trust tiers** (`config/trust-tiers.toml`):
+- **AUTO** — safe read-only tools execute immediately (screenshot, clipboard, beads)
+- **CONFIRM** — desktop interaction tools require HUD confirmation (click, type, open_app)
+- **BLOCK** — destructive tools are rejected with TTS announcement (kill_claude)
+
+### Spawn Profiles
+The TUI Spawn page loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`):
+
+```toml
+[[profile]]
+name = "thermal-desktop"
+icon = "🔥"
+cwd = "~/projects/thermal-desktop"
+
+[[profile]]
+name = "thermobile"
+icon = "📱"
+cwd = "~/projects/thermobile"
+
+[[profile]]
+name = "Shell"
+icon = "🖥️"
+command = ""
+```
+
+Blank fields inherit from the profile, then `default_cwd`, then the directory `thc` was launched from.
 
 ## Hotkeys
 
@@ -91,7 +131,7 @@ pkill -x thermal-bar; thermal-bar &
 ### thermal-audio not speaking
 ```bash
 # Check if running
-thermal-conductor audio status
+thc audio status
 
 # Restart
 pkill -x thermal-audio; thermal-audio &
@@ -142,14 +182,19 @@ thermal-core (shared library)
 
 thermal-bar ──────── layer-shell top bar, 1Hz metrics
 thermal-launch ───── layer-shell overlay launcher
-thermal-hud ──────── layer-shell HUD (agent tabs + voice)
+thermal-hud ──────── layer-shell HUD (agent tabs + voice state)
 thermal-lock ─────── session-lock screen
 thermal-notify ───── D-Bus notification server
-thermal-audio ────── TTS daemon (edge-tts + mpv)
-thermal-monitor ──── ratatui TUI dashboard
-thermal-conductor ── PTY session daemon + GPU terminal
+thermal-audio ────── TTS daemon (edge-tts + mpv, Unix socket API)
+thermal-monitor ──── standalone ratatui TUI dashboard
+thermal-conductor ── tabbed TUI dashboard + PTY session daemon + GPU terminal
 thermal-commander ── MCP server (20 desktop control tools)
+thermal-dispatcher ─ voice command router (Whisper → Haiku → tool execution)
 ```
+
+### State & IPC
+
+Claude Code hooks (`~/.claude/hooks/state-tracker.sh`) write session state to `/tmp/claude-code-state/`. Subagent tool events are routed to separate files (`{session_id}.agent.{agent_id}.json`) so monitors can nest them under the parent session.
 
 All GUI components use **wgpu** for GPU rendering and **smithay-client-toolkit** for Wayland layer-shell surfaces. Text rendering via **glyphon** (cosmic-text + swash).
 
@@ -173,10 +218,16 @@ python3 scripts/generate-theme.py --check  # Verify in sync
 | What | Where |
 |------|-------|
 | Claude session state | `/tmp/claude-code-state/*.json` |
+| Subagent state | `/tmp/claude-code-state/{session}.agent.{agent_id}.json` |
 | Voice state | `/tmp/thermal-voice-state.json` |
+| HUD state | `/tmp/thermal-hud-state.json` |
 | Conductor socket | `/run/user/1000/thermal/conductor.sock` |
 | Voice socket | `/run/user/1000/thermal/voice.sock` |
+| Dispatcher socket | `/run/user/1000/thermal/dispatcher.sock` |
+| Audio socket | `/run/user/1000/thermal/audio.sock` |
 | TTS cache | `~/.cache/thermal-audio/` |
+| Spawn profiles | `config/profiles.toml` or `~/.config/thermal/profiles.toml` |
+| Trust tiers | `config/trust-tiers.toml` or `~/.config/thermal/trust-tiers.toml` |
 | Hyprland config | `~/.config/hypr/hyprland.conf` |
 | Screenshots | `~/Pictures/Screenshots/` |
 | Color definitions | `colors/thermal.toml` |

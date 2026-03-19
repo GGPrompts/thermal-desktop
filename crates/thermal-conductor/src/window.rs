@@ -65,6 +65,7 @@ use thermal_core::ThermalPalette;
 
 use crate::client::DaemonClient;
 use crate::grid_renderer::{ContextHeatmapPipeline, GridRenderer, RenderCell};
+use crate::inject::{self, InjectWatcher};
 use crate::input;
 use crate::protocol::Response;
 use crate::pty::PtySession;
@@ -371,6 +372,19 @@ pub fn run() -> anyhow::Result<()> {
         }
     };
 
+    // ── Cross-pane inject watcher ───────────────────────────────────────────
+    let inject_session_id = inject::generate_session_id();
+    let inject_watcher = match InjectWatcher::new(inject_session_id.clone()) {
+        Ok(w) => {
+            tracing::info!(session_id = %inject_session_id, "Inject watcher initialized");
+            Some(w)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to create inject watcher: {e} — cross-pane inject disabled");
+            None
+        }
+    };
+
     // ── Build state ───────────────────────────────────────────────────────────
     let mut state = ConductorWindow {
         registry_state: RegistryState::new(&globals),
@@ -417,6 +431,8 @@ pub fn run() -> anyhow::Result<()> {
         claude_poller,
         claude_session: None,
         pty_child_pid,
+        inject_session_id,
+        inject_watcher,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -506,6 +522,10 @@ pub fn run() -> anyhow::Result<()> {
             let sessions = poller.poll();
             state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
         }
+
+        // ── Poll cross-pane inject watcher ────────────────────────────────
+        // Non-blocking: picks up inject files from other windows.
+        state.poll_inject_watcher();
 
         // Check whether the byte processor has produced new PTY output.
         if state.pty_dirty.swap(false, Ordering::AcqRel) {
@@ -752,6 +772,11 @@ struct ConductorWindow {
     /// PID of the PTY child process, used to read cwd via /proc/<pid>/cwd.
     /// Zero in client mode (daemon owns the process).
     pty_child_pid: i32,
+    // Cross-pane prompt injection
+    /// Unique session ID for this window instance (used to ignore own inject files).
+    inject_session_id: String,
+    /// File watcher on `/tmp/thermal-inject/` for receiving injections from other windows.
+    inject_watcher: Option<InjectWatcher>,
 }
 
 impl ConductorWindow {
@@ -922,6 +947,21 @@ impl ConductorWindow {
                         self.height,
                     );
 
+                    // ── Kitty graphics inline images ─────────────────────────
+                    {
+                        let store = self.terminal.image_store();
+                        let store_guard = store.lock();
+                        self.grid_renderer.render_images(
+                            &store_guard,
+                            &self.wgpu.device,
+                            &self.wgpu.queue,
+                            &mut encoder,
+                            &view,
+                            self.width,
+                            self.height,
+                        );
+                    }
+
                     // ── Command block overlays ──────────────────────────────
                     {
                         let tracker = self.terminal.command_tracker();
@@ -1036,6 +1076,21 @@ impl ConductorWindow {
             self.width,
             self.height,
         );
+
+        // ── Kitty graphics inline images ──────────────────────────────────
+        {
+            let store = self.terminal.image_store();
+            let store_guard = store.lock();
+            self.grid_renderer.render_images(
+                &store_guard,
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
 
         // ── Command block overlays ──────────────────────────────────────
         {
@@ -1323,6 +1378,90 @@ impl ConductorWindow {
             bracketed,
             "Clipboard paste: sent to session"
         );
+    }
+
+    // ── Cross-pane prompt injection ──────────────────────────────────────────
+
+    /// Inject the current terminal selection into other thermal-conductor windows.
+    ///
+    /// If a daemon is running, sends via the daemon client to all other sessions.
+    /// Otherwise, writes to `/tmp/thermal-inject/` for file-based pickup.
+    fn inject_selection(&self) {
+        let term_handle = self.terminal.term_handle();
+        let term = term_handle.lock();
+        let text = term.selection_to_string();
+        drop(term);
+
+        let Some(text) = text else {
+            tracing::debug!("Inject: no selection");
+            return;
+        };
+        if text.is_empty() {
+            tracing::debug!("Inject: selection is empty");
+            return;
+        }
+
+        // NOTE: A future enhancement could use the daemon client to send
+        // input directly to other sessions via `send_input`. For now we use
+        // the file-based approach which works universally — both with and
+        // without the daemon running.
+
+        // File-based approach: write to /tmp/thermal-inject/.
+        match inject::write_inject_file(&self.inject_session_id, &text) {
+            Ok(path) => {
+                tracing::info!(
+                    path = %path.display(),
+                    text_len = text.len(),
+                    "Injected selection to other windows"
+                );
+                inject::notify_injection("sent", text.len());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to write inject file: {e}");
+            }
+        }
+    }
+
+    /// Poll the inject watcher for incoming injections from other windows.
+    ///
+    /// Any received text is pasted into this window's PTY session, respecting
+    /// bracketed paste mode.
+    fn poll_inject_watcher(&self) {
+        let watcher = match &self.inject_watcher {
+            Some(w) => w,
+            None => return,
+        };
+
+        let payloads = watcher.poll();
+        for text in payloads {
+            if text.is_empty() {
+                continue;
+            }
+
+            // Check if the terminal has bracketed paste mode enabled.
+            let bracketed = {
+                let term_handle = self.terminal.term_handle();
+                let term = term_handle.lock();
+                term.mode().contains(TermMode::BRACKETED_PASTE)
+            };
+
+            if bracketed {
+                let mut payload = Vec::with_capacity(text.len() + 12);
+                payload.extend_from_slice(b"\x1b[200~");
+                payload.extend_from_slice(text.as_bytes());
+                payload.extend_from_slice(b"\x1b[201~");
+                self.write_session(&payload);
+            } else {
+                self.write_session(text.as_bytes());
+            }
+
+            tracing::info!(
+                text_len = text.len(),
+                bracketed,
+                "Injected text from another window into session"
+            );
+            inject::notify_injection("received", text.len());
+        }
     }
 }
 
@@ -1638,6 +1777,15 @@ impl KeyboardHandler for ConductorWindow {
                     return;
                 }
                 _ => {}
+            }
+        }
+
+        // ── Cross-pane inject: Ctrl+Shift+Enter ─────────────────────────
+        // Sends the current selection to all other thermal-conductor windows.
+        if self.modifiers.ctrl && self.modifiers.shift {
+            if matches!(event.keysym, Keysym::Return | Keysym::KP_Enter) {
+                self.inject_selection();
+                return;
             }
         }
 

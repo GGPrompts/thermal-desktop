@@ -6,8 +6,10 @@
 mod client;
 mod daemon;
 mod grid_renderer;
+mod inject;
 mod input;
 mod kitty;
+mod kitty_graphics;
 mod osc633;
 mod protocol;
 mod pty;

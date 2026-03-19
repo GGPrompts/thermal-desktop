@@ -28,3 +28,6 @@ glyphon = { workspace = true }
 bytemuck = { workspace = true }
 parking_lot = "0.12"
 rmp-serde = { workspace = true }
+notify = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"

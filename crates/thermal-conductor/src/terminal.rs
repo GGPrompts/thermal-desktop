@@ -10,6 +10,10 @@
 //! Parsed marks are forwarded to a [`crate::osc633::CommandTracker`] which is
 //! stored in the `Terminal` struct for future Phase 4 semantic scrollback
 //! rendering.
+//!
+//! Kitty graphics protocol APC sequences (`ESC _G...ST`) are intercepted and
+//! stripped from the byte stream before reaching alacritty_terminal.  Parsed
+//! graphics commands are processed by the shared [`ImageStore`].
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,6 +31,7 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use crate::kitty_graphics::{ImageStore, KittyGraphicsParser};
 use crate::osc633::{CommandTracker, Osc633Parser};
 
 // ── Default terminal dimensions ──────────────────────────────────────────────
@@ -111,6 +116,12 @@ pub struct Terminal {
     /// Wrapped in `Arc<Mutex>` so the byte-processor task and any rendering
     /// consumer can both access it without holding the `Term` lock.
     command_tracker: Arc<Mutex<CommandTracker>>,
+
+    /// Kitty graphics image store — holds decoded images and their placements.
+    ///
+    /// Wrapped in `Arc<Mutex>` so the byte-processor task can store images
+    /// and the renderer can read them for GPU texture upload.
+    image_store: Arc<Mutex<ImageStore>>,
 }
 
 #[allow(dead_code)]
@@ -133,6 +144,7 @@ impl Terminal {
             term: Arc::new(FairMutex::new(term)),
             event_rx,
             command_tracker: Arc::new(Mutex::new(CommandTracker::new())),
+            image_store: Arc::new(Mutex::new(ImageStore::new())),
         }
     }
 
@@ -194,10 +206,12 @@ impl Terminal {
     ) {
         let term = Arc::clone(&self.term);
         let tracker = Arc::clone(&self.command_tracker);
+        let image_store = Arc::clone(&self.image_store);
 
         tokio::spawn(async move {
             let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
             let mut osc_parser = Osc633Parser::new();
+            let mut gfx_parser = KittyGraphicsParser::new();
             let wakeup_raw = {
                 use std::os::fd::AsRawFd;
                 wakeup_fd.as_raw_fd()
@@ -218,8 +232,33 @@ impl Terminal {
                 {
                     let mut term_guard = term.lock();
                     for bytes in &batched {
-                        // OSC 633 interception (non-destructive).
-                        let marks = osc_parser.feed(bytes);
+                        // Kitty graphics interception (destructive — strips
+                        // graphics APC sequences from the byte stream so
+                        // alacritty_terminal doesn't see garbage).
+                        let gfx_result = gfx_parser.feed(bytes);
+
+                        // Process any graphics commands found.
+                        if !gfx_result.commands.is_empty() {
+                            let cursor_row =
+                                term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            let cursor_col =
+                                term_guard.grid().cursor.point.column.0;
+                            drop(term_guard);
+                            let mut store = image_store.lock();
+                            for cmd in gfx_result.commands {
+                                store.process(cmd, cursor_row, cursor_col);
+                            }
+                            drop(store);
+                            term_guard = term.lock();
+                        }
+
+                        // Use the filtered bytes (graphics stripped) for the
+                        // rest of the pipeline.
+                        let filtered = &gfx_result.passthrough;
+
+                        // OSC 633 interception (non-destructive — scans the
+                        // filtered bytes without modifying them).
+                        let marks = osc_parser.feed(filtered);
                         if !marks.is_empty() {
                             let cursor_line =
                                 term_guard.grid().cursor.point.line.0.max(0) as usize;
@@ -232,7 +271,7 @@ impl Terminal {
                             drop(t);
                             term_guard = term.lock();
                         }
-                        processor.advance(&mut *term_guard, bytes);
+                        processor.advance(&mut *term_guard, filtered);
                     }
                 }
 
@@ -255,6 +294,14 @@ impl Terminal {
     /// hold the lock while rendering.
     pub fn command_tracker(&self) -> Arc<Mutex<CommandTracker>> {
         Arc::clone(&self.command_tracker)
+    }
+
+    /// Return a clone of the shared `ImageStore` handle.
+    ///
+    /// Lock the returned `Mutex` briefly to read image placements for
+    /// rendering. The byte processor writes to this; the renderer reads.
+    pub fn image_store(&self) -> Arc<Mutex<ImageStore>> {
+        Arc::clone(&self.image_store)
     }
 
     /// Access the terminal's renderable content while holding the lock.

@@ -1,9 +1,15 @@
 //! SCTK + wgpu window for thermal-conductor.
 //!
 //! Creates an xdg_toplevel window with a wgpu render pipeline that renders
-//! a live terminal via glyphon. Spawns a PTY shell process and connects it
-//! to an alacritty_terminal::Term for VT parsing. The grid renderer reads
-//! the term's renderable content each frame and renders it via GPU.
+//! a live terminal via glyphon. The grid renderer reads the term's
+//! renderable content each frame and renders it via GPU.
+//!
+//! Supports two session modes:
+//! - **Client mode**: connects to the session daemon via Unix socket. Input
+//!   and resize are forwarded to the daemon; screen updates arrive as
+//!   `ScreenUpdate` messages which are applied to the local Term.
+//! - **Standalone mode**: spawns a PTY directly and owns it in-process.
+//!   This is the legacy fallback when no daemon is running.
 //!
 //! Supports mouse-based text selection (click-drag) and primary selection
 //! (middle-click paste) via the Wayland pointer protocol.
@@ -57,13 +63,37 @@ use std::sync::{
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
 use thermal_core::ThermalPalette;
 
-use crate::grid_renderer::{GridRenderer, RenderCell};
+use crate::client::DaemonClient;
+use crate::grid_renderer::{ContextHeatmapPipeline, GridRenderer, RenderCell};
 use crate::input;
+use crate::protocol::Response;
 use crate::pty::PtySession;
 use crate::terminal::Terminal;
 
 const DEFAULT_WIDTH: u32 = 1200;
 const DEFAULT_HEIGHT: u32 = 800;
+
+// ── Session mode ──────────────────────────────────────────────────────────────
+
+/// How this window is connected to a terminal session.
+///
+/// In **client mode** the session daemon owns the PTY; we receive screen
+/// updates over a Unix socket and forward input/resize there.
+///
+/// In **standalone mode** we own the PTY directly (legacy, no daemon).
+enum SessionMode {
+    /// Connected to the session daemon.
+    Client {
+        /// Daemon client for sending requests (input, resize, detach).
+        client: DaemonClient,
+        /// The session ID we are attached to.
+        session_id: String,
+    },
+    /// Direct PTY ownership (no daemon running).
+    Standalone {
+        pty: PtySession,
+    },
+}
 
 /// Launch the SCTK + wgpu window with a live terminal.
 pub fn run() -> anyhow::Result<()> {
@@ -164,6 +194,9 @@ pub fn run() -> anyhow::Result<()> {
         DEFAULT_HEIGHT,
     );
 
+    // ── Context heatmap pipeline ─────────────────────────────────────────────
+    let context_heatmap = ContextHeatmapPipeline::new(&device, surface_format);
+
     // ── Terminal + PTY ────────────────────────────────────────────────────────
     // Calculate initial grid size from the renderer's cell metrics.
     let (init_cols, init_rows) = grid_renderer.grid_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
@@ -240,6 +273,7 @@ pub fn run() -> anyhow::Result<()> {
             config: surface_config,
         },
         grid_renderer,
+        context_heatmap,
         terminal,
         pty,
         _tokio_rt: tokio_rt,
@@ -425,6 +459,8 @@ struct ConductorWindow {
     window: Window,
     wgpu: WgpuState,
     grid_renderer: GridRenderer,
+    /// Context heatmap vignette — subtle edge glow driven by context_percent.
+    context_heatmap: ContextHeatmapPipeline,
     terminal: Terminal,
     pty: PtySession,
     _tokio_rt: tokio::runtime::Runtime,
@@ -520,6 +556,22 @@ impl ConductorWindow {
                 occlusion_query_set: None,
             });
             // Pass drops here — just a clear
+        }
+
+        // ── Context heatmap vignette (renders BEFORE grid so text is on top) ──
+        if let Some(ref session) = self.claude_session {
+            if let Some(ctx_pct) = session.context_percent {
+                // Normalize from 0-100 to 0.0-1.0.
+                let normalized = (ctx_pct / 100.0).clamp(0.0, 1.0);
+                self.context_heatmap.render(
+                    normalized,
+                    &self.wgpu.queue,
+                    &mut encoder,
+                    &view,
+                    self.width,
+                    self.height,
+                );
+            }
         }
 
         // ── Render terminal grid ─────────────────────────────────────────

@@ -32,6 +32,8 @@
 | Super + Hold left-click | Drag window |
 | Super + Hold right-click | Resize window |
 | Super + Shift + 1-0 | Move window to workspace |
+| Super + Shift + 0 | Stash window to workspace 10 |
+| Super + 0 | Check stashed windows |
 | Super + P | Pseudo-tile |
 | Super + J | Toggle split |
 

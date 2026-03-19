@@ -33,6 +33,7 @@ const HOTKEYS: &[Hotkey] = &[
     Hotkey { icon: "\u{2603}", keys: "\u{2318}B",        label: "btop",   color: ThermalPalette::ACCENT_COOL },
     Hotkey { icon: "\u{2388}", keys: "\u{2318}T",        label: "therm",  color: ThermalPalette::ACCENT_HOT },
     Hotkey { icon: "\u{2399}", keys: "PrtSc",            label: "snap",   color: ThermalPalette::WARM },
+    Hotkey { icon: "\u{25a8}", keys: "\u{2318}S",        label: "stash",  color: ThermalPalette::ACCENT_COOL },
     Hotkey { icon: "\u{2753}", keys: "\u{2318}/",        label: "help",   color: ThermalPalette::TEXT_BRIGHT },
 ];
 

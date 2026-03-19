@@ -832,7 +832,7 @@ mod tests {
     /// Create a minimal PNG image for testing.
     fn create_test_png(width: u32, height: u32) -> Vec<u8> {
         let mut buf = Vec::new();
-        let mut encoder = image::codecs::png::PngEncoder::new(&mut buf);
+        let encoder = image::codecs::png::PngEncoder::new(&mut buf);
         use image::ImageEncoder;
         let rgba: Vec<u8> = vec![255; (width * height * 4) as usize];
         encoder

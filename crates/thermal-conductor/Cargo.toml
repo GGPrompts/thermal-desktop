@@ -26,6 +26,8 @@ raw-window-handle = { workspace = true }
 alacritty_terminal = { workspace = true }
 glyphon = { workspace = true }
 bytemuck = { workspace = true }
+ratatui = "0.29"
+crossterm = "0.28"
 parking_lot = "0.12"
 rmp-serde = { workspace = true }
 notify = { workspace = true }

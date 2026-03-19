@@ -15,6 +15,7 @@ mod osc633;
 mod protocol;
 mod pty;
 mod terminal;
+pub(crate) mod tui;
 mod window;
 
 use anyhow::{Result, Context, bail};
@@ -24,11 +25,13 @@ use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 use client::DaemonClient;
 
 /// Thermal Conductor — orchestrate Claude agent therminals via the session daemon.
+///
+/// Run with no arguments to launch the interactive TUI dashboard.
 #[derive(Parser)]
 #[command(name = "thermal-conductor", version, about)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -84,6 +87,9 @@ enum Commands {
 
     /// Start the session daemon (PTY ownership, Unix socket server)
     Daemon,
+
+    /// Launch the interactive TUI dashboard (default when no subcommand given)
+    Tui,
 }
 
 #[derive(Subcommand)]
@@ -111,14 +117,22 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Default to TUI when no subcommand is given.
+    let command = cli.command.unwrap_or(Commands::Tui);
+
+    // TUI runs its own synchronous event loop — no tokio needed.
+    if matches!(command, Commands::Tui) {
+        return tui::run();
+    }
+
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
     // so it must run outside of #[tokio::main] to avoid nested runtime panic.
-    if matches!(cli.command, Commands::Window) {
+    if matches!(command, Commands::Window) {
         return window::run();
     }
 
     // Daemon subcommand runs a long-lived async event loop.
-    if matches!(cli.command, Commands::Daemon) {
+    if matches!(command, Commands::Daemon) {
         return tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
@@ -130,7 +144,7 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            match cli.command {
+            match command {
                 Commands::Spawn {
                     count,
                     project,
@@ -143,6 +157,7 @@ fn main() -> Result<()> {
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
+                Commands::Tui => unreachable!(),
             }
         })
 }

@@ -1,4 +1,5 @@
 pub mod renderer;
+pub mod voice;
 pub mod wayland;
 
 #[tokio::main]

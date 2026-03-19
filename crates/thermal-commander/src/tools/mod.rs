@@ -1,8 +1,11 @@
 //! Tool registry — maps tool names to handlers and provides definitions.
 
+pub mod claude;
 pub mod hyprland;
 pub mod input;
+pub mod launcher;
 pub mod screenshot;
+pub mod utility;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -222,6 +225,169 @@ impl ToolRegistry {
                 "properties": {}
             }),
             |args| Box::pin(hyprland::active_window(args)),
+        );
+
+        // --- App launching tools ---
+
+        self.register(
+            "open_app",
+            "Launch an application via Hyprland, optionally on a specific workspace.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Command to execute (e.g. \"gimp\", \"obs\", \"spotify\")"
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Workspace to move the app to after launching (e.g. \"2\", \"special:scratchpad\")"
+                    }
+                },
+                "required": ["command"]
+            }),
+            |args| Box::pin(launcher::open_app(args)),
+        );
+
+        self.register(
+            "open_browser",
+            "Open Firefox browser, optionally with a URL.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL to open (e.g. \"https://example.com\"). Omit to open a new window."
+                    }
+                }
+            }),
+            |args| Box::pin(launcher::open_browser(args)),
+        );
+
+        self.register(
+            "open_files",
+            "Open Thunar file manager, optionally at a specific path.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file path to open (e.g. \"/home/user/Documents\")"
+                    }
+                }
+            }),
+            |args| Box::pin(launcher::open_files(args)),
+        );
+
+        self.register(
+            "open_terminal",
+            "Open a kitty terminal, optionally with a working directory.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory for the terminal (e.g. \"/home/user/projects\")"
+                    }
+                }
+            }),
+            |args| Box::pin(launcher::open_terminal(args)),
+        );
+
+        // --- Claude orchestration tools ---
+
+        self.register(
+            "spawn_claude",
+            "Spawn one or more Claude coding sessions via thermal-conductor.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of Claude sessions to spawn (default: 1)"
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Project directory to associate with the sessions"
+                    }
+                }
+            }),
+            |args| Box::pin(claude::spawn_claude(args)),
+        );
+
+        self.register(
+            "claude_status",
+            "Get status of all running Claude sessions.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            |args| Box::pin(claude::claude_status(args)),
+        );
+
+        self.register(
+            "kill_claude",
+            "Kill a Claude session by its session ID.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID to kill (get IDs from claude_status)"
+                    }
+                },
+                "required": ["session_id"]
+            }),
+            |args| Box::pin(claude::kill_claude(args)),
+        );
+
+        // --- Utility tools ---
+
+        self.register(
+            "clipboard_get",
+            "Get the 20 most recent clipboard history entries via cliphist.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            |args| Box::pin(utility::clipboard_get(args)),
+        );
+
+        self.register(
+            "clipboard_set",
+            "Copy text to the Wayland clipboard via wl-copy.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Text to copy to the clipboard"
+                    }
+                },
+                "required": ["text"]
+            }),
+            |args| Box::pin(utility::clipboard_set(args)),
+        );
+
+        self.register(
+            "notify",
+            "Send a desktop notification via notify-send.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Notification message text"
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["low", "normal", "critical"],
+                        "description": "Notification urgency level (default: normal)"
+                    }
+                },
+                "required": ["message"]
+            }),
+            |args| Box::pin(utility::notify(args)),
         );
     }
 

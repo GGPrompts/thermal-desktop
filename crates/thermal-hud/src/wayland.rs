@@ -31,6 +31,7 @@ use wayland_client::{
 use thermal_core::ClaudeStatePoller;
 
 use crate::renderer::Renderer;
+use crate::voice::{HudMode, VoiceStatePoller};
 
 /// Height of the HUD header bar in pixels.
 pub const HUD_HEIGHT: u32 = 48;
@@ -291,6 +292,10 @@ pub async fn run() -> anyhow::Result<()> {
     let mut poller = ClaudeStatePoller::new()
         .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?;
 
+    // Phase 4: Set up the VoiceStatePoller for voice assistant UI.
+    let mut voice_poller = VoiceStatePoller::new()
+        .map_err(|e| anyhow::anyhow!("failed to create VoiceStatePoller: {e}"))?;
+
     // Track which tab is "active" (index into sessions list).
     let mut active_tab: usize = 0;
 
@@ -313,13 +318,8 @@ pub async fn run() -> anyhow::Result<()> {
             renderer.resize(hud.width, HUD_HEIGHT);
         }
 
-        // Poll Claude sessions.
-        let sessions = poller.poll();
-
-        // Clamp active tab index.
-        if !sessions.is_empty() && active_tab >= sessions.len() {
-            active_tab = sessions.len() - 1;
-        }
+        // Poll voice state first — it takes priority over agent tabs.
+        let voice_mode = voice_poller.poll();
 
         // Request the next frame callback before rendering.
         {
@@ -327,8 +327,30 @@ pub async fn run() -> anyhow::Result<()> {
             wl_surf.frame(&qh, wl_surf.clone());
         }
 
-        // Render the HUD.
-        match renderer.render_tabs(&sessions, active_tab) {
+        // Render based on the current HUD mode.
+        let render_result = match &voice_mode {
+            HudMode::VoiceActive { .. } => {
+                // Compute how long the result has been shown (for auto-dim).
+                let result_age = voice_poller
+                    .result_shown_at
+                    .map(|t| t.elapsed().as_secs());
+                tracing::debug!(?voice_mode, "rendering voice state");
+                renderer.render_voice_state(&voice_mode, result_age)
+            }
+            HudMode::AgentTabs => {
+                // Fall back to agent tab rendering.
+                let sessions = poller.poll();
+
+                // Clamp active tab index.
+                if !sessions.is_empty() && active_tab >= sessions.len() {
+                    active_tab = sessions.len() - 1;
+                }
+
+                renderer.render_tabs(&sessions, active_tab)
+            }
+        };
+
+        match render_result {
             Ok(()) => {}
             Err(e) => {
                 tracing::warn!("render error: {e}");

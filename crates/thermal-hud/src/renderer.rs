@@ -14,6 +14,8 @@ use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use thermal_core::{ClaudeSessionState, ClaudeStatus, ThermalPalette};
+
+use crate::voice::{HudMode, VoiceState, RESULT_DIM_SECS};
 use wgpu::{
     BlendState, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, Device, FragmentState, FrontFace, Instance, InstanceDescriptor,
@@ -526,6 +528,360 @@ impl Renderer {
             }
 
             // Render text.
+            if has_text {
+                self.text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)?;
+            }
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+        self.atlas.trim();
+
+        Ok(())
+    }
+
+    /// Render the voice assistant UI state instead of tabs.
+    ///
+    /// Layout varies by voice state:
+    /// - LISTENING:   pulsing "MIC" label in ACCENT_HOT
+    /// - TRANSCRIBING / THINKING: partial transcript in TEXT_BRIGHT
+    /// - CONFIRMING:  action text in ACCENT_WARM + "SAY YES/NO" label
+    /// - EXECUTING:   action text + spinner-style label
+    /// - RESULT:      summary in WARM, dimmed after RESULT_DIM_SECS
+    pub fn render_voice_state(
+        &mut self,
+        mode: &HudMode,
+        result_age_secs: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let (transcript, voice_state) = match mode {
+            HudMode::VoiceActive { transcript, state } => (transcript.as_str(), state),
+            HudMode::AgentTabs => {
+                // Should not be called in this mode, but handle gracefully.
+                return Ok(());
+            }
+        };
+
+        let frame = self.surface.get_current_texture()?;
+        let view = frame.texture.create_view(&TextureViewDescriptor::default());
+
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
+
+        let mut rect_quads: Vec<([f32; 4], [f32; 4])> = Vec::new();
+        let mut text_buffers: Vec<Buffer> = Vec::new();
+        let mut text_placements: Vec<(usize, f32, f32, [f32; 4])> = Vec::new();
+
+        let screen_w = self.width as f32;
+        let screen_h = self.height as f32;
+
+        match voice_state {
+            VoiceState::Listening => {
+                // Pulsing "MIC" indicator — bright ACCENT_HOT block + label.
+                let mic_width = 80.0;
+                let mic_x = LEFT_MARGIN;
+                rect_quads.push(([mic_x, 4.0, mic_width, screen_h - 8.0], ThermalPalette::ACCENT_HOT));
+
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(18.0, 24.0));
+                buf.set_size(&mut self.font_system, Some(mic_width), Some(screen_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    "  MIC",
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                let idx = text_buffers.len();
+                text_buffers.push(buf);
+                text_placements.push((idx, mic_x, 12.0, ThermalPalette::BG));
+
+                // "Listening..." label.
+                let label_x = mic_x + mic_width + 16.0;
+                let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
+                lbl.set_size(&mut self.font_system, Some(screen_w - label_x), Some(screen_h));
+                lbl.set_text(
+                    &mut self.font_system,
+                    "LISTENING...",
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                lbl.shape_until_scroll(&mut self.font_system, false);
+                let lbl_idx = text_buffers.len();
+                text_buffers.push(lbl);
+                text_placements.push((lbl_idx, label_x, 14.0, ThermalPalette::TEXT_MUTED));
+            }
+
+            VoiceState::Transcribing => {
+                // Show partial transcript.
+                let label_x = LEFT_MARGIN;
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
+                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                let display = if transcript.is_empty() {
+                    "TRANSCRIBING..."
+                } else {
+                    transcript
+                };
+                buf.set_text(
+                    &mut self.font_system,
+                    display,
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                let idx = text_buffers.len();
+                text_buffers.push(buf);
+                text_placements.push((idx, label_x, 14.0, ThermalPalette::TEXT_BRIGHT));
+            }
+
+            VoiceState::Thinking => {
+                // Show transcript + "THINKING..." indicator.
+                let label_x = LEFT_MARGIN;
+
+                // Transcript line.
+                if !transcript.is_empty() {
+                    let mut buf = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
+                    buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                    buf.set_text(
+                        &mut self.font_system,
+                        transcript,
+                        Attrs::new().family(Family::Monospace),
+                        Shaping::Basic,
+                    );
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                    let idx = text_buffers.len();
+                    text_buffers.push(buf);
+                    text_placements.push((idx, label_x, 4.0, ThermalPalette::TEXT_BRIGHT));
+                }
+
+                // "THINKING..." label on second line.
+                let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                lbl.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(20.0));
+                lbl.set_text(
+                    &mut self.font_system,
+                    "THINKING...",
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                lbl.shape_until_scroll(&mut self.font_system, false);
+                let lbl_idx = text_buffers.len();
+                text_buffers.push(lbl);
+                text_placements.push((lbl_idx, label_x, 28.0, ThermalPalette::ACCENT_WARM));
+            }
+
+            VoiceState::Confirming { action } => {
+                // Show action text in ACCENT_WARM + "SAY YES/NO" label.
+                let label_x = LEFT_MARGIN;
+
+                // Action text.
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
+                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0 - 140.0), Some(screen_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    action,
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                let idx = text_buffers.len();
+                text_buffers.push(buf);
+                text_placements.push((idx, label_x, 6.0, ThermalPalette::ACCENT_WARM));
+
+                // "SAY YES/NO" confirmation badge on the right.
+                let badge_w = 120.0;
+                let badge_x = screen_w - badge_w - LEFT_MARGIN;
+                rect_quads.push(([badge_x, 8.0, badge_w, screen_h - 16.0], ThermalPalette::ACCENT_WARM));
+
+                let mut badge = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
+                badge.set_size(&mut self.font_system, Some(badge_w), Some(screen_h));
+                badge.set_text(
+                    &mut self.font_system,
+                    " SAY YES/NO",
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                badge.shape_until_scroll(&mut self.font_system, false);
+                let badge_idx = text_buffers.len();
+                text_buffers.push(badge);
+                text_placements.push((badge_idx, badge_x, 14.0, ThermalPalette::BG));
+
+                // Transcript below action (smaller, muted).
+                if !transcript.is_empty() {
+                    let mut tbuf = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                    tbuf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0 - 140.0), Some(20.0));
+                    tbuf.set_text(
+                        &mut self.font_system,
+                        transcript,
+                        Attrs::new().family(Family::Monospace),
+                        Shaping::Basic,
+                    );
+                    tbuf.shape_until_scroll(&mut self.font_system, false);
+                    let tbuf_idx = text_buffers.len();
+                    text_buffers.push(tbuf);
+                    text_placements.push((tbuf_idx, label_x, 28.0, ThermalPalette::TEXT_MUTED));
+                }
+            }
+
+            VoiceState::Executing => {
+                // Show "EXECUTING..." with a warm accent.
+                let label_x = LEFT_MARGIN;
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
+                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    "EXECUTING...",
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                let idx = text_buffers.len();
+                text_buffers.push(buf);
+                text_placements.push((idx, label_x, 14.0, ThermalPalette::HOTTER));
+            }
+
+            VoiceState::Result { summary } => {
+                // Show result summary — dim after RESULT_DIM_SECS.
+                let dimmed = result_age_secs.map_or(false, |age| age >= RESULT_DIM_SECS);
+                let text_color = if dimmed {
+                    ThermalPalette::TEXT_MUTED
+                } else {
+                    ThermalPalette::WARM
+                };
+
+                let label_x = LEFT_MARGIN;
+                let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
+                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    summary,
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                let idx = text_buffers.len();
+                text_buffers.push(buf);
+                text_placements.push((idx, label_x, 6.0, text_color));
+
+                // "DONE" label below.
+                let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                lbl.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(20.0));
+                lbl.set_text(
+                    &mut self.font_system,
+                    if dimmed { "DONE" } else { "RESULT" },
+                    Attrs::new().family(Family::Monospace),
+                    Shaping::Basic,
+                );
+                lbl.shape_until_scroll(&mut self.font_system, false);
+                let lbl_idx = text_buffers.len();
+                text_buffers.push(lbl);
+                let lbl_color = if dimmed {
+                    ThermalPalette::FREEZING
+                } else {
+                    ThermalPalette::TEXT_MUTED
+                };
+                text_placements.push((lbl_idx, label_x, 28.0, lbl_color));
+            }
+        }
+
+        // Build vertex list for all rect quads.
+        let mut rect_vertices: Vec<ColorVertex> = Vec::new();
+        for (xywh, color) in &rect_quads {
+            let verts = pixel_rect_to_ndc(
+                xywh[0], xywh[1], xywh[2], xywh[3], screen_w, screen_h, *color,
+            );
+            rect_vertices.extend_from_slice(&verts);
+        }
+
+        let rect_vbuf = if !rect_vertices.is_empty() {
+            let data = bytemuck::cast_slice::<ColorVertex, u8>(&rect_vertices);
+            let buf = self.device.create_buffer(&BufferDescriptor {
+                label: Some("hud_voice_rect_vbuf"),
+                size: data.len() as u64,
+                usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&buf, 0, data);
+            Some((buf, rect_vertices.len() as u32))
+        } else {
+            None
+        };
+
+        // Build glyphon TextAreas.
+        let has_text = !text_buffers.is_empty();
+        if has_text {
+            let text_areas: Vec<TextArea<'_>> = text_placements
+                .iter()
+                .map(|(idx, x, y, color)| {
+                    let [r, g, b, a] = color;
+                    TextArea {
+                        buffer: &text_buffers[*idx],
+                        left: *x,
+                        top: *y,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: *x as i32,
+                            top: 0,
+                            right: self.width as i32,
+                            bottom: self.height as i32,
+                        },
+                        default_color: GlyphColor::rgba(
+                            (*r * 255.0) as u8,
+                            (*g * 255.0) as u8,
+                            (*b * 255.0) as u8,
+                            (*a * 255.0) as u8,
+                        ),
+                        custom_glyphs: &[],
+                    }
+                })
+                .collect();
+
+            self.text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            )?;
+        }
+
+        let bg = ThermalPalette::BG;
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("hud_voice_pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: 1.0,
+                        }),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            if let Some((vbuf, count)) = &rect_vbuf {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+
             if has_text {
                 self.text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)?;

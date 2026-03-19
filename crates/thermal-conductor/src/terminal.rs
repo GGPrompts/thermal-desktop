@@ -305,10 +305,20 @@ mod tests {
 
     #[tokio::test]
     async fn feed_bytes_into_term() {
+        use std::sync::atomic::AtomicBool;
+
         let terminal = Terminal::new();
         let (tx, rx) = mpsc::channel(16);
 
-        terminal.spawn_byte_processor(rx);
+        let pty_dirty = Arc::new(AtomicBool::new(false));
+
+        // Create a wakeup pipe for the byte processor.
+        let (wakeup_read, wakeup_write) =
+            nix::unistd::pipe().expect("pipe() failed");
+        // Keep the read end alive so the write end doesn't error.
+        let _wakeup_read = wakeup_read;
+
+        terminal.spawn_byte_processor(rx, pty_dirty, wakeup_write);
 
         // Send "Hello\r\n" through the channel.
         tx.send(b"Hello\r\n".to_vec()).await.unwrap();

@@ -32,6 +32,10 @@ struct Session {
     id: String,
     terminal: Terminal,
     pty: PtySession,
+    /// The shell command that was spawned.
+    shell_command: String,
+    /// Working directory the session was started in.
+    cwd: String,
     /// Broadcast channel for sending responses to all attached clients.
     update_tx: broadcast::Sender<Response>,
     /// Monotonically increasing sequence number for screen updates.
@@ -42,7 +46,6 @@ struct Session {
     title: Arc<Mutex<String>>,
     /// Number of attached frontend clients.
     attached_count: Arc<AtomicU64>,
-    #[allow(dead_code)]
     created_at: SystemTime,
 }
 
@@ -66,10 +69,13 @@ impl Daemon {
     fn spawn_session(
         &self,
         shell: Option<String>,
-        _cwd: Option<String>,
+        cwd: Option<String>,
     ) -> Result<String> {
         let shell_path =
             shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
+        let cwd_path = cwd.unwrap_or_else(|| {
+            std::env::var("HOME").unwrap_or_else(|_| "/".into())
+        });
 
         let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = format!("session-{id_num}");
@@ -112,6 +118,8 @@ impl Daemon {
             id: id.clone(),
             terminal,
             pty,
+            shell_command: shell_path.clone(),
+            cwd: cwd_path,
             update_tx: update_tx.clone(),
             seq: Arc::clone(&seq),
             pty_dirty: Arc::clone(&pty_dirty),
@@ -324,14 +332,22 @@ impl Daemon {
                 let term_handle = session.terminal.term_handle();
                 let term = term_handle.lock();
                 use alacritty_terminal::grid::Dimensions;
+                let start_secs = session
+                    .created_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
                 SessionInfo {
                     id: session.id.clone(),
+                    shell_command: session.shell_command.clone(),
+                    cwd: session.cwd.clone(),
                     shell_pid: session.pty.child_pid().as_raw(),
                     cols: term.columns() as u16,
                     rows: term.screen_lines() as u16,
                     title: session.title.lock().clone(),
-                    exited: session.pty.has_exited(),
-                    attached_clients: session.attached_count.load(Ordering::Relaxed) as usize,
+                    start_time: start_secs,
+                    connected_client_count: session.attached_count.load(Ordering::Relaxed) as usize,
+                    is_alive: !session.pty.has_exited(),
                 }
             })
             .collect()
@@ -493,6 +509,8 @@ impl Daemon {
                     },
                 }
             }
+
+            Request::Ping => Response::Pong,
         }
     }
 
@@ -756,7 +774,43 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer_handle.await;
 }
 
-// ── Public entry point ───────────────────────────────────────────────────────
+// ── Public entry points ──────────────────────────────────────────────────────
+
+/// Run the session daemon on a given `UnixListener` until the `shutdown` receiver
+/// fires.
+///
+/// This is the core accept loop, factored out so that tests and alternative
+/// entry points can supply their own socket path and shutdown signal.
+pub async fn run_daemon_on(
+    listener: UnixListener,
+    mut shutdown: tokio::sync::mpsc::Receiver<()>,
+) -> Result<()> {
+    let daemon = Arc::new(Daemon::new());
+
+    loop {
+        tokio::select! {
+            accept_result = listener.accept() => {
+                match accept_result {
+                    Ok((stream, _addr)) => {
+                        info!("Client connected");
+                        let daemon_clone = Arc::clone(&daemon);
+                        tokio::spawn(handle_client(daemon_clone, stream));
+                    }
+                    Err(e) => {
+                        error!("Failed to accept connection: {e}");
+                    }
+                }
+            }
+            _ = shutdown.recv() => {
+                info!("Shutdown signal received");
+                break;
+            }
+        }
+    }
+
+    info!("Daemon shut down");
+    Ok(())
+}
 
 /// Run the session daemon.
 ///
@@ -815,4 +869,83 @@ pub async fn run_daemon() -> Result<()> {
     let _ = std::fs::remove_file(&socket_path);
     info!("Daemon shut down");
     Ok(())
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::DaemonClient;
+    use std::path::PathBuf;
+    use tokio::net::UnixListener;
+
+    /// Create a unique temp socket path for tests. Cleans up on drop via the
+    /// returned `PathBuf` (caller should `std::fs::remove_file` if desired).
+    fn test_socket_path() -> PathBuf {
+        let id: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        let pid = std::process::id();
+        PathBuf::from(format!("/tmp/thermal-test-{pid}-{id}.sock"))
+    }
+
+    /// Spawn a daemon on a temporary socket, connect a client, spawn a session,
+    /// list sessions, verify the session appears, then shut everything down.
+    #[tokio::test]
+    async fn daemon_spawn_and_list() {
+        let sock_path = test_socket_path();
+
+        let listener =
+            UnixListener::bind(&sock_path).expect("Failed to bind test socket");
+
+        // Shutdown channel.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        // Spawn daemon in background.
+        let daemon_handle = tokio::spawn(async move {
+            let _ = run_daemon_on(listener, shutdown_rx).await;
+        });
+
+        // Give the daemon a moment to start accepting.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Connect a client.
+        let mut client = DaemonClient::connect_to(PathBuf::from(&sock_path))
+            .await
+            .expect("connect_to failed")
+            .expect("Expected Some(client), daemon should be running");
+
+        // Ping the daemon.
+        client.ping().await.expect("Ping failed");
+
+        // Spawn a session.
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None)
+            .await
+            .expect("spawn_session failed");
+        assert!(session_id.starts_with("session-"), "Unexpected session id: {session_id}");
+
+        // List sessions and verify our session is there.
+        let sessions = client.list_sessions().await.expect("list_sessions failed");
+        assert_eq!(sessions.len(), 1, "Expected exactly one session");
+        assert_eq!(sessions[0].id, session_id);
+        assert_eq!(sessions[0].shell_command, "/bin/sh");
+        assert!(sessions[0].is_alive, "Session should be alive");
+
+        // Kill the session.
+        client.kill_session(&session_id).await.expect("kill_session failed");
+
+        // Verify the session is gone.
+        let sessions = client.list_sessions().await.expect("list_sessions after kill failed");
+        assert!(sessions.is_empty(), "Expected no sessions after kill");
+
+        // Shut down the daemon.
+        let _ = shutdown_tx.send(()).await;
+        let _ = daemon_handle.await;
+
+        // Clean up socket file.
+        let _ = std::fs::remove_file(&sock_path);
+    }
 }

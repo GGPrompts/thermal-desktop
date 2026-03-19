@@ -62,6 +62,9 @@ pub enum Request {
         cols: u16,
         rows: u16,
     },
+
+    /// Connection health check — daemon responds with `Pong`.
+    Ping,
 }
 
 // ── Daemon → Client ──────────────────────────────────────────────────────────
@@ -110,6 +113,9 @@ pub enum Response {
 
     /// Error response.
     Error { message: String },
+
+    /// Health check response.
+    Pong,
 }
 
 // ── Supporting types ─────────────────────────────────────────────────────────
@@ -118,14 +124,21 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// Shell command that was spawned (e.g. "/bin/zsh").
+    pub shell_command: String,
+    /// Working directory the session was started in.
+    pub cwd: String,
     pub shell_pid: i32,
     pub cols: u16,
     pub rows: u16,
+    /// Terminal title (from OSC sequences).
     pub title: String,
-    /// Whether the child process has exited.
-    pub exited: bool,
-    /// Number of attached frontend clients.
-    pub attached_clients: usize,
+    /// Seconds since Unix epoch when the session was created.
+    pub start_time: u64,
+    /// Number of connected frontend clients (attached for streaming).
+    pub connected_client_count: usize,
+    /// Whether the child process is still alive.
+    pub is_alive: bool,
 }
 
 /// A single terminal cell.

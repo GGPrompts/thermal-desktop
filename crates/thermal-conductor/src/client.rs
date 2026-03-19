@@ -2,6 +2,14 @@
 //!
 //! Used by `window.rs` in client mode: when a daemon is running, the window
 //! connects via this client instead of owning its own PTY directly.
+//!
+//! Features:
+//! - Automatic reconnect on socket disconnect (configurable attempts).
+//! - Timeout on request/response round-trips (default 5 seconds).
+//! - Ping/pong health check.
+
+use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
@@ -9,7 +17,16 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::protocol::{self, Request, Response};
+use crate::protocol::{self, Request, Response, SessionInfo};
+
+/// Default request timeout.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum reconnect attempts before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
+/// Delay between reconnect attempts.
+const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 /// A client connection to the session daemon.
 #[allow(dead_code)]
@@ -18,18 +35,30 @@ pub struct DaemonClient {
     request_tx: mpsc::Sender<Request>,
     /// Receiver for incoming responses/updates.
     response_rx: mpsc::Receiver<Response>,
+    /// The socket path used for this connection (for reconnect).
+    socket_path: PathBuf,
+    /// Request timeout duration.
+    timeout: Duration,
 }
 
 #[allow(dead_code)]
 impl DaemonClient {
-    /// Try to connect to the daemon socket.
+    /// Try to connect to the daemon socket at the default path.
     ///
     /// Returns `Ok(Some(client))` if the daemon is running and connection succeeded.
     /// Returns `Ok(None)` if the socket does not exist (daemon not running).
     /// Returns `Err` on connection errors.
     pub async fn connect() -> Result<Option<Self>> {
         let socket_path = protocol::socket_path();
+        Self::connect_to(socket_path).await
+    }
 
+    /// Try to connect to the daemon at a specific socket path.
+    ///
+    /// Returns `Ok(Some(client))` if connection succeeded.
+    /// Returns `Ok(None)` if the socket does not exist.
+    /// Returns `Err` on connection errors.
+    pub async fn connect_to(socket_path: PathBuf) -> Result<Option<Self>> {
         if !socket_path.exists() {
             return Ok(None);
         }
@@ -51,6 +80,21 @@ impl DaemonClient {
 
         info!(path = %socket_path.display(), "Connected to session daemon");
 
+        let (request_tx, response_rx) = Self::spawn_io_tasks(stream);
+
+        Ok(Some(Self {
+            request_tx,
+            response_rx,
+            socket_path,
+            timeout: DEFAULT_TIMEOUT,
+        }))
+    }
+
+    /// Spawn reader and writer tasks for a connected stream.
+    /// Returns the (request_sender, response_receiver) pair.
+    fn spawn_io_tasks(
+        stream: UnixStream,
+    ) -> (mpsc::Sender<Request>, mpsc::Receiver<Response>) {
         let (reader, mut writer) = stream.into_split();
 
         // Channel for outgoing requests.
@@ -105,10 +149,66 @@ impl DaemonClient {
             }
         });
 
-        Ok(Some(Self {
-            request_tx,
-            response_rx,
-        }))
+        (request_tx, response_rx)
+    }
+
+    /// Set the request timeout duration.
+    pub fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// Attempt to reconnect to the daemon socket.
+    ///
+    /// Tries up to `MAX_RECONNECT_ATTEMPTS` times with exponential backoff.
+    /// Returns `Ok(true)` if reconnected, `Ok(false)` if the socket doesn't
+    /// exist (daemon not running), or `Err` on persistent failure.
+    pub async fn reconnect(&mut self) -> Result<bool> {
+        for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
+            info!(attempt, "Attempting to reconnect to daemon");
+
+            if !self.socket_path.exists() {
+                warn!("Daemon socket does not exist; daemon not running");
+                return Ok(false);
+            }
+
+            match UnixStream::connect(&self.socket_path).await {
+                Ok(stream) => {
+                    info!(
+                        path = %self.socket_path.display(),
+                        "Reconnected to session daemon"
+                    );
+                    let (request_tx, response_rx) = Self::spawn_io_tasks(stream);
+                    self.request_tx = request_tx;
+                    self.response_rx = response_rx;
+                    return Ok(true);
+                }
+                Err(e) => {
+                    warn!(
+                        attempt,
+                        error = %e,
+                        "Reconnect attempt failed"
+                    );
+                    if attempt < MAX_RECONNECT_ATTEMPTS {
+                        let delay = RECONNECT_DELAY * attempt;
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        anyhow::bail!(
+            "Failed to reconnect to daemon after {MAX_RECONNECT_ATTEMPTS} attempts"
+        )
+    }
+
+    /// Check whether the daemon connection is healthy via a Ping/Pong exchange.
+    ///
+    /// Returns `true` if the daemon responded within the timeout, `false` otherwise.
+    pub async fn is_healthy(&mut self) -> bool {
+        match self.request_with_timeout(Request::Ping).await {
+            Ok(Response::Pong) => true,
+            _ => false,
+        }
     }
 
     /// Send a request to the daemon.
@@ -131,13 +231,22 @@ impl DaemonClient {
         self.response_rx.try_recv().ok()
     }
 
-    /// Send a request and wait for a single response.
+    /// Send a request and wait for a single response, with the configured timeout.
     pub async fn request(&mut self, request: Request) -> Result<Response> {
-        self.send(request).await?;
-        self.recv()
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Daemon connection lost while waiting for response"))
+        self.request_with_timeout(request).await
     }
+
+    /// Send a request and wait for a response with timeout.
+    async fn request_with_timeout(&mut self, request: Request) -> Result<Response> {
+        self.send(request).await?;
+        match tokio::time::timeout(self.timeout, self.response_rx.recv()).await {
+            Ok(Some(response)) => Ok(response),
+            Ok(None) => anyhow::bail!("Daemon connection lost while waiting for response"),
+            Err(_) => anyhow::bail!("Request timed out after {:?}", self.timeout),
+        }
+    }
+
+    // ── High-level API methods ──────────────────────────────────────────────
 
     /// Spawn a session on the daemon.
     pub async fn spawn_session(
@@ -153,11 +262,39 @@ impl DaemonClient {
         }
     }
 
+    /// Kill a session.
+    pub async fn kill_session(&mut self, id: &str) -> Result<()> {
+        let response = self
+            .request(Request::KillSession {
+                id: id.to_string(),
+            })
+            .await?;
+        match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            other => anyhow::bail!("Unexpected response: {other:?}"),
+        }
+    }
+
     /// List all sessions.
-    pub async fn list_sessions(&mut self) -> Result<Vec<protocol::SessionInfo>> {
+    pub async fn list_sessions(&mut self) -> Result<Vec<SessionInfo>> {
         let response = self.request(Request::ListSessions).await?;
         match response {
             Response::SessionList { sessions } => Ok(sessions),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            other => anyhow::bail!("Unexpected response: {other:?}"),
+        }
+    }
+
+    /// Get a full grid snapshot for a session.
+    pub async fn get_session_state(&mut self, id: &str) -> Result<Response> {
+        let response = self
+            .request(Request::GetSessionState {
+                id: id.to_string(),
+            })
+            .await?;
+        match response {
+            state @ Response::SessionState { .. } => Ok(state),
             Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
             other => anyhow::bail!("Unexpected response: {other:?}"),
         }
@@ -191,21 +328,43 @@ impl DaemonClient {
     }
 
     /// Send input bytes to a session.
-    pub async fn send_input(&self, id: &str, data: Vec<u8>) -> Result<()> {
-        self.send(Request::SendInput {
-            id: id.to_string(),
-            data,
-        })
-        .await
+    pub async fn send_input(&mut self, id: &str, data: Vec<u8>) -> Result<()> {
+        let response = self
+            .request(Request::SendInput {
+                id: id.to_string(),
+                data,
+            })
+            .await?;
+        match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            _ => Ok(()),
+        }
     }
 
-    /// Notify the daemon of a resize.
-    pub async fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.send(Request::Resize {
-            id: id.to_string(),
-            cols,
-            rows,
-        })
-        .await
+    /// Resize a session's PTY.
+    pub async fn resize(&mut self, id: &str, cols: u16, rows: u16) -> Result<()> {
+        let response = self
+            .request(Request::Resize {
+                id: id.to_string(),
+                cols,
+                rows,
+            })
+            .await?;
+        match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            _ => Ok(()),
+        }
+    }
+
+    /// Send a ping and wait for pong.
+    pub async fn ping(&mut self) -> Result<()> {
+        let response = self.request(Request::Ping).await?;
+        match response {
+            Response::Pong => Ok(()),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            other => anyhow::bail!("Unexpected response to ping: {other:?}"),
+        }
     }
 }

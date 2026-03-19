@@ -660,6 +660,676 @@ impl TuiPage for SessionsPage {
     }
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thermal_core::{ClaudeSessionState, ClaudeStatus};
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn make_session(id: &str, parent: Option<&str>) -> ClaudeSessionState {
+        ClaudeSessionState {
+            session_id: id.to_string(),
+            parent_session_id: parent.map(String::from),
+            ..ClaudeSessionState::default()
+        }
+    }
+
+    fn make_session_with_status(id: &str, status: ClaudeStatus) -> ClaudeSessionState {
+        ClaudeSessionState {
+            session_id: id.to_string(),
+            status,
+            ..ClaudeSessionState::default()
+        }
+    }
+
+    fn make_session_with_tool(
+        id: &str,
+        status: ClaudeStatus,
+        tool: Option<&str>,
+    ) -> ClaudeSessionState {
+        ClaudeSessionState {
+            session_id: id.to_string(),
+            status,
+            current_tool: tool.map(String::from),
+            ..ClaudeSessionState::default()
+        }
+    }
+
+    // ── build_display_order: ordering ─────────────────────────────────────────
+
+    #[test]
+    fn display_order_empty_input_produces_empty_output() {
+        let rows = build_display_order(&[]);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn display_order_single_parent() {
+        let sessions = vec![make_session("parent-1", None)];
+        let rows = build_display_order(&sessions);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session.session_id, "parent-1");
+        assert!(!rows[0].is_subagent);
+    }
+
+    #[test]
+    fn display_order_parent_before_child() {
+        let sessions = vec![
+            make_session("child-1", Some("parent-1")),
+            make_session("parent-1", None),
+        ];
+        let rows = build_display_order(&sessions);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].session.session_id, "parent-1");
+        assert!(!rows[0].is_subagent);
+        assert_eq!(rows[1].session.session_id, "child-1");
+        assert!(rows[1].is_subagent);
+    }
+
+    #[test]
+    fn display_order_multiple_parents_sorted_by_id() {
+        let sessions = vec![
+            make_session("beta", None),
+            make_session("alpha", None),
+            make_session("gamma", None),
+        ];
+        let rows = build_display_order(&sessions);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].session.session_id, "alpha");
+        assert_eq!(rows[1].session.session_id, "beta");
+        assert_eq!(rows[2].session.session_id, "gamma");
+    }
+
+    #[test]
+    fn display_order_children_sorted_under_parent() {
+        let sessions = vec![
+            make_session("child-z", Some("parent")),
+            make_session("parent", None),
+            make_session("child-a", Some("parent")),
+        ];
+        let rows = build_display_order(&sessions);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].session.session_id, "parent");
+        assert_eq!(rows[1].session.session_id, "child-a");
+        assert_eq!(rows[2].session.session_id, "child-z");
+        assert!(rows[1].is_subagent);
+        assert!(rows[2].is_subagent);
+    }
+
+    #[test]
+    fn display_order_last_child_flag() {
+        let sessions = vec![
+            make_session("parent", None),
+            make_session("child-a", Some("parent")),
+            make_session("child-b", Some("parent")),
+        ];
+        let rows = build_display_order(&sessions);
+        // child-a is NOT the last child
+        let child_a = rows.iter().find(|r| r.session.session_id == "child-a").unwrap();
+        assert!(!child_a.is_last_child);
+        // child-b IS the last child (alphabetically last)
+        let child_b = rows.iter().find(|r| r.session.session_id == "child-b").unwrap();
+        assert!(child_b.is_last_child);
+    }
+
+    #[test]
+    fn display_order_single_child_is_last_child() {
+        let sessions = vec![
+            make_session("parent", None),
+            make_session("child-only", Some("parent")),
+        ];
+        let rows = build_display_order(&sessions);
+        let child = rows.iter().find(|r| r.session.session_id == "child-only").unwrap();
+        assert!(child.is_last_child);
+    }
+
+    #[test]
+    fn display_order_parent_is_never_last_child() {
+        let sessions = vec![make_session("sole-parent", None)];
+        let rows = build_display_order(&sessions);
+        assert!(!rows[0].is_last_child);
+    }
+
+    #[test]
+    fn display_order_orphan_subagent_appended_as_subagent() {
+        // A session with a parent_session_id that doesn't correspond to any
+        // known parent goes to the orphan section.
+        let sessions = vec![
+            make_session("orphan", Some("missing-parent")),
+        ];
+        let rows = build_display_order(&sessions);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session.session_id, "orphan");
+        assert!(rows[0].is_subagent);
+        assert!(rows[0].is_last_child); // orphans are always is_last_child = true
+    }
+
+    #[test]
+    fn display_order_mixed_parents_and_subagents() {
+        let sessions = vec![
+            make_session("p1", None),
+            make_session("p2", None),
+            make_session("p1-child1", Some("p1")),
+            make_session("p2-child1", Some("p2")),
+            make_session("p1-child2", Some("p1")),
+        ];
+        let rows = build_display_order(&sessions);
+        // 2 parents + 2 children of p1 + 1 child of p2 = 5
+        assert_eq!(rows.len(), 5);
+        // p1 comes before p2 alphabetically
+        assert_eq!(rows[0].session.session_id, "p1");
+        assert!(!rows[0].is_subagent);
+        assert_eq!(rows[1].session.session_id, "p1-child1");
+        assert!(rows[1].is_subagent);
+        assert_eq!(rows[2].session.session_id, "p1-child2");
+        assert!(rows[2].is_subagent);
+        assert!(rows[2].is_last_child); // last child of p1
+        assert_eq!(rows[3].session.session_id, "p2");
+        assert!(!rows[3].is_subagent);
+        assert_eq!(rows[4].session.session_id, "p2-child1");
+        assert!(rows[4].is_subagent);
+    }
+
+    // ── ctx_color thresholds ──────────────────────────────────────────────────
+
+    #[test]
+    fn ctx_color_below_50_is_green() {
+        assert_eq!(ctx_color(0.0), Color::Green);
+        assert_eq!(ctx_color(49.9), Color::Green);
+    }
+
+    #[test]
+    fn ctx_color_50_to_74_is_yellow() {
+        assert_eq!(ctx_color(50.0), Color::Yellow);
+        assert_eq!(ctx_color(74.9), Color::Yellow);
+    }
+
+    #[test]
+    fn ctx_color_75_to_89_is_orange() {
+        assert_eq!(ctx_color(75.0), Color::Rgb(249, 115, 22));
+        assert_eq!(ctx_color(89.9), Color::Rgb(249, 115, 22));
+    }
+
+    #[test]
+    fn ctx_color_90_and_above_is_red() {
+        assert_eq!(ctx_color(90.0), Color::Red);
+        assert_eq!(ctx_color(100.0), Color::Red);
+    }
+
+    // ── format_activity ───────────────────────────────────────────────────────
+
+    #[test]
+    fn format_activity_idle_returns_ready() {
+        let s = make_session_with_status("s", ClaudeStatus::Idle);
+        assert_eq!(format_activity(&s), "✅ Ready");
+    }
+
+    #[test]
+    fn format_activity_awaiting_returns_ready() {
+        let s = make_session_with_status("s", ClaudeStatus::AwaitingInput);
+        assert_eq!(format_activity(&s), "✅ Ready");
+    }
+
+    #[test]
+    fn format_activity_processing_no_tool_returns_processing() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::Processing,
+            current_tool: None,
+            ..ClaudeSessionState::default()
+        };
+        assert_eq!(format_activity(&s), "⚡ Processing");
+    }
+
+    #[test]
+    fn format_activity_tool_use_empty_tool_returns_processing() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some(String::new()),
+            ..ClaudeSessionState::default()
+        };
+        assert_eq!(format_activity(&s), "⚡ Processing");
+    }
+
+    #[test]
+    fn format_activity_read_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Read"));
+        let result = format_activity(&s);
+        assert_eq!(result, "📖 Read");
+    }
+
+    #[test]
+    fn format_activity_write_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Write"));
+        let result = format_activity(&s);
+        assert_eq!(result, "📝 Write");
+    }
+
+    #[test]
+    fn format_activity_edit_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Edit"));
+        let result = format_activity(&s);
+        assert_eq!(result, "✏️ Edit");
+    }
+
+    #[test]
+    fn format_activity_bash_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Bash"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🔺 Bash");
+    }
+
+    #[test]
+    fn format_activity_glob_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Glob"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🔍 Glob");
+    }
+
+    #[test]
+    fn format_activity_grep_tool_no_detail() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Grep"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🔎 Grep");
+    }
+
+    #[test]
+    fn format_activity_task_tool() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Task"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🤖 Task");
+    }
+
+    #[test]
+    fn format_activity_agent_tool() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("Agent"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🤖 Task");
+    }
+
+    #[test]
+    fn format_activity_webfetch_tool() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("WebFetch"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🌐 Fetch");
+    }
+
+    #[test]
+    fn format_activity_websearch_tool() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("WebSearch"));
+        let result = format_activity(&s);
+        assert_eq!(result, "🔍 Search");
+    }
+
+    #[test]
+    fn format_activity_unknown_tool_uses_name_as_label() {
+        let s = make_session_with_tool("s", ClaudeStatus::ToolUse, Some("MyCustomTool"));
+        let result = format_activity(&s);
+        // No emoji prefix for unknown tools; label is the tool name.
+        assert_eq!(result, "MyCustomTool");
+    }
+
+    #[test]
+    fn format_activity_read_with_file_path_detail() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Read".into()),
+            details: Some(thermal_core::ToolDetails {
+                args: Some(thermal_core::ToolArgs {
+                    file_path: Some("/home/builder/projects/foo/src/main.rs".into()),
+                    ..thermal_core::ToolArgs::default()
+                }),
+                ..thermal_core::ToolDetails::default()
+            }),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        // basename extraction — only the filename portion
+        assert_eq!(result, "📖 Read: main.rs");
+    }
+
+    #[test]
+    fn format_activity_bash_with_command_truncated() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Bash".into()),
+            details: Some(thermal_core::ToolDetails {
+                args: Some(thermal_core::ToolArgs {
+                    command: Some("cargo test --workspace -- --nocapture 2>&1".into()),
+                    ..thermal_core::ToolArgs::default()
+                }),
+                ..thermal_core::ToolDetails::default()
+            }),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        // command > 20 chars → truncated with "..."
+        assert!(result.starts_with("🔺 Bash: "));
+        let detail = result.trim_start_matches("🔺 Bash: ");
+        assert!(detail.ends_with("..."), "long command should be truncated: {detail}");
+        assert!(detail.chars().count() <= 23, "truncated detail should be at most 23 chars: {detail}");
+    }
+
+    #[test]
+    fn format_activity_bash_with_short_command_not_truncated() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Bash".into()),
+            details: Some(thermal_core::ToolDetails {
+                args: Some(thermal_core::ToolArgs {
+                    command: Some("ls".into()),
+                    ..thermal_core::ToolArgs::default()
+                }),
+                ..thermal_core::ToolDetails::default()
+            }),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        assert_eq!(result, "🔺 Bash: ls");
+    }
+
+    #[test]
+    fn format_activity_with_subagent_count_appends_indicator() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Task".into()),
+            subagent_count: Some(3),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        assert!(result.contains("🤖×3"), "should contain subagent indicator: {result}");
+    }
+
+    #[test]
+    fn format_activity_subagent_count_zero_no_indicator() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Bash".into()),
+            subagent_count: Some(0),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        assert!(!result.contains('×'), "zero subagents should not add indicator: {result}");
+    }
+
+    #[test]
+    fn format_activity_none_subagent_count_no_indicator() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Bash".into()),
+            subagent_count: None,
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        assert!(!result.contains('×'), "None subagent_count should not add indicator: {result}");
+    }
+
+    #[test]
+    fn format_activity_grep_with_pattern_detail() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Grep".into()),
+            details: Some(thermal_core::ToolDetails {
+                args: Some(thermal_core::ToolArgs {
+                    pattern: Some("fn main".into()),
+                    ..thermal_core::ToolArgs::default()
+                }),
+                ..thermal_core::ToolDetails::default()
+            }),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        assert_eq!(result, "🔎 Grep: fn main");
+    }
+
+    #[test]
+    fn format_activity_unknown_tool_with_description_truncated() {
+        let s = ClaudeSessionState {
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("MyTool".into()),
+            details: Some(thermal_core::ToolDetails {
+                args: Some(thermal_core::ToolArgs {
+                    description: Some("A very long description that exceeds the twenty char limit".into()),
+                    ..thermal_core::ToolArgs::default()
+                }),
+                ..thermal_core::ToolDetails::default()
+            }),
+            ..ClaudeSessionState::default()
+        };
+        let result = format_activity(&s);
+        // unknown tool: no emoji, so format is "label: detail" but label == tool name
+        assert!(result.contains("MyTool"), "should contain tool name: {result}");
+    }
+
+    // ── relative_time / parse_secs_ago ────────────────────────────────────────
+
+    /// Returns an ISO 8601 timestamp for `seconds_ago` seconds in the past.
+    fn iso_ago(seconds_ago: u64) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ts = now.saturating_sub(seconds_ago);
+        // Convert epoch → broken-down time (no-dep algorithm).
+        let days = (ts / 86400) as i64;
+        let secs_of_day = ts % 86400;
+        let h = secs_of_day / 3600;
+        let m = (secs_of_day % 3600) / 60;
+        let s = secs_of_day % 60;
+        // Civil date from day count (days since 1970-01-01).
+        // Using the same approach as the source's parse_secs_ago inverse.
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = z - era * 146097;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if mo <= 2 { y + 1 } else { y };
+        format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
+    }
+
+    #[test]
+    fn relative_time_seconds_ago() {
+        let iso = iso_ago(30);
+        let result = relative_time(&iso);
+        // Should end with 's' and be a small number
+        assert!(result.ends_with('s'), "expected Xs format, got: {result}");
+        let n: i64 = result.trim_end_matches('s').parse().unwrap();
+        // Allow ±3 s for test execution timing
+        assert!((25..=35).contains(&n), "expected ~30s, got {n}");
+    }
+
+    #[test]
+    fn relative_time_minutes_ago() {
+        let iso = iso_ago(125); // 2m5s
+        let result = relative_time(&iso);
+        assert!(result.ends_with('m'), "expected Xm format, got: {result}");
+        let n: i64 = result.trim_end_matches('m').parse().unwrap();
+        assert_eq!(n, 2, "expected 2m, got {n}");
+    }
+
+    #[test]
+    fn relative_time_hours_ago() {
+        let iso = iso_ago(7200); // exactly 2h
+        let result = relative_time(&iso);
+        assert!(result.ends_with('h'), "expected Xh format, got: {result}");
+        let n: i64 = result.trim_end_matches('h').parse().unwrap();
+        assert_eq!(n, 2, "expected 2h, got {n}");
+    }
+
+    #[test]
+    fn relative_time_invalid_iso_returns_dash() {
+        let result = relative_time("not-a-timestamp");
+        assert_eq!(result, "-");
+    }
+
+    #[test]
+    fn relative_time_empty_string_returns_dash() {
+        let result = relative_time("");
+        assert_eq!(result, "-");
+    }
+
+    #[test]
+    fn parse_secs_ago_with_milliseconds_and_z() {
+        // Format: "2026-03-19T12:00:00.123Z"
+        let iso = iso_ago(60);
+        // Append fractional seconds to simulate real Claude timestamps.
+        let with_ms = iso.replace('Z', ".999Z");
+        let result = relative_time(&with_ms);
+        assert!(result.ends_with('m') || result.ends_with('s'),
+            "should parse ms-bearing timestamp: {result}");
+    }
+
+    #[test]
+    fn parse_secs_ago_with_offset() {
+        // Timezone offset suffix "+00:00" should be stripped at the '+' split.
+        let iso = iso_ago(45);
+        let with_offset = iso.replace('Z', "+00:00");
+        let result = relative_time(&with_offset);
+        assert!(result.ends_with('s'), "should handle +offset timestamps: {result}");
+    }
+
+    // ── SessionsPage: navigation ──────────────────────────────────────────────
+
+    fn page_with_sessions(sessions: Vec<ClaudeSessionState>) -> SessionsPage {
+        let display_rows = build_display_order(&sessions);
+        SessionsPage {
+            sessions,
+            display_rows,
+            table_state: ratatui::widgets::TableState::default(),
+            prev_state: HashMap::new(),
+            cached_context_pct: HashMap::new(),
+            history: HashMap::new(),
+            history_popup: None,
+        }
+    }
+
+    #[test]
+    fn nav_down_wraps_to_zero_at_end() {
+        let mut page = page_with_sessions(vec![
+            make_session("a", None),
+            make_session("b", None),
+        ]);
+        page.table_state.select(Some(1)); // last row
+        page.nav_down();
+        assert_eq!(page.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn nav_up_wraps_to_last_at_start() {
+        let mut page = page_with_sessions(vec![
+            make_session("a", None),
+            make_session("b", None),
+        ]);
+        page.table_state.select(Some(0)); // first row
+        page.nav_up();
+        assert_eq!(page.table_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn nav_down_no_op_when_empty() {
+        let mut page = page_with_sessions(vec![]);
+        page.nav_down(); // should not panic
+        assert_eq!(page.table_state.selected(), None);
+    }
+
+    #[test]
+    fn nav_up_no_op_when_empty() {
+        let mut page = page_with_sessions(vec![]);
+        page.nav_up(); // should not panic
+        assert_eq!(page.table_state.selected(), None);
+    }
+
+    #[test]
+    fn clamp_selection_removes_out_of_bounds_selection() {
+        let mut page = page_with_sessions(vec![make_session("only", None)]);
+        page.table_state.select(Some(99)); // out of bounds
+        page.clamp_selection();
+        assert_eq!(page.table_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn clamp_selection_sets_none_when_empty() {
+        let mut page = page_with_sessions(vec![]);
+        page.table_state.select(Some(0));
+        page.clamp_selection();
+        assert_eq!(page.table_state.selected(), None);
+    }
+
+    #[test]
+    fn toggle_history_sets_popup_for_selected_session() {
+        let mut page = page_with_sessions(vec![make_session("sess-1", None)]);
+        page.table_state.select(Some(0));
+        page.toggle_history();
+        assert_eq!(page.history_popup.as_deref(), Some("sess-1"));
+    }
+
+    #[test]
+    fn toggle_history_clears_popup_when_already_shown() {
+        let mut page = page_with_sessions(vec![make_session("sess-1", None)]);
+        page.table_state.select(Some(0));
+        page.toggle_history();
+        assert!(page.has_history_popup());
+        page.toggle_history();
+        assert!(!page.has_history_popup());
+    }
+
+    #[test]
+    fn dismiss_history_clears_popup() {
+        let mut page = page_with_sessions(vec![make_session("s", None)]);
+        page.history_popup = Some("s".into());
+        page.dismiss_history();
+        assert!(!page.has_history_popup());
+    }
+
+    #[test]
+    fn history_popup_for_subagent_uses_parent_id() {
+        let sessions = vec![
+            make_session("parent", None),
+            make_session("child", Some("parent")),
+        ];
+        let mut page = page_with_sessions(sessions);
+        // Find the index of the child row in display_rows.
+        let child_idx = page
+            .display_rows
+            .iter()
+            .position(|r| r.session.session_id == "child")
+            .unwrap();
+        page.table_state.select(Some(child_idx));
+        page.toggle_history();
+        // History popup should track the *parent* session, not the child.
+        assert_eq!(page.history_popup.as_deref(), Some("parent"));
+    }
+
+    // ── status_label / status_color ───────────────────────────────────────────
+
+    #[test]
+    fn status_label_all_variants() {
+        assert_eq!(status_label(&ClaudeStatus::Idle), "IDLE");
+        assert_eq!(status_label(&ClaudeStatus::Processing), "RUNNING");
+        assert_eq!(status_label(&ClaudeStatus::ToolUse), "TOOL USE");
+        assert_eq!(status_label(&ClaudeStatus::AwaitingInput), "AWAITING");
+    }
+
+    #[test]
+    fn status_color_returns_distinct_colors() {
+        let idle = status_color(&ClaudeStatus::Idle);
+        let processing = status_color(&ClaudeStatus::Processing);
+        let tool_use = status_color(&ClaudeStatus::ToolUse);
+        let awaiting = status_color(&ClaudeStatus::AwaitingInput);
+        // Each status maps to a different color.
+        assert_ne!(idle, processing);
+        assert_ne!(processing, tool_use);
+        assert_ne!(tool_use, awaiting);
+    }
+}
+
 impl SessionsPage {
     fn render_history_popup(&self, f: &mut Frame, session_id: &str) {
         let area = f.area();

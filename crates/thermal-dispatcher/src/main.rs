@@ -119,20 +119,20 @@ struct SharedState {
 
 /// Incoming transcript message from thermal-voice.
 #[derive(serde::Deserialize, Debug)]
-struct TranscriptMessage {
-    transcript: String,
+pub struct TranscriptMessage {
+    pub transcript: String,
     #[serde(default)]
-    confidence: f64,
+    pub confidence: f64,
 }
 
 /// Response sent back to thermal-voice.
 #[derive(serde::Serialize)]
-struct DispatcherResponse {
-    status: String,
+pub struct DispatcherResponse {
+    pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    response: Option<String>,
+    pub response: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub error: Option<String>,
 }
 
 async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
@@ -637,6 +637,373 @@ async fn send_tts_via_state_file(text: &str) {
     }
     if let Err(e) = tokio::fs::rename(&tmp, VOICE_STATE_FILE).await {
         warn!("failed to rename voice state: {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // Socket message parsing: TranscriptMessage (thermal-voice → dispatcher)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_transcript_message_with_confidence() {
+        let json = r#"{"transcript": "open firefox", "confidence": 0.95}"#;
+        let msg: TranscriptMessage = serde_json::from_str(json).expect("parse failed");
+        assert_eq!(msg.transcript, "open firefox");
+        assert!((msg.confidence - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_transcript_message_without_confidence_defaults_to_zero() {
+        let json = r#"{"transcript": "take a screenshot"}"#;
+        let msg: TranscriptMessage = serde_json::from_str(json).expect("parse failed");
+        assert_eq!(msg.transcript, "take a screenshot");
+        assert_eq!(msg.confidence, 0.0);
+    }
+
+    #[test]
+    fn parse_transcript_message_empty_transcript() {
+        let json = r#"{"transcript": ""}"#;
+        let msg: TranscriptMessage = serde_json::from_str(json).expect("parse failed");
+        assert!(msg.transcript.is_empty());
+    }
+
+    #[test]
+    fn parse_transcript_message_missing_transcript_field_errors() {
+        let json = r#"{"confidence": 0.9}"#;
+        let result: Result<TranscriptMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "missing 'transcript' should fail");
+    }
+
+    #[test]
+    fn parse_transcript_message_invalid_json_errors() {
+        let result: Result<TranscriptMessage, _> = serde_json::from_str("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_transcript_message_with_unicode() {
+        let json = r#"{"transcript": "schreib eine Datei", "confidence": 0.8}"#;
+        let msg: TranscriptMessage = serde_json::from_str(json).expect("parse failed");
+        assert_eq!(msg.transcript, "schreib eine Datei");
+    }
+
+    // -----------------------------------------------------------------------
+    // DispatcherResponse serialisation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dispatcher_response_ok_serialises() {
+        let resp = DispatcherResponse {
+            status: "ok".into(),
+            response: Some("Done!".into()),
+            error: None,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert_eq!(
+            json.get("response").and_then(|v| v.as_str()),
+            Some("Done!")
+        );
+        assert!(json.get("error").is_none(), "error should be omitted when None");
+    }
+
+    #[test]
+    fn dispatcher_response_error_serialises() {
+        let resp = DispatcherResponse {
+            status: "error".into(),
+            response: None,
+            error: Some("something broke".into()),
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("error"));
+        assert!(json.get("response").is_none(), "response should be omitted when None");
+        assert_eq!(
+            json.get("error").and_then(|v| v.as_str()),
+            Some("something broke")
+        );
+    }
+
+    #[test]
+    fn dispatcher_response_empty_status_serialises() {
+        let resp = DispatcherResponse {
+            status: "empty".into(),
+            response: None,
+            error: Some("empty transcript".into()),
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("empty"));
+    }
+
+    // -----------------------------------------------------------------------
+    // format_action_description
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_click_description() {
+        let input = json!({"x": 100, "y": 200, "button": "right"});
+        let desc = format_action_description("click", &input);
+        assert!(desc.contains("right"), "should mention button");
+        assert!(desc.contains("100"), "should contain x");
+        assert!(desc.contains("200"), "should contain y");
+    }
+
+    #[test]
+    fn format_click_defaults_to_left_button() {
+        let input = json!({"x": 50, "y": 75});
+        let desc = format_action_description("click", &input);
+        assert!(desc.contains("left"));
+    }
+
+    #[test]
+    fn format_type_text_description_short() {
+        let input = json!({"text": "hello"});
+        let desc = format_action_description("type_text", &input);
+        assert!(desc.contains("hello"));
+        assert!(desc.starts_with("Type:"));
+    }
+
+    #[test]
+    fn format_type_text_description_long_truncated() {
+        let long_text = "a".repeat(100);
+        let input = json!({"text": long_text});
+        let desc = format_action_description("type_text", &input);
+        assert!(desc.contains("..."), "long text should be truncated with ...");
+        // The preview is at most 50 chars + "..."
+        assert!(desc.len() < 100, "description should be shorter than full text");
+    }
+
+    #[test]
+    fn format_key_combo_description() {
+        let input = json!({"combo": "ctrl+s"});
+        let desc = format_action_description("key_combo", &input);
+        assert!(desc.contains("ctrl+s"));
+        assert!(desc.starts_with("Press"));
+    }
+
+    #[test]
+    fn format_focus_window_description() {
+        let input = json!({"selector": "firefox"});
+        let desc = format_action_description("focus_window", &input);
+        assert!(desc.contains("firefox"));
+        assert!(desc.to_lowercase().contains("focus"));
+    }
+
+    #[test]
+    fn format_open_app_description() {
+        let input = json!({"command": "gimp"});
+        let desc = format_action_description("open_app", &input);
+        assert!(desc.contains("gimp"));
+        assert!(desc.to_lowercase().contains("launch"));
+    }
+
+    #[test]
+    fn format_open_browser_with_url() {
+        let input = json!({"url": "https://example.com"});
+        let desc = format_action_description("open_browser", &input);
+        assert!(desc.contains("https://example.com"));
+    }
+
+    #[test]
+    fn format_open_browser_without_url() {
+        let input = json!({});
+        let desc = format_action_description("open_browser", &input);
+        assert!(desc.contains("new window"));
+    }
+
+    #[test]
+    fn format_spawn_claude_description() {
+        let input = json!({"count": 3, "project": "thermal-desktop"});
+        let desc = format_action_description("spawn_claude", &input);
+        assert!(desc.contains("3"));
+        assert!(desc.contains("thermal-desktop"));
+    }
+
+    #[test]
+    fn format_spawn_claude_defaults() {
+        let input = json!({});
+        let desc = format_action_description("spawn_claude", &input);
+        assert!(desc.contains("1"), "default count should be 1");
+        assert!(desc.contains("default"));
+    }
+
+    #[test]
+    fn format_kill_claude_description() {
+        let input = json!({"session_id": "sess-abc123"});
+        let desc = format_action_description("kill_claude", &input);
+        assert!(desc.contains("sess-abc123"));
+        assert!(desc.to_lowercase().contains("kill"));
+    }
+
+    #[test]
+    fn format_unknown_tool_generic_description() {
+        let input = json!({"foo": "bar"});
+        let desc = format_action_description("some_unknown_tool", &input);
+        assert!(desc.starts_with("some_unknown_tool("));
+        assert!(desc.contains("foo"));
+    }
+
+    #[test]
+    fn format_unknown_tool_long_args_truncated() {
+        let big_val: String = "x".repeat(200);
+        let input = json!({"key": big_val});
+        let desc = format_action_description("some_tool", &input);
+        assert!(desc.contains("..."), "long args should be truncated with ...");
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_text_response
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_text_from_single_block() {
+        let content = vec![json!({"type": "text", "text": "Hello!"})];
+        let result = extract_text_response(&content);
+        assert_eq!(result, "Hello!");
+    }
+
+    #[test]
+    fn extract_text_from_multiple_blocks() {
+        let content = vec![
+            json!({"type": "text", "text": "first"}),
+            json!({"type": "text", "text": "second"}),
+        ];
+        let result = extract_text_response(&content);
+        assert_eq!(result, "first second");
+    }
+
+    #[test]
+    fn extract_text_ignores_tool_use_blocks() {
+        let content = vec![
+            json!({"type": "tool_use", "name": "screenshot", "id": "t1", "input": {}}),
+            json!({"type": "text", "text": "done"}),
+        ];
+        let result = extract_text_response(&content);
+        assert_eq!(result, "done");
+    }
+
+    #[test]
+    fn extract_text_empty_content_returns_empty_string() {
+        let result = extract_text_response(&[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_text_only_non_text_blocks_returns_empty() {
+        let content = vec![
+            json!({"type": "tool_use", "name": "screenshot", "id": "t2", "input": {}}),
+        ];
+        let result = extract_text_response(&content);
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // HUD state serialisation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hud_state_thinking_serialises_correctly() {
+        let state = HudState::Thinking {
+            transcript: "open the browser".into(),
+        };
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("thinking"));
+        assert_eq!(
+            json.get("transcript").and_then(|v| v.as_str()),
+            Some("open the browser")
+        );
+    }
+
+    #[test]
+    fn hud_state_result_serialises_correctly() {
+        let state = HudState::Result {
+            transcript: "show windows".into(),
+            summary: "Found 5 windows".into(),
+        };
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("result"));
+        assert_eq!(
+            json.get("summary").and_then(|v| v.as_str()),
+            Some("Found 5 windows")
+        );
+    }
+
+    #[test]
+    fn hud_state_error_serialises_correctly() {
+        let state = HudState::Error {
+            transcript: "do thing".into(),
+            error: "timeout".into(),
+        };
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("timeout"));
+    }
+
+    #[test]
+    fn hud_state_confirming_serialises_correctly() {
+        let state = HudState::Confirming {
+            transcript: String::new(),
+            action: "Launch gimp".into(),
+            tool_name: "open_app".into(),
+        };
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("confirming"));
+        assert_eq!(
+            json.get("tool_name").and_then(|v| v.as_str()),
+            Some("open_app")
+        );
+    }
+
+    #[test]
+    fn hud_state_executing_serialises_correctly() {
+        let state = HudState::Executing {
+            action: "Clicking at (100, 200)".into(),
+        };
+        let json: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&state).unwrap(),
+        ).unwrap();
+        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("executing"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn socket_path_is_in_run_user() {
+        assert!(SOCKET_PATH.starts_with("/run/user/"));
+        assert!(SOCKET_PATH.ends_with(".sock"));
+    }
+
+    #[test]
+    fn audio_socket_path_is_in_run_user() {
+        assert!(AUDIO_SOCKET_PATH.starts_with("/run/user/"));
+        assert!(AUDIO_SOCKET_PATH.ends_with(".sock"));
+    }
+
+    #[test]
+    fn hud_state_file_is_in_tmp() {
+        assert!(HUD_STATE_FILE.starts_with("/tmp/"));
+        assert!(HUD_STATE_FILE.ends_with(".json"));
     }
 }
 

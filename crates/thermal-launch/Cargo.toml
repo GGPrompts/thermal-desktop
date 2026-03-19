@@ -21,3 +21,6 @@ clap = { workspace = true }
 raw-window-handle = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

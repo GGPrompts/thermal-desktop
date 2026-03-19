@@ -61,3 +61,88 @@ impl Default for HotkeysModule {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::Zone;
+
+    #[test]
+    fn render_returns_one_output_per_hotkey() {
+        let outputs = HotkeysModule::new().render();
+        assert_eq!(outputs.len(), HOTKEYS.len());
+    }
+
+    #[test]
+    fn render_all_outputs_are_center_zone() {
+        let outputs = HotkeysModule::new().render();
+        for m in &outputs {
+            assert_eq!(m.zone, Zone::Center, "expected Center zone, got {:?}", m.zone);
+        }
+    }
+
+    #[test]
+    fn render_text_contains_icon_keys_and_label() {
+        let outputs = HotkeysModule::new().render();
+        // Spot-check: the first entry should contain "term".
+        assert!(outputs[0].text.contains("term"),
+            "first hotkey text '{}' should contain 'term'", outputs[0].text);
+    }
+
+    #[test]
+    fn render_text_contains_close_label() {
+        let outputs = HotkeysModule::new().render();
+        let has_close = outputs.iter().any(|m| m.text.contains("close"));
+        assert!(has_close, "expected a 'close' hotkey in outputs");
+    }
+
+    #[test]
+    fn render_text_is_non_empty() {
+        let outputs = HotkeysModule::new().render();
+        for m in &outputs {
+            assert!(!m.text.is_empty(), "hotkey text should not be empty");
+        }
+    }
+
+    #[test]
+    fn render_colors_are_valid_rgba() {
+        let outputs = HotkeysModule::new().render();
+        for m in &outputs {
+            for &ch in &m.color {
+                assert!(ch >= 0.0 && ch <= 1.0, "color channel out of range: {ch}");
+            }
+        }
+    }
+
+    #[test]
+    fn default_produces_same_output_as_new() {
+        let a = HotkeysModule::new().render();
+        let b = HotkeysModule::default().render();
+        assert_eq!(a.len(), b.len());
+        for (ma, mb) in a.iter().zip(b.iter()) {
+            assert_eq!(ma.text, mb.text);
+            assert_eq!(ma.color, mb.color);
+        }
+    }
+
+    #[test]
+    fn hotkeys_count_is_correct() {
+        // Verify the constant HOTKEYS array has the expected entries.
+        assert_eq!(HOTKEYS.len(), 13, "expected 13 hotkey entries");
+    }
+
+    #[test]
+    fn render_each_text_has_three_parts() {
+        // Each ModuleOutput text is "{icon} {keys} {label}" — at least 2 spaces.
+        let outputs = HotkeysModule::new().render();
+        for m in &outputs {
+            let parts: Vec<&str> = m.text.splitn(3, ' ').collect();
+            assert_eq!(parts.len(), 3,
+                "expected 3 space-delimited parts in '{}', got {}", m.text, parts.len());
+        }
+    }
+}

@@ -432,3 +432,354 @@ fn tool(name: &str, description: &str, input_schema: Value) -> Value {
         "input_schema": input_schema,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Tool list shape
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_tool_schemas_returns_nonempty_list() {
+        let tools = build_tool_schemas();
+        assert!(!tools.is_empty(), "tool list must not be empty");
+    }
+
+    #[test]
+    fn every_tool_has_name_description_input_schema() {
+        let tools = build_tool_schemas();
+        for t in &tools {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(!name.is_empty(), "tool has no name: {t}");
+            assert!(
+                t.get("description").and_then(|v| v.as_str()).is_some(),
+                "tool '{name}' missing description"
+            );
+            assert!(
+                t.get("input_schema").is_some(),
+                "tool '{name}' missing input_schema"
+            );
+        }
+    }
+
+    #[test]
+    fn input_schema_has_type_object() {
+        let tools = build_tool_schemas();
+        for t in &tools {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let schema_type = t
+                .get("input_schema")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str());
+            assert_eq!(
+                schema_type,
+                Some("object"),
+                "tool '{name}' input_schema.type should be \"object\""
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Specific desktop tool names present
+    // -----------------------------------------------------------------------
+
+    fn tool_names() -> Vec<String> {
+        build_tool_schemas()
+            .into_iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn desktop_tools_present() {
+        let names = tool_names();
+        for expected in &[
+            "screenshot",
+            "click",
+            "type_text",
+            "key_combo",
+            "scroll",
+            "list_windows",
+            "focus_window",
+            "move_window",
+            "list_workspaces",
+            "active_window",
+            "open_app",
+            "open_browser",
+            "open_files",
+            "open_terminal",
+            "spawn_claude",
+            "claude_status",
+            "kill_claude",
+            "clipboard_get",
+            "clipboard_set",
+            "notify",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing tool: {expected}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Beads namespaced tool names present
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beads_tools_present() {
+        let names = tool_names();
+        for expected in &[
+            "beads:list",
+            "beads:show",
+            "beads:stats",
+            "beads:create",
+            "beads:close",
+            "beads:ready",
+            "beads:update",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "missing beads tool: {expected}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Beads tool colon-namespace parsing (name format)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn beads_tool_names_contain_colon() {
+        let names = tool_names();
+        let beads_tools: Vec<&String> = names.iter().filter(|n| n.starts_with("beads:")).collect();
+        assert!(
+            !beads_tools.is_empty(),
+            "expected at least one beads: namespaced tool"
+        );
+        for name in &beads_tools {
+            let parts: Vec<&str> = name.splitn(2, ':').collect();
+            assert_eq!(parts.len(), 2, "beads tool '{name}' should split into 2 parts");
+            assert_eq!(parts[0], "beads");
+            assert!(!parts[1].is_empty(), "beads subcommand should not be empty");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Required fields in specific tool schemas
+    // -----------------------------------------------------------------------
+
+    fn find_tool(name: &str) -> Value {
+        build_tool_schemas()
+            .into_iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+            .unwrap_or_else(|| panic!("tool '{name}' not found"))
+    }
+
+    fn required_fields(tool: &Value) -> Vec<String> {
+        tool.get("input_schema")
+            .and_then(|s| s.get("required"))
+            .and_then(|r| r.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn click_requires_x_and_y() {
+        let t = find_tool("click");
+        let req = required_fields(&t);
+        assert!(req.contains(&"x".to_string()), "click should require x");
+        assert!(req.contains(&"y".to_string()), "click should require y");
+    }
+
+    #[test]
+    fn type_text_requires_text() {
+        let t = find_tool("type_text");
+        let req = required_fields(&t);
+        assert!(req.contains(&"text".to_string()), "type_text should require text");
+    }
+
+    #[test]
+    fn key_combo_requires_combo() {
+        let t = find_tool("key_combo");
+        let req = required_fields(&t);
+        assert!(req.contains(&"combo".to_string()));
+    }
+
+    #[test]
+    fn focus_window_requires_selector() {
+        let t = find_tool("focus_window");
+        let req = required_fields(&t);
+        assert!(req.contains(&"selector".to_string()));
+    }
+
+    #[test]
+    fn open_app_requires_command() {
+        let t = find_tool("open_app");
+        let req = required_fields(&t);
+        assert!(req.contains(&"command".to_string()));
+    }
+
+    #[test]
+    fn kill_claude_requires_session_id() {
+        let t = find_tool("kill_claude");
+        let req = required_fields(&t);
+        assert!(req.contains(&"session_id".to_string()));
+    }
+
+    #[test]
+    fn clipboard_set_requires_text() {
+        let t = find_tool("clipboard_set");
+        let req = required_fields(&t);
+        assert!(req.contains(&"text".to_string()));
+    }
+
+    #[test]
+    fn notify_requires_message() {
+        let t = find_tool("notify");
+        let req = required_fields(&t);
+        assert!(req.contains(&"message".to_string()));
+    }
+
+    #[test]
+    fn beads_show_requires_issue_id() {
+        let t = find_tool("beads:show");
+        let req = required_fields(&t);
+        assert!(req.contains(&"issue_id".to_string()));
+    }
+
+    #[test]
+    fn beads_close_requires_issue_id() {
+        let t = find_tool("beads:close");
+        let req = required_fields(&t);
+        assert!(req.contains(&"issue_id".to_string()));
+    }
+
+    #[test]
+    fn beads_ready_requires_issue_id() {
+        let t = find_tool("beads:ready");
+        let req = required_fields(&t);
+        assert!(req.contains(&"issue_id".to_string()));
+    }
+
+    #[test]
+    fn beads_create_requires_title() {
+        let t = find_tool("beads:create");
+        let req = required_fields(&t);
+        assert!(req.contains(&"title".to_string()));
+    }
+
+    #[test]
+    fn beads_update_requires_issue_id() {
+        let t = find_tool("beads:update");
+        let req = required_fields(&t);
+        assert!(req.contains(&"issue_id".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Optional-field tools have no required array (or empty)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn screenshot_has_no_required_fields() {
+        let t = find_tool("screenshot");
+        let req = required_fields(&t);
+        assert!(req.is_empty(), "screenshot should have no required fields");
+    }
+
+    #[test]
+    fn list_windows_has_no_required_fields() {
+        let t = find_tool("list_windows");
+        let req = required_fields(&t);
+        assert!(req.is_empty());
+    }
+
+    #[test]
+    fn beads_list_has_no_required_fields() {
+        let t = find_tool("beads:list");
+        let req = required_fields(&t);
+        assert!(req.is_empty(), "beads:list should have no required fields");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property definitions exist for key fields
+    // -----------------------------------------------------------------------
+
+    fn properties(tool: &Value) -> Vec<String> {
+        tool.get("input_schema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.as_object())
+            .map(|obj| obj.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn scroll_has_direction_and_clicks_properties() {
+        let t = find_tool("scroll");
+        let props = properties(&t);
+        assert!(props.contains(&"direction".to_string()));
+        assert!(props.contains(&"clicks".to_string()));
+    }
+
+    #[test]
+    fn notify_has_urgency_property() {
+        let t = find_tool("notify");
+        let props = properties(&t);
+        assert!(props.contains(&"urgency".to_string()));
+    }
+
+    #[test]
+    fn beads_list_has_project_and_status_properties() {
+        let t = find_tool("beads:list");
+        let props = properties(&t);
+        assert!(props.contains(&"project".to_string()));
+        assert!(props.contains(&"status".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Enum constraints on click.button
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn click_button_enum_contains_left_right_middle() {
+        let t = find_tool("click");
+        let enum_vals = t
+            .get("input_schema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get("button"))
+            .and_then(|b| b.get("enum"))
+            .and_then(|e| e.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(enum_vals.contains(&"left".to_string()));
+        assert!(enum_vals.contains(&"right".to_string()));
+        assert!(enum_vals.contains(&"middle".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool schemas are valid JSON (no panic on serialization round-trip)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_schemas_round_trip_json() {
+        let tools = build_tool_schemas();
+        let serialized = serde_json::to_string(&tools).expect("serialization failed");
+        let deserialized: Vec<Value> =
+            serde_json::from_str(&serialized).expect("deserialization failed");
+        assert_eq!(tools.len(), deserialized.len());
+    }
+}

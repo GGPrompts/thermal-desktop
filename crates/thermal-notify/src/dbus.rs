@@ -116,3 +116,152 @@ impl NotificationServer {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Notification struct construction ──────────────────────────────────────
+
+    #[test]
+    fn notification_stores_all_fields() {
+        let n = Notification {
+            id: 42,
+            app_name: "test-app".to_string(),
+            summary: "Test Summary".to_string(),
+            body: "Test body text".to_string(),
+            urgency: Urgency::Normal,
+            timeout: 5000,
+        };
+        assert_eq!(n.id, 42);
+        assert_eq!(n.app_name, "test-app");
+        assert_eq!(n.summary, "Test Summary");
+        assert_eq!(n.body, "Test body text");
+        assert_eq!(n.urgency, Urgency::Normal);
+        assert_eq!(n.timeout, 5000);
+    }
+
+    #[test]
+    fn notification_empty_strings_are_valid() {
+        let n = Notification {
+            id: 1,
+            app_name: String::new(),
+            summary: String::new(),
+            body: String::new(),
+            urgency: Urgency::Low,
+            timeout: -1,
+        };
+        assert_eq!(n.app_name, "");
+        assert_eq!(n.summary, "");
+        assert_eq!(n.body, "");
+    }
+
+    #[test]
+    fn notification_clone_produces_independent_copy() {
+        let n = Notification {
+            id: 10,
+            app_name: "cloned-app".to_string(),
+            summary: "Clone test".to_string(),
+            body: "body".to_string(),
+            urgency: Urgency::Critical,
+            timeout: 0,
+        };
+        let cloned = n.clone();
+        assert_eq!(cloned.id, n.id);
+        assert_eq!(cloned.app_name, n.app_name);
+        assert_eq!(cloned.summary, n.summary);
+        assert_eq!(cloned.body, n.body);
+        assert_eq!(cloned.urgency, n.urgency);
+        assert_eq!(cloned.timeout, n.timeout);
+    }
+
+    #[test]
+    fn notification_urgency_low() {
+        let n = Notification {
+            id: 1,
+            app_name: "a".to_string(),
+            summary: "s".to_string(),
+            body: "b".to_string(),
+            urgency: Urgency::Low,
+            timeout: 5000,
+        };
+        assert_eq!(n.urgency, Urgency::Low);
+    }
+
+    #[test]
+    fn notification_urgency_critical_with_zero_timeout() {
+        let n = Notification {
+            id: 2,
+            app_name: "a".to_string(),
+            summary: "s".to_string(),
+            body: "b".to_string(),
+            urgency: Urgency::Critical,
+            timeout: 0,
+        };
+        assert_eq!(n.urgency, Urgency::Critical);
+        assert_eq!(n.timeout, 0);
+    }
+
+    #[test]
+    fn notification_negative_one_timeout_is_server_default() {
+        let n = Notification {
+            id: 3,
+            app_name: "a".to_string(),
+            summary: "s".to_string(),
+            body: "b".to_string(),
+            urgency: Urgency::Normal,
+            timeout: -1,
+        };
+        assert_eq!(n.timeout, -1);
+    }
+
+    // ── NotificationServer construction ───────────────────────────────────────
+
+    #[test]
+    fn server_new_initialises_without_audio() {
+        let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let _server = NotificationServer::new(Arc::clone(&queue), None);
+        // Merely confirm construction succeeds and queue is empty
+        assert!(queue.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn server_counter_starts_at_one() {
+        let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let server = NotificationServer::new(Arc::clone(&queue), None);
+        // The atomic counter starts at 1 (as initialised in new())
+        assert_eq!(
+            server.counter.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    // ── get_capabilities / get_server_information (sync helpers) ─────────────
+
+    #[test]
+    fn get_capabilities_includes_body() {
+        let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let server = NotificationServer::new(Arc::clone(&queue), None);
+        let caps = server.get_capabilities();
+        assert!(caps.contains(&"body".to_string()));
+    }
+
+    #[test]
+    fn get_capabilities_includes_persistence() {
+        let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let server = NotificationServer::new(Arc::clone(&queue), None);
+        let caps = server.get_capabilities();
+        assert!(caps.contains(&"persistence".to_string()));
+    }
+
+    #[test]
+    fn get_server_information_returns_correct_name() {
+        let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
+        let server = NotificationServer::new(Arc::clone(&queue), None);
+        let (name, vendor, version, spec) = server.get_server_information();
+        assert_eq!(name, "thermal-notify");
+        assert_eq!(vendor, "thermal");
+        assert_eq!(version, "1.0");
+        assert_eq!(spec, "1.2");
+    }
+}

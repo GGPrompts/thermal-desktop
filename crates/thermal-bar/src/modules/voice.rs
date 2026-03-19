@@ -152,3 +152,166 @@ impl Default for VoiceModule {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // VoiceState deserialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deserialize_voice_state_muted() {
+        let json = r#"{"state": "muted"}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Muted);
+        assert!(f.label.is_none());
+    }
+
+    #[test]
+    fn deserialize_voice_state_listening() {
+        let json = r#"{"state": "listening"}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Listening);
+    }
+
+    #[test]
+    fn deserialize_voice_state_processing() {
+        let json = r#"{"state": "processing"}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Processing);
+    }
+
+    #[test]
+    fn deserialize_voice_state_with_label() {
+        let json = r#"{"state": "listening", "label": "whisper"}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Listening);
+        assert_eq!(f.label.as_deref(), Some("whisper"));
+    }
+
+    #[test]
+    fn deserialize_voice_state_default_when_empty_json() {
+        let json = r#"{}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Muted);
+        assert!(f.label.is_none());
+    }
+
+    #[test]
+    fn deserialize_voice_state_invalid_json_falls_back_to_default() {
+        let result: Result<VoiceStateFile, _> = serde_json::from_str("not json at all");
+        // Should fail to parse; callers use unwrap_or_default().
+        let f = result.unwrap_or_default();
+        assert_eq!(f.state, VoiceState::Muted);
+    }
+
+    #[test]
+    fn voice_state_default_is_muted() {
+        assert_eq!(VoiceState::default(), VoiceState::Muted);
+    }
+
+    #[test]
+    fn voice_state_file_default_is_muted_no_label() {
+        let f = VoiceStateFile::default();
+        assert_eq!(f.state, VoiceState::Muted);
+        assert!(f.label.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Module output shape
+    // -----------------------------------------------------------------------
+
+    /// Build a ModuleOutput from a VoiceStateFile directly, mirroring the
+    /// render() logic, so we can test it without touching the global cache.
+    fn render_from_state(state_file: VoiceStateFile) -> ModuleOutput {
+        let (icon, label, color) = match state_file.state {
+            VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
+            VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
+            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
+        };
+        let display_label = state_file.label.as_deref().unwrap_or(label);
+        let text = format!("{icon} {display_label}");
+        ModuleOutput::new(crate::layout::Zone::Right, text, color)
+    }
+
+    #[test]
+    fn muted_output_contains_muted_label() {
+        let f = VoiceStateFile { state: VoiceState::Muted, label: None };
+        let m = render_from_state(f);
+        assert!(m.text.contains("muted"), "text='{}' should contain 'muted'", m.text);
+    }
+
+    #[test]
+    fn listening_output_contains_listening_label() {
+        let f = VoiceStateFile { state: VoiceState::Listening, label: None };
+        let m = render_from_state(f);
+        assert!(m.text.contains("listening"), "text='{}'", m.text);
+    }
+
+    #[test]
+    fn processing_output_contains_processing_label() {
+        let f = VoiceStateFile { state: VoiceState::Processing, label: None };
+        let m = render_from_state(f);
+        assert!(m.text.contains("processing"), "text='{}'", m.text);
+    }
+
+    #[test]
+    fn custom_label_overrides_default_label() {
+        let f = VoiceStateFile {
+            state: VoiceState::Listening,
+            label: Some("dictating".to_owned()),
+        };
+        let m = render_from_state(f);
+        assert!(m.text.contains("dictating"), "text='{}' should use custom label", m.text);
+        assert!(!m.text.contains("listening"), "default label should be replaced");
+    }
+
+    #[test]
+    fn output_zone_is_right() {
+        let f = VoiceStateFile::default();
+        let m = render_from_state(f);
+        assert_eq!(m.zone, crate::layout::Zone::Right);
+    }
+
+    #[test]
+    fn output_color_is_valid_rgba() {
+        for state in [VoiceState::Muted, VoiceState::Listening, VoiceState::Processing] {
+            let f = VoiceStateFile { state, label: None };
+            let m = render_from_state(f);
+            for &ch in &m.color {
+                assert!(ch >= 0.0 && ch <= 1.0, "color channel out of range: {ch}");
+            }
+        }
+    }
+
+    #[test]
+    fn muted_and_listening_have_different_colors() {
+        let muted_m = render_from_state(VoiceStateFile { state: VoiceState::Muted, label: None });
+        let listening_m = render_from_state(VoiceStateFile { state: VoiceState::Listening, label: None });
+        assert_ne!(muted_m.color, listening_m.color,
+            "muted and listening should have distinct colors");
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mic_constants_are_non_empty() {
+        assert!(!MIC_MUTED.is_empty());
+        assert!(!MIC_LISTENING.is_empty());
+        assert!(!MIC_PROCESSING.is_empty());
+    }
+
+    #[test]
+    fn voice_state_path_constant_is_set() {
+        assert!(!VOICE_STATE_PATH.is_empty());
+        assert!(VOICE_STATE_PATH.starts_with('/'));
+    }
+}

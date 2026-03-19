@@ -162,3 +162,347 @@ impl Default for SparklineSet {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::SystemMetrics;
+
+    // -----------------------------------------------------------------------
+    // Sparkline basic operations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sparkline_new_is_empty() {
+        let s = Sparkline::new(30);
+        assert!(s.is_empty());
+        assert_eq!(s.len(), 0);
+        assert_eq!(s.latest(), 0.0);
+    }
+
+    #[test]
+    fn sparkline_push_increments_len() {
+        let mut s = Sparkline::new(10);
+        s.push(0.5);
+        assert_eq!(s.len(), 1);
+        s.push(0.3);
+        assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn sparkline_latest_returns_most_recent_value() {
+        let mut s = Sparkline::new(10);
+        s.push(0.2);
+        s.push(0.8);
+        assert!((s.latest() - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparkline_push_clamps_above_one() {
+        let mut s = Sparkline::new(5);
+        s.push(1.5);
+        assert!((s.latest() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparkline_push_clamps_below_zero() {
+        let mut s = Sparkline::new(5);
+        s.push(-0.5);
+        assert!((s.latest() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparkline_evicts_oldest_when_full() {
+        let mut s = Sparkline::new(3);
+        s.push(0.1);
+        s.push(0.2);
+        s.push(0.3);
+        assert_eq!(s.len(), 3);
+        // Push one more — oldest (0.1) should be dropped.
+        s.push(0.4);
+        assert_eq!(s.len(), 3);
+        assert!((s.latest() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sparkline_is_empty_true_before_push() {
+        let s = Sparkline::new(30);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn sparkline_is_empty_false_after_push() {
+        let mut s = Sparkline::new(30);
+        s.push(0.5);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn sparkline_capacity_one_keeps_last_value() {
+        let mut s = Sparkline::new(1);
+        s.push(0.3);
+        s.push(0.7);
+        assert_eq!(s.len(), 1);
+        assert!((s.latest() - 0.7).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sparkline::render_rects
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_rects_empty_sparkline_returns_empty() {
+        let s = Sparkline::new(30);
+        assert!(s.render_rects(0.0, 0.0, 60.0).is_empty());
+    }
+
+    #[test]
+    fn render_rects_zero_capacity_returns_empty() {
+        let s = Sparkline::new(0);
+        assert!(s.render_rects(0.0, 0.0, 60.0).is_empty());
+    }
+
+    #[test]
+    fn render_rects_count_matches_history_len() {
+        let mut s = Sparkline::new(10);
+        s.push(0.1);
+        s.push(0.5);
+        s.push(0.9);
+        let rects = s.render_rects(0.0, 0.0, 60.0);
+        assert_eq!(rects.len(), 3);
+    }
+
+    #[test]
+    fn render_rects_x_positions_advance_left_to_right() {
+        let mut s = Sparkline::new(5);
+        for v in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            s.push(v);
+        }
+        let rects = s.render_rects(0.0, 0.0, 50.0);
+        for i in 1..rects.len() {
+            assert!(rects[i].x > rects[i - 1].x,
+                "rect[{}].x={} should be > rect[{}].x={}", i, rects[i].x, i-1, rects[i-1].x);
+        }
+    }
+
+    #[test]
+    fn render_rects_bar_height_at_max_value() {
+        let mut s = Sparkline::new(5);
+        s.push(1.0); // max value → bar_h = 20.0
+        let rects = s.render_rects(0.0, 0.0, 50.0);
+        assert!((rects[0].h - 20.0).abs() < 1e-3, "h={}", rects[0].h);
+    }
+
+    #[test]
+    fn render_rects_bar_height_minimum_one_px() {
+        let mut s = Sparkline::new(5);
+        s.push(0.0); // zero value → bar_h clamped to 1.0
+        let rects = s.render_rects(0.0, 0.0, 50.0);
+        assert!((rects[0].h - 1.0).abs() < 1e-3, "h={}", rects[0].h);
+    }
+
+    #[test]
+    fn render_rects_origin_offset_applied() {
+        let mut s = Sparkline::new(5);
+        s.push(1.0);
+        let rects_origin = s.render_rects(0.0, 0.0, 50.0);
+        let rects_offset = s.render_rects(100.0, 200.0, 50.0);
+        assert!((rects_offset[0].x - rects_origin[0].x - 100.0).abs() < 1e-3);
+        // y for full-height bar (h=20) at y=0: by = 0 + (20 - 20) = 0
+        // y for full-height bar at y=200: by = 200 + (20 - 20) = 200
+        assert!((rects_offset[0].y - rects_origin[0].y - 200.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn render_rects_bar_width_minimum_one_px() {
+        // With total_width < capacity the computed bar_width could be < 1px;
+        // the max(1.0) guard should prevent zero-width rects.
+        let mut s = Sparkline::new(100);
+        s.push(0.5);
+        let rects = s.render_rects(0.0, 0.0, 10.0); // 10px wide for 100-slot sparkline
+        assert!(rects[0].w >= 1.0, "w={}", rects[0].w);
+    }
+
+    #[test]
+    fn render_rects_colors_are_valid_rgba() {
+        let mut s = Sparkline::new(5);
+        for v in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            s.push(v);
+        }
+        let rects = s.render_rects(0.0, 0.0, 50.0);
+        for r in &rects {
+            for &ch in &r.color {
+                assert!(ch >= 0.0 && ch <= 1.0, "color channel out of range: {ch}");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SparklineSet
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sparkline_set_new_has_empty_sparklines() {
+        let ss = SparklineSet::new();
+        assert!(ss.cpu_usage.is_empty());
+        assert!(ss.cpu_temp.is_empty());
+        assert!(ss.mem_used.is_empty());
+    }
+
+    #[test]
+    fn sparkline_set_default_equivalent_to_new() {
+        let ss_new = SparklineSet::new();
+        let ss_def = SparklineSet::default();
+        assert_eq!(ss_new.cpu_usage.len(), ss_def.cpu_usage.len());
+    }
+
+    #[test]
+    fn push_metrics_increments_all_sparklines() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 60.0,
+            cpu_temp_c: Some(50.0),
+            mem_used_mb: 8000,
+            mem_total_mb: 16000,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        assert_eq!(ss.cpu_usage.len(), 1);
+        assert_eq!(ss.cpu_temp.len(), 1);
+        assert_eq!(ss.mem_used.len(), 1);
+    }
+
+    #[test]
+    fn push_metrics_normalizes_cpu_usage() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 100.0,
+            cpu_temp_c: None,
+            mem_used_mb: 0,
+            mem_total_mb: 1,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        // 100% CPU → normalized value = 1.0
+        assert!((ss.cpu_usage.latest() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_metrics_normalizes_cpu_temp_range() {
+        let mut ss = SparklineSet::new();
+        // 20°C = 0.0 normalized, 100°C = 1.0 normalized
+        let m_cold = SystemMetrics {
+            cpu_usage_pct: 0.0,
+            cpu_temp_c: Some(20.0),
+            mem_used_mb: 0,
+            mem_total_mb: 1,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m_cold);
+        assert!((ss.cpu_temp.latest() - 0.0).abs() < 1e-6, "at 20°C");
+
+        let m_hot = SystemMetrics {
+            cpu_usage_pct: 0.0,
+            cpu_temp_c: Some(100.0),
+            mem_used_mb: 0,
+            mem_total_mb: 1,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m_hot);
+        assert!((ss.cpu_temp.latest() - 1.0).abs() < 1e-6, "at 100°C");
+    }
+
+    #[test]
+    fn push_metrics_no_temp_pushes_zero_norm() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 0.0,
+            cpu_temp_c: None,
+            mem_used_mb: 0,
+            mem_total_mb: 1,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        assert_eq!(ss.cpu_temp.latest(), 0.0);
+    }
+
+    #[test]
+    fn push_metrics_normalizes_memory_usage() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 0.0,
+            cpu_temp_c: None,
+            mem_used_mb: 8000,
+            mem_total_mb: 16000,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        // 8000 / 16000 = 0.5
+        assert!((ss.mem_used.latest() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn push_metrics_mem_zero_total_pushes_zero() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 0.0,
+            cpu_temp_c: None,
+            mem_used_mb: 1000,
+            mem_total_mb: 0,  // avoid divide-by-zero
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        assert_eq!(ss.mem_used.latest(), 0.0);
+    }
+
+    #[test]
+    fn render_all_returns_rects_when_data_present() {
+        let mut ss = SparklineSet::new();
+        let m = SystemMetrics {
+            cpu_usage_pct: 50.0,
+            cpu_temp_c: Some(60.0),
+            mem_used_mb: 4000,
+            mem_total_mb: 8000,
+            net_rx_kbps: 0.0,
+            net_tx_kbps: 0.0,
+            gpu_temp_c: None,
+            gpu_usage_pct: None,
+        };
+        ss.push_metrics(&m);
+        let rects = ss.render_all(0.0, 6.0);
+        // One sample in each of the three sparklines → 3 rects total.
+        assert_eq!(rects.len(), 3);
+    }
+
+    #[test]
+    fn render_all_empty_returns_empty() {
+        let ss = SparklineSet::new();
+        let rects = ss.render_all(0.0, 6.0);
+        assert!(rects.is_empty());
+    }
+}

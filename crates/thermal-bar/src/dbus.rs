@@ -102,3 +102,70 @@ fn parse_agent_state(s: &str) -> AgentState {
         _ => AgentState::Idle,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_agent_state
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_agent_state_running() {
+        assert_eq!(parse_agent_state("running"), AgentState::Running);
+    }
+
+    #[test]
+    fn parse_agent_state_thinking() {
+        assert_eq!(parse_agent_state("thinking"), AgentState::Thinking);
+    }
+
+    #[test]
+    fn parse_agent_state_warning() {
+        assert_eq!(parse_agent_state("warning"), AgentState::Warning);
+    }
+
+    #[test]
+    fn parse_agent_state_error() {
+        assert_eq!(parse_agent_state("error"), AgentState::Error);
+    }
+
+    #[test]
+    fn parse_agent_state_complete() {
+        assert_eq!(parse_agent_state("complete"), AgentState::Complete);
+    }
+
+    #[test]
+    fn parse_agent_state_idle_for_unknown() {
+        assert_eq!(parse_agent_state("unknown_state"), AgentState::Idle);
+    }
+
+    #[test]
+    fn parse_agent_state_empty_string_returns_idle() {
+        assert_eq!(parse_agent_state(""), AgentState::Idle);
+    }
+
+    #[test]
+    fn parse_agent_state_uppercase_normalized() {
+        assert_eq!(parse_agent_state("RUNNING"), AgentState::Running);
+        assert_eq!(parse_agent_state("Running"), AgentState::Running);
+        assert_eq!(parse_agent_state("ERROR"), AgentState::Error);
+    }
+
+    #[test]
+    fn parse_agent_state_trims_whitespace() {
+        assert_eq!(parse_agent_state("  running  "), AgentState::Running);
+        assert_eq!(parse_agent_state("\tcomplete\n"), AgentState::Complete);
+    }
+
+    #[test]
+    fn parse_agent_state_gibberish_returns_idle() {
+        assert_eq!(parse_agent_state("xyzzy"), AgentState::Idle);
+        assert_eq!(parse_agent_state("123"), AgentState::Idle);
+    }
+}

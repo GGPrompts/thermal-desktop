@@ -488,3 +488,259 @@ impl TuiPage for SpawnPage {
         }
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── expand_tilde ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn expand_tilde_leaves_absolute_path_unchanged() {
+        // Safety: test-only, single-threaded context.
+        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        let result = expand_tilde("/absolute/path");
+        assert_eq!(result, "/absolute/path");
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_prefix() {
+        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        let result = expand_tilde("~/projects/foo");
+        assert_eq!(result, "/home/testuser/projects/foo");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_tilde_only_unchanged() {
+        // "~" without a slash is not expanded — only "~/" prefix is handled.
+        let result = expand_tilde("~");
+        assert_eq!(result, "~");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_relative_path_unchanged() {
+        let result = expand_tilde("relative/path");
+        assert_eq!(result, "relative/path");
+    }
+
+    #[test]
+    fn expand_tilde_empty_string_unchanged() {
+        let result = expand_tilde("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn expand_tilde_deep_path() {
+        unsafe { std::env::set_var("HOME", "/home/builder"); }
+        let result = expand_tilde("~/a/b/c/d.toml");
+        assert_eq!(result, "/home/builder/a/b/c/d.toml");
+    }
+
+    // ── ProfileConfig TOML parsing ────────────────────────────────────────────
+
+    fn parse_config(toml: &str) -> ProfileConfig {
+        toml::from_str(toml).expect("TOML should parse")
+    }
+
+    #[test]
+    fn toml_minimal_profile_required_field_only() {
+        let toml = r#"
+[[profile]]
+name = "My Profile"
+"#;
+        let cfg = parse_config(toml);
+        assert_eq!(cfg.profiles.len(), 1);
+        let p = &cfg.profiles[0];
+        assert_eq!(p.name, "My Profile");
+        assert!(p.command.is_none());
+        assert!(p.cwd.is_none());
+        assert!(p.icon.is_none());
+        assert_eq!(p.count, 1); // default_count()
+    }
+
+    #[test]
+    fn toml_full_profile_all_fields() {
+        let toml = r#"
+[[profile]]
+name = "Full Profile"
+command = "claude"
+cwd = "~/projects/myapp"
+icon = "🚀"
+count = 4
+"#;
+        let cfg = parse_config(toml);
+        assert_eq!(cfg.profiles.len(), 1);
+        let p = &cfg.profiles[0];
+        assert_eq!(p.name, "Full Profile");
+        assert_eq!(p.command.as_deref(), Some("claude"));
+        assert_eq!(p.cwd.as_deref(), Some("~/projects/myapp"));
+        assert_eq!(p.icon.as_deref(), Some("🚀"));
+        assert_eq!(p.count, 4);
+    }
+
+    #[test]
+    fn toml_multiple_profiles() {
+        let toml = r#"
+[[profile]]
+name = "Alpha"
+count = 1
+
+[[profile]]
+name = "Beta"
+count = 3
+cwd = "/tmp"
+"#;
+        let cfg = parse_config(toml);
+        assert_eq!(cfg.profiles.len(), 2);
+        assert_eq!(cfg.profiles[0].name, "Alpha");
+        assert_eq!(cfg.profiles[1].name, "Beta");
+        assert_eq!(cfg.profiles[1].count, 3);
+        assert_eq!(cfg.profiles[1].cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn toml_default_cwd_field() {
+        let toml = r#"
+default_cwd = "/srv/projects"
+
+[[profile]]
+name = "Dev"
+"#;
+        let cfg = parse_config(toml);
+        assert_eq!(cfg.default_cwd.as_deref(), Some("/srv/projects"));
+        assert_eq!(cfg.profiles[0].name, "Dev");
+    }
+
+    #[test]
+    fn toml_empty_profiles_list() {
+        let toml = ""; // no profiles table at all
+        let cfg: ProfileConfig = toml::from_str(toml).expect("empty TOML should parse");
+        assert!(cfg.profiles.is_empty());
+        assert!(cfg.default_cwd.is_none());
+    }
+
+    #[test]
+    fn toml_default_count_is_one() {
+        assert_eq!(default_count(), 1);
+    }
+
+    #[test]
+    fn toml_profile_with_tilde_cwd() {
+        let toml = r#"
+[[profile]]
+name = "Home"
+cwd = "~/code"
+"#;
+        let cfg = parse_config(toml);
+        assert_eq!(cfg.profiles[0].cwd.as_deref(), Some("~/code"));
+    }
+
+    // ── Focus navigation ──────────────────────────────────────────────────────
+
+    #[test]
+    fn focus_next_cycles_forward() {
+        assert_eq!(Focus::ProfileList.next(), Focus::CwdField);
+        assert_eq!(Focus::CwdField.next(), Focus::CommandField);
+        assert_eq!(Focus::CommandField.next(), Focus::CountField);
+        assert_eq!(Focus::CountField.next(), Focus::ProfileList);
+    }
+
+    #[test]
+    fn focus_prev_cycles_backward() {
+        assert_eq!(Focus::ProfileList.prev(), Focus::CountField);
+        assert_eq!(Focus::CwdField.prev(), Focus::ProfileList);
+        assert_eq!(Focus::CommandField.prev(), Focus::CwdField);
+        assert_eq!(Focus::CountField.prev(), Focus::CommandField);
+    }
+
+    #[test]
+    fn focus_next_then_prev_returns_to_start() {
+        let start = Focus::CwdField;
+        assert_eq!(start.next().prev(), start);
+    }
+
+    #[test]
+    fn focus_full_cycle_via_next() {
+        let mut f = Focus::ProfileList;
+        for _ in 0..4 {
+            f = f.next();
+        }
+        assert_eq!(f, Focus::ProfileList);
+    }
+
+    #[test]
+    fn focus_full_cycle_via_prev() {
+        let mut f = Focus::ProfileList;
+        for _ in 0..4 {
+            f = f.prev();
+        }
+        assert_eq!(f, Focus::ProfileList);
+    }
+
+    // ── SpawnPage: effective_cwd resolution ───────────────────────────────────
+
+    /// Build a minimal SpawnPage and override fields without going through the
+    /// full load_profiles() I/O path.
+    fn make_page_with_cwd_inputs(
+        cwd_input: &str,
+        default_cwd: Option<&str>,
+        launch_cwd: &str,
+    ) -> SpawnPage {
+        // We call SpawnPage::new() which calls load_profiles() — that may
+        // produce a fallback "Custom" profile if no config file exists, which
+        // is fine for our purposes.
+        SpawnPage {
+            profiles: vec![],
+            default_cwd: default_cwd.map(String::from),
+            list_state: ratatui::widgets::ListState::default(),
+            cwd_input: cwd_input.to_string(),
+            command_input: String::new(),
+            count_input: "1".into(),
+            focus: Focus::ProfileList,
+            status_msg: None,
+            spawning: false,
+            launch_cwd: launch_cwd.to_string(),
+        }
+    }
+
+    #[test]
+    fn effective_cwd_uses_cwd_input_when_set() {
+        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        let page = make_page_with_cwd_inputs("~/mydir", None, "/launch");
+        let cwd = page.effective_cwd();
+        assert_eq!(cwd, "/home/testuser/mydir");
+    }
+
+    #[test]
+    fn effective_cwd_falls_back_to_default_cwd_when_input_empty() {
+        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        let page = make_page_with_cwd_inputs("", Some("~/defaults"), "/launch");
+        let cwd = page.effective_cwd();
+        assert_eq!(cwd, "/home/testuser/defaults");
+    }
+
+    #[test]
+    fn effective_cwd_falls_back_to_launch_cwd_when_all_empty() {
+        let page = make_page_with_cwd_inputs("", None, "/launch/dir");
+        let cwd = page.effective_cwd();
+        assert_eq!(cwd, "/launch/dir");
+    }
+
+    #[test]
+    fn effective_cwd_whitespace_only_input_treated_as_empty() {
+        // trim() in effective_cwd() means whitespace-only should fall through.
+        let page = make_page_with_cwd_inputs("   ", None, "/fallback");
+        let cwd = page.effective_cwd();
+        assert_eq!(cwd, "/fallback");
+    }
+
+    #[test]
+    fn effective_cwd_input_takes_priority_over_default_and_launch() {
+        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        let page = make_page_with_cwd_inputs("/explicit/path", Some("/default"), "/launch");
+        let cwd = page.effective_cwd();
+        assert_eq!(cwd, "/explicit/path");
+    }
+}

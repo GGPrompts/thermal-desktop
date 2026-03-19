@@ -1,0 +1,7 @@
+[2m2026-03-16T01:57:00.212995Z[0m [32m INFO[0m [2mthermal_lock[0m[2m:[0m thermal-lock starting for user: builder
+[2m2026-03-16T01:57:00.213015Z[0m [32m INFO[0m [2mthermal_lock[0m[2m:[0m thermal-lock v0.1.0
+[2m2026-03-16T01:57:00.308534Z[0m [32m INFO[0m [2mwgpu_hal::vulkan::instance[0m[2m:[0m Debug utils not enabled: debug_utils_user_data not passed to Instance::from_raw
+[2m2026-03-16T01:57:00.324013Z[0m [32m INFO[0m [2mwgpu_hal::gles::egl[0m[2m:[0m Using Wayland platform
+[2m2026-03-16T01:57:00.332890Z[0m [33m WARN[0m [2mwgpu_hal::gles::egl[0m[2m:[0m No config found!
+[2m2026-03-16T01:57:00.332903Z[0m [33m WARN[0m [2mwgpu_hal::gles::egl[0m[2m:[0m EGL says it can present to the window but not natively
+[2m2026-03-16T01:57:05.352775Z[0m [33m WARN[0m [2mthermal_lock[0m[2m:[0m LOCK DENIED — exiting

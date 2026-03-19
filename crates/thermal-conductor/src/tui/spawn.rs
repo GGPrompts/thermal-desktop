@@ -1,15 +1,16 @@
-//! Spawn page — interactive form for spawning new therminal sessions.
+//! Spawn page — profile-based session spawner for the TUI dashboard.
 //!
-//! Provides a project directory picker, session name field, and optional
-//! initial prompt, then calls the existing `thc spawn` logic via `DaemonClient`.
+//! Loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`).
+//! Users select a profile, optionally override fields, then spawn sessions.
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
+use serde::Deserialize;
 
 use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
 
@@ -29,6 +30,7 @@ const fn pal(c: [f32; 4]) -> Color {
 
 const BG: Color = pal(ThermalPalette::BG);
 const BG_SURFACE: Color = pal(ThermalPalette::BG_SURFACE);
+const TEXT: Color = pal(ThermalPalette::TEXT);
 const TEXT_BRIGHT: Color = pal(ThermalPalette::TEXT_BRIGHT);
 const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
 const COLD: Color = pal(ThermalPalette::COLD);
@@ -37,25 +39,98 @@ const WARM: Color = pal(ThermalPalette::WARM);
 const SEARING: Color = pal(ThermalPalette::SEARING);
 
 // ---------------------------------------------------------------------------
-// Spawn form fields
+// Profile config
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Project,
-    Count,
+#[derive(Debug, Clone, Deserialize)]
+struct ProfileConfig {
+    #[serde(default)]
+    default_cwd: Option<String>,
+    #[serde(default, rename = "profile")]
+    profiles: Vec<Profile>,
 }
 
-impl Field {
-    fn next(self) -> Self {
-        match self {
-            Field::Project => Field::Count,
-            Field::Count => Field::Project,
+#[derive(Debug, Clone, Deserialize)]
+struct Profile {
+    name: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default = "default_count")]
+    count: u32,
+}
+
+fn default_count() -> u32 {
+    1
+}
+
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}{}", home, &path[1..]);
+        }
+    }
+    path.to_string()
+}
+
+/// Load profiles from config file. Search order:
+/// 1. ./config/profiles.toml (dev)
+/// 2. ~/.config/thermal/profiles.toml (user)
+fn load_profiles() -> (Option<String>, Vec<Profile>) {
+    let candidates = [
+        "config/profiles.toml".to_string(),
+        expand_tilde("~/.config/thermal/profiles.toml"),
+    ];
+
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(config) = toml::from_str::<ProfileConfig>(&content) {
+                return (config.default_cwd, config.profiles);
+            }
         }
     }
 
+    // Fallback: single "Custom" profile
+    (None, vec![Profile {
+        name: "Custom".into(),
+        command: None,
+        cwd: None,
+        icon: Some("⚡".into()),
+        count: 1,
+    }])
+}
+
+// ---------------------------------------------------------------------------
+// Spawn form focus
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    ProfileList,
+    CwdField,
+    CommandField,
+    CountField,
+}
+
+impl Focus {
+    fn next(self) -> Self {
+        match self {
+            Focus::ProfileList => Focus::CwdField,
+            Focus::CwdField => Focus::CommandField,
+            Focus::CommandField => Focus::CountField,
+            Focus::CountField => Focus::ProfileList,
+        }
+    }
     fn prev(self) -> Self {
-        self.next() // only 2 fields, so next == prev
+        match self {
+            Focus::ProfileList => Focus::CountField,
+            Focus::CwdField => Focus::ProfileList,
+            Focus::CommandField => Focus::CwdField,
+            Focus::CountField => Focus::CommandField,
+        }
     }
 }
 
@@ -64,36 +139,82 @@ impl Field {
 // ---------------------------------------------------------------------------
 
 pub struct SpawnPage {
-    /// Current project directory input.
-    project_input: String,
-    /// Number of sessions to spawn (as text for editing).
+    profiles: Vec<Profile>,
+    default_cwd: Option<String>,
+    list_state: ListState,
+    /// Editable fields (override profile values)
+    cwd_input: String,
+    command_input: String,
     count_input: String,
-    /// Which field is focused.
-    focused: Field,
-    /// Status message (success / error feedback).
-    status_msg: Option<(String, bool)>, // (message, is_error)
-    /// Whether a spawn is in progress.
+    focus: Focus,
+    status_msg: Option<(String, bool)>,
     spawning: bool,
+    /// CWD that thc was launched from
+    launch_cwd: String,
 }
 
 impl SpawnPage {
     pub fn new() -> Self {
-        // Default project to current working directory.
-        let cwd = std::env::current_dir()
+        let (default_cwd, profiles) = load_profiles();
+        let launch_cwd = std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(String::from))
             .unwrap_or_default();
 
+        let mut list_state = ListState::default();
+        if !profiles.is_empty() {
+            list_state.select(Some(0));
+        }
+
+        // Initialize fields from first profile
+        let (cwd, cmd, count) = if let Some(p) = profiles.first() {
+            (
+                p.cwd.as_deref().map(expand_tilde).unwrap_or_default(),
+                p.command.clone().unwrap_or_default(),
+                p.count.to_string(),
+            )
+        } else {
+            (String::new(), String::new(), "1".into())
+        };
+
         Self {
-            project_input: cwd,
-            count_input: "1".to_string(),
-            focused: Field::Project,
+            profiles,
+            default_cwd,
+            list_state,
+            cwd_input: cwd,
+            command_input: cmd,
+            count_input: count,
+            focus: Focus::ProfileList,
             status_msg: None,
             spawning: false,
+            launch_cwd,
         }
     }
 
-    /// Attempt to spawn sessions via the daemon client.
+    /// Fill editable fields from the selected profile.
+    fn apply_selected_profile(&mut self) {
+        if let Some(i) = self.list_state.selected() {
+            if let Some(p) = self.profiles.get(i) {
+                self.cwd_input = p.cwd.as_deref().map(expand_tilde).unwrap_or_default();
+                self.command_input = p.command.clone().unwrap_or_default();
+                self.count_input = p.count.to_string();
+                self.status_msg = None;
+            }
+        }
+    }
+
+    /// Resolve the effective CWD: field > profile > default_cwd > launch_cwd
+    fn effective_cwd(&self) -> String {
+        let input = self.cwd_input.trim();
+        if !input.is_empty() {
+            return expand_tilde(input);
+        }
+        if let Some(ref def) = self.default_cwd {
+            return expand_tilde(def);
+        }
+        self.launch_cwd.clone()
+    }
+
     fn do_spawn(&mut self) {
         if self.spawning {
             return;
@@ -107,21 +228,20 @@ impl SpawnPage {
             }
         };
 
-        let project = if self.project_input.trim().is_empty() {
+        let cwd = self.effective_cwd();
+        let project = if cwd.is_empty() {
             None
         } else {
-            let path = std::path::Path::new(self.project_input.trim());
+            let path = std::path::Path::new(&cwd);
             if !path.is_dir() {
-                self.status_msg = Some((format!("Not a directory: {}", self.project_input), true));
+                self.status_msg = Some((format!("Not a directory: {}", cwd), true));
                 return;
             }
-            Some(self.project_input.trim().to_string())
+            Some(cwd.clone())
         };
 
         self.spawning = true;
-        self.status_msg = Some((format!("Spawning {} session(s)...", count), false));
 
-        // Spawn in a background thread using a blocking tokio client call.
         let project_clone = project.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -141,19 +261,37 @@ impl SpawnPage {
             }
         });
 
+        let profile_name = self.list_state.selected()
+            .and_then(|i| self.profiles.get(i))
+            .map(|p| p.name.as_str())
+            .unwrap_or("Custom");
+
         self.status_msg = Some((
             format!(
-                "Spawned {} session{}{}",
+                "Spawned {} x {} in {}",
                 count,
-                if count == 1 { "" } else { "s" },
-                project
-                    .as_ref()
-                    .map(|p| format!(" in {}", p))
-                    .unwrap_or_default()
+                profile_name,
+                project.as_deref().unwrap_or("(default)"),
             ),
             false,
         ));
         self.spawning = false;
+    }
+
+    fn nav_up(&mut self) {
+        if self.profiles.is_empty() { return; }
+        let i = self.list_state.selected().unwrap_or(0);
+        let prev = if i == 0 { self.profiles.len() - 1 } else { i - 1 };
+        self.list_state.select(Some(prev));
+        self.apply_selected_profile();
+    }
+
+    fn nav_down(&mut self) {
+        if self.profiles.is_empty() { return; }
+        let i = self.list_state.selected().unwrap_or(0);
+        let next = if i >= self.profiles.len() - 1 { 0 } else { i + 1 };
+        self.list_state.select(Some(next));
+        self.apply_selected_profile();
     }
 }
 
@@ -162,116 +300,123 @@ impl TuiPage for SpawnPage {
         "Spawn"
     }
 
-    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
-        // Nothing to poll for the spawn page.
-    }
+    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {}
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        // Background
         f.render_widget(
             Block::default().style(Style::default().bg(BG)),
             area,
         );
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(3),  // title area
-                Constraint::Length(3),  // project field
-                Constraint::Length(3),  // count field
-                Constraint::Length(2),  // spacer
-                Constraint::Length(3),  // submit hint
-                Constraint::Length(2),  // status message
-                Constraint::Min(0),    // rest
-                Constraint::Length(1), // footer
+                Constraint::Length(28), // profile list
+                Constraint::Min(30),   // form
             ])
             .margin(1)
             .split(area);
 
-        // Title
-        let title = Paragraph::new("Spawn New Therminal Session")
-            .alignment(Alignment::Center)
-            .style(
+        // -- Profile list (left panel) --
+        let profile_items: Vec<ListItem> = self.profiles.iter().map(|p| {
+            let icon = p.icon.as_deref().unwrap_or(" ");
+            let text = format!("{} {}", icon, p.name);
+            ListItem::new(text)
+        }).collect();
+
+        let list_border = if self.focus == Focus::ProfileList { ACCENT_COLD } else { COLD };
+        let profile_list = List::new(profile_items)
+            .block(
+                Block::default()
+                    .title(" Profiles ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(list_border))
+                    .style(Style::default().bg(BG)),
+            )
+            .highlight_style(
                 Style::default()
+                    .bg(BG_SURFACE)
                     .fg(TEXT_BRIGHT)
                     .add_modifier(Modifier::BOLD),
-            );
-        f.render_widget(title, chunks[0]);
+            )
+            .highlight_symbol("▸ ")
+            .style(Style::default().fg(TEXT));
 
-        // Project directory field
-        let project_style = if self.focused == Field::Project {
-            Style::default().fg(TEXT_BRIGHT)
-        } else {
-            Style::default().fg(TEXT_MUTED)
-        };
-        let project_border = if self.focused == Field::Project {
-            ACCENT_COLD
-        } else {
-            COLD
-        };
-        let cursor_suffix = if self.focused == Field::Project {
-            "\u{2588}" // block cursor
-        } else {
-            ""
-        };
-        let project_field = Paragraph::new(format!("{}{}", self.project_input, cursor_suffix))
-            .style(project_style)
-            .block(
-                Block::default()
-                    .title(" Project Directory ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(project_border))
-                    .style(Style::default().bg(BG_SURFACE)),
-            );
-        f.render_widget(project_field, chunks[1]);
+        f.render_stateful_widget(profile_list, main_chunks[0], &mut self.list_state);
 
-        // Count field
-        let count_style = if self.focused == Field::Count {
-            Style::default().fg(TEXT_BRIGHT)
-        } else {
-            Style::default().fg(TEXT_MUTED)
-        };
-        let count_border = if self.focused == Field::Count {
-            ACCENT_COLD
-        } else {
-            COLD
-        };
-        let count_cursor = if self.focused == Field::Count {
-            "\u{2588}"
-        } else {
-            ""
-        };
-        let count_field = Paragraph::new(format!("{}{}", self.count_input, count_cursor))
-            .style(count_style)
-            .block(
-                Block::default()
-                    .title(" Count (1-16) ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(count_border))
-                    .style(Style::default().bg(BG_SURFACE)),
-            );
-        f.render_widget(count_field, chunks[2]);
+        // -- Form (right panel) --
+        let form_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // title
+                Constraint::Length(3), // cwd field
+                Constraint::Length(3), // command field
+                Constraint::Length(3), // count field
+                Constraint::Length(2), // spacer
+                Constraint::Length(1), // hint
+                Constraint::Length(2), // status
+                Constraint::Min(0),   // rest
+                Constraint::Length(1), // footer
+            ])
+            .split(main_chunks[1]);
 
-        // Submit hint
-        let submit_hint = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "  Enter",
-                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " to spawn  |  ",
-                Style::default().fg(TEXT_MUTED),
-            ),
-            Span::styled(
-                "Tab",
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to switch fields", Style::default().fg(TEXT_MUTED)),
+        // Title
+        let profile_name = self.list_state.selected()
+            .and_then(|i| self.profiles.get(i))
+            .map(|p| p.name.as_str())
+            .unwrap_or("Custom");
+        let title = Paragraph::new(format!("Spawn: {}", profile_name))
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(TEXT_BRIGHT).add_modifier(Modifier::BOLD));
+        f.render_widget(title, form_chunks[0]);
+
+        // Helper to render a text input field
+        let render_field = |f: &mut Frame, area: Rect, title: &str, value: &str, focused: bool, placeholder: &str| {
+            let border_color = if focused { ACCENT_COLD } else { COLD };
+            let text_style = if focused {
+                Style::default().fg(TEXT_BRIGHT)
+            } else if value.is_empty() {
+                Style::default().fg(TEXT_MUTED)
+            } else {
+                Style::default().fg(TEXT)
+            };
+
+            let display = if value.is_empty() && !focused {
+                placeholder.to_string()
+            } else if focused {
+                format!("{}\u{2588}", value)
+            } else {
+                value.to_string()
+            };
+
+            let widget = Paragraph::new(display)
+                .style(text_style)
+                .block(
+                    Block::default()
+                        .title(format!(" {} ", title))
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(border_color))
+                        .style(Style::default().bg(BG_SURFACE)),
+                );
+            f.render_widget(widget, area);
+        };
+
+        let cwd_placeholder = format!("(inherits: {})", self.effective_cwd());
+        render_field(f, form_chunks[1], "Working Directory", &self.cwd_input, self.focus == Focus::CwdField, &cwd_placeholder);
+        render_field(f, form_chunks[2], "Command", &self.command_input, self.focus == Focus::CommandField, "(default: claude)");
+        render_field(f, form_chunks[3], "Count (1-16)", &self.count_input, self.focus == Focus::CountField, "1");
+
+        // Hint
+        let hint = Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(WARM).add_modifier(Modifier::BOLD)),
+            Span::styled(": spawn  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled("Tab", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(": next field  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled("j/k", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(": select profile", Style::default().fg(TEXT_MUTED)),
         ]))
         .alignment(Alignment::Center);
-        f.render_widget(submit_hint, chunks[4]);
+        f.render_widget(hint, form_chunks[5]);
 
         // Status message
         if let Some((ref msg, is_error)) = self.status_msg {
@@ -279,35 +424,8 @@ impl TuiPage for SpawnPage {
             let status = Paragraph::new(msg.as_str())
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(color));
-            f.render_widget(status, chunks[5]);
+            f.render_widget(status, form_chunks[6]);
         }
-
-        // Footer
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                " Tab",
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(": next field  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(
-                "Enter",
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(": spawn  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(
-                "Esc",
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(": clear status", Style::default().fg(TEXT_MUTED)),
-        ]))
-        .style(Style::default().bg(BG));
-        f.render_widget(footer, chunks[7]);
     }
 
     fn handle_key(
@@ -317,48 +435,56 @@ impl TuiPage for SpawnPage {
     ) -> bool {
         use crossterm::event::KeyCode;
 
-        match key.code {
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.focused = if key.code == KeyCode::BackTab {
-                    self.focused.prev()
-                } else {
-                    self.focused.next()
-                };
-            }
-            KeyCode::Enter => {
-                self.do_spawn();
-            }
-            KeyCode::Esc => {
-                self.status_msg = None;
-            }
-            KeyCode::Backspace => match self.focused {
-                Field::Project => {
-                    self.project_input.pop();
-                }
-                Field::Count => {
-                    self.count_input.pop();
-                }
+        match self.focus {
+            Focus::ProfileList => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => self.nav_down(),
+                KeyCode::Char('k') | KeyCode::Up => self.nav_up(),
+                KeyCode::Enter => self.do_spawn(),
+                KeyCode::Tab => self.focus = self.focus.next(),
+                KeyCode::BackTab => self.focus = self.focus.prev(),
+                KeyCode::Esc => self.status_msg = None,
+                _ => {}
             },
-            KeyCode::Char(c) => match self.focused {
-                Field::Project => {
-                    self.project_input.push(c);
+            _ => match key.code {
+                KeyCode::Tab => self.focus = self.focus.next(),
+                KeyCode::BackTab => self.focus = self.focus.prev(),
+                KeyCode::Enter => self.do_spawn(),
+                KeyCode::Esc => {
+                    self.focus = Focus::ProfileList;
+                    self.status_msg = None;
                 }
-                Field::Count => {
-                    if c.is_ascii_digit() && self.count_input.len() < 2 {
-                        self.count_input.push(c);
+                KeyCode::Backspace => match self.focus {
+                    Focus::CwdField => { self.cwd_input.pop(); }
+                    Focus::CommandField => { self.command_input.pop(); }
+                    Focus::CountField => { self.count_input.pop(); }
+                    _ => {}
+                },
+                KeyCode::Char(c) => match self.focus {
+                    Focus::CwdField => self.cwd_input.push(c),
+                    Focus::CommandField => self.command_input.push(c),
+                    Focus::CountField => {
+                        if c.is_ascii_digit() && self.count_input.len() < 2 {
+                            self.count_input.push(c);
+                        }
                     }
-                }
+                    _ => {}
+                },
+                _ => {}
             },
-            _ => {}
         }
         false
     }
 
     fn handle_mouse(
         &mut self,
-        _event: crossterm::event::MouseEvent,
+        event: crossterm::event::MouseEvent,
         _poller: &mut ClaudeStatePoller,
     ) {
-        // No mouse handling for spawn page yet.
+        use crossterm::event::MouseEventKind;
+        match event.kind {
+            MouseEventKind::ScrollDown => self.nav_down(),
+            MouseEventKind::ScrollUp => self.nav_up(),
+            _ => {}
+        }
     }
 }

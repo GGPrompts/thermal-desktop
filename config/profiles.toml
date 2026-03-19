@@ -1,0 +1,37 @@
+# Thermal Conductor spawn profiles
+# Each [[profile]] defines a preset for the Spawn page in `thc tui`.
+#
+# Fields:
+#   name     — display name (required)
+#   command  — shell command to run after spawning (optional, default: claude)
+#   cwd      — working directory (optional, inherits from TUI's cwd)
+#   icon     — emoji/symbol shown in the list (optional)
+#   count    — default number of sessions to spawn (optional, default: 1)
+
+# Default working directory when a profile doesn't specify one.
+# Supports ~ expansion. If unset, uses the directory thc was launched from.
+# default_cwd = "~/projects"
+
+[[profile]]
+name = "thermal-desktop"
+icon = "🔥"
+cwd = "~/projects/thermal-desktop"
+
+[[profile]]
+name = "thermobile"
+icon = "📱"
+cwd = "~/projects/thermobile"
+
+[[profile]]
+name = "pocketforge"
+icon = "🔨"
+cwd = "~/projects/pocketforge"
+
+[[profile]]
+name = "Shell"
+icon = "🖥️"
+command = ""
+
+[[profile]]
+name = "Custom"
+icon = "⚡"

@@ -27,8 +27,9 @@ use client::DaemonClient;
 /// Thermal Conductor — orchestrate Claude agent therminals via the session daemon.
 ///
 /// Run with no arguments to launch the interactive TUI dashboard.
+/// Use `thc tui` explicitly, or just `thc` to start the dashboard.
 #[derive(Parser)]
-#[command(name = "thermal-conductor", version, about)]
+#[command(name = "thermal-conductor", version, about, after_help = "Run `thc` or `thc tui` to launch the interactive dashboard.")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

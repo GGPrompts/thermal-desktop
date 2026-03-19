@@ -1909,7 +1909,7 @@ impl GridRenderer {
         let mut label_entries: Vec<(f32, f32, f32, String, PaletteColor)> = Vec::new();
 
         // Current time elapsed for pulse animation.
-        let pulse_phase = now.elapsed().as_secs_f32(); // This is 0 — use frame_count instead.
+        // Pulse animation: oscillate alpha using the renderer's frame counter.
         let pulse_t = (self.frame_count as f32 * 0.05).sin() * 0.5 + 0.5; // 0..1 oscillation
 
         for entry in timeline.entries.iter() {
@@ -2024,7 +2024,7 @@ impl GridRenderer {
             let metrics = Metrics::new(FONT_SIZE * 0.75, LINE_HEIGHT * 0.75);
 
             let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
-            for (_, max_w, _, ref text, color) in &label_entries {
+            for (_, max_w, _, text, color) in &label_entries {
                 let mut buf = Buffer::new(&mut self.font_system, metrics);
                 buf.set_size(&mut self.font_system, Some(*max_w), Some(content_h));
                 buf.set_text(

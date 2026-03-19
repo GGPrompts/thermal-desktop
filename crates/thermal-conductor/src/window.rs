@@ -63,6 +63,7 @@ use std::sync::{
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
 use thermal_core::ThermalPalette;
 
+use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::grid_renderer::{ContextHeatmapPipeline, GridRenderer, RenderCell};
 use crate::inject::{self, InjectWatcher};
@@ -435,6 +436,7 @@ pub fn run() -> anyhow::Result<()> {
         inject_watcher,
         context_warning_active: false,
         context_critical_active: false,
+        agent_timeline: AgentTimeline::new(),
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -525,6 +527,15 @@ pub fn run() -> anyhow::Result<()> {
             state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
         }
 
+        // ── Track tool changes for the agent timeline ────────────────────
+        if let Some(ref session) = state.claude_session {
+            state
+                .agent_timeline
+                .record_tool_change(session.current_tool.as_deref());
+        } else if state.agent_timeline.visible {
+            state.agent_timeline.record_idle();
+        }
+
         // ── Update context saturation warnings ──────────────────────────
         state.update_context_warnings();
 
@@ -542,6 +553,11 @@ pub fn run() -> anyhow::Result<()> {
                 state.render_deadline =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(8));
             }
+        }
+
+        // Keep redrawing when the timeline is visible (pulse animation).
+        if state.agent_timeline.visible && !state.agent_timeline.entries.is_empty() {
+            state.dirty = true;
         }
 
         if state.configured && state.dirty {
@@ -787,6 +803,8 @@ struct ConductorWindow {
     context_warning_active: bool,
     /// Whether the 95% context critical overlay is currently displayed.
     context_critical_active: bool,
+    /// Agent tool-usage timeline bar (toggled with Ctrl+Shift+T).
+    agent_timeline: AgentTimeline,
 }
 
 impl ConductorWindow {
@@ -1031,6 +1049,17 @@ impl ConductorWindow {
                         );
                     }
 
+                    // ── Agent timeline overlay ─────────────────────────────
+                    self.grid_renderer.render_agent_timeline(
+                        &self.agent_timeline,
+                        &self.wgpu.device,
+                        &self.wgpu.queue,
+                        &mut encoder,
+                        &view,
+                        self.width,
+                        self.height,
+                    );
+
                     self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                     output.present();
                     return;
@@ -1178,6 +1207,17 @@ impl ConductorWindow {
                 self.height,
             );
         }
+
+        // ── Agent timeline overlay ──────────────────────────────────────
+        self.grid_renderer.render_agent_timeline(
+            &self.agent_timeline,
+            &self.wgpu.device,
+            &self.wgpu.queue,
+            &mut encoder,
+            &view,
+            self.width,
+            self.height,
+        );
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -1794,7 +1834,13 @@ impl WindowHandler for ConductorWindow {
             self.grid_renderer.resize(&self.wgpu.device, &self.wgpu.queue, w, h);
 
             // Recalculate terminal grid dimensions and resize.
-            let (cols, rows) = self.grid_renderer.grid_size(w, h);
+            // Account for the timeline bar when it is visible.
+            let effective_h = if self.agent_timeline.visible {
+                h.saturating_sub(TIMELINE_BAR_HEIGHT)
+            } else {
+                h
+            };
+            let (cols, rows) = self.grid_renderer.grid_size(w, effective_h);
             self.terminal.resize(
                 cols,
                 rows,
@@ -1939,6 +1985,29 @@ impl KeyboardHandler for ConductorWindow {
                     return;
                 }
                 _ => {}
+            }
+        }
+
+        // ── Agent timeline toggle: Ctrl+Shift+T ────────────────────────
+        if self.modifiers.ctrl && self.modifiers.shift {
+            if matches!(event.keysym, Keysym::T | Keysym::t) {
+                self.agent_timeline.toggle();
+                // Recalculate terminal grid to account for the timeline bar.
+                let effective_h = if self.agent_timeline.visible {
+                    self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
+                } else {
+                    self.height
+                };
+                let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
+                self.terminal.resize(
+                    cols,
+                    rows,
+                    self.grid_renderer.cell_width as u16,
+                    self.grid_renderer.cell_height as u16,
+                );
+                self.resize_session(cols as u16, rows as u16);
+                self.dirty = true;
+                return;
             }
         }
 

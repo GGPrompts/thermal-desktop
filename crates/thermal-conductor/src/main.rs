@@ -3,6 +3,7 @@
 //! CLI commands communicate with the session daemon over a Unix socket.
 //! The daemon owns PTY sessions; clients spawn, list, send input, and kill sessions.
 
+mod agent_timeline;
 mod client;
 mod daemon;
 mod grid_renderer;

@@ -1,0 +1,37 @@
+# Thermal Desktop — Single Source of Truth for all colors
+# Run `python3 scripts/generate-theme.py` to propagate changes.
+
+[background]
+bg           = "#0a0010"
+bg_light     = "#0f0018"
+bg_surface   = "#120822"
+
+[cold]
+freezing = "#1a0030"
+cold     = "#2d1b69"
+cool     = "#1e3a8a"
+
+[neutral]
+mild = "#0d9488"
+warm = "#22c55e"
+
+[hot]
+hot      = "#eab308"
+hotter   = "#f97316"
+searing  = "#ef4444"
+critical = "#dc2626"
+
+[whitehot]
+white_hot = "#fef3c7"
+
+[text]
+text        = "#c4b5fd"
+text_bright = "#e9e0ff"
+text_muted  = "#7c6faa"
+
+[accent]
+accent_cold    = "#6366f1"
+accent_cool    = "#3b82f6"
+accent_neutral = "#14b8a6"
+accent_warm    = "#f59e0b"
+accent_hot     = "#ef4444"

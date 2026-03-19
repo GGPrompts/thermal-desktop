@@ -48,6 +48,7 @@ impl Color {
 // Color constants matching the thermal palette
 // ---------------------------------------------------------------------------
 
+// THERMAL-COLORS-START
 impl Color {
     // Void / Background
     pub const BG: Color = Color::from_hex(0x0a0010);
@@ -84,6 +85,7 @@ impl Color {
     pub const ACCENT_WARM: Color = Color::from_hex(0xf59e0b);
     pub const ACCENT_HOT: Color = Color::from_hex(0xef4444);
 }
+// THERMAL-COLORS-END
 
 // ---------------------------------------------------------------------------
 // Gradient interpolation
@@ -488,6 +490,7 @@ mod tests {
     }
 }
 
+// THERMAL-PALETTE-COLORS-START
 impl ThermalPalette {
     // Void / Background
     pub const BG: [f32; 4] = Self::hex(0x0a, 0x00, 0x10);
@@ -523,6 +526,7 @@ impl ThermalPalette {
     pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
     pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
     pub const ACCENT_HOT: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
+// THERMAL-PALETTE-COLORS-END
 
     const fn hex(r: u8, g: u8, b: u8) -> [f32; 4] {
         [

@@ -12,6 +12,8 @@ members = [
     "crates/thermal-commander",
     "crates/thermal-hud",
     "crates/thermal-dispatcher",
+    "crates/thermal-screensaver",
+    "crates/thermal-wallpaper",
 ]
 
 [workspace.package]
@@ -24,7 +26,7 @@ repository = "https://github.com/GGPrompts/thermal-desktop"
 # Wayland
 smithay-client-toolkit = "0.19"
 wayland-client = { version = "0.31", features = ["system"] }
-wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = "0.3"
 winit = { version = "0.30", features = ["wayland"] }
 
@@ -65,3 +67,4 @@ pollster = "0.3"
 raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
 md-5 = "0.10"
+tempfile = "3"

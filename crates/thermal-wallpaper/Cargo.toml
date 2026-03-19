@@ -1,0 +1,18 @@
+[package]
+name = "thermal-wallpaper"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thermal-core = { path = "../thermal-core" }
+wgpu = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+nix = { workspace = true }
+clap = { workspace = true }
+pollster = { workspace = true }
+raw-window-handle = { workspace = true }
+bytemuck = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

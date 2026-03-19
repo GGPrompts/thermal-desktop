@@ -187,16 +187,82 @@ struct HistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Display ordering — parents first, subagents nested underneath
+// ---------------------------------------------------------------------------
+
+/// A row in the display table, with metadata about nesting.
+struct DisplayRow {
+    session: ClaudeSessionState,
+    is_subagent: bool,
+    /// True if this is the last subagent of its parent group.
+    is_last_child: bool,
+}
+
+/// Build a flat list of DisplayRows with parents followed by their subagents.
+fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
+    let mut parents: Vec<&ClaudeSessionState> = sessions
+        .iter()
+        .filter(|s| s.parent_session_id.is_none())
+        .collect();
+    // Sort parents by session_id for stable ordering
+    parents.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+    let mut rows = Vec::with_capacity(sessions.len());
+
+    for parent in &parents {
+        rows.push(DisplayRow {
+            session: (*parent).clone(),
+            is_subagent: false,
+            is_last_child: false,
+        });
+
+        // Find children of this parent
+        let mut children: Vec<&ClaudeSessionState> = sessions
+            .iter()
+            .filter(|s| s.parent_session_id.as_deref() == Some(&parent.session_id))
+            .collect();
+        children.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+
+        let child_count = children.len();
+        for (i, child) in children.into_iter().enumerate() {
+            rows.push(DisplayRow {
+                session: child.clone(),
+                is_subagent: true,
+                is_last_child: i == child_count - 1,
+            });
+        }
+    }
+
+    // Orphan subagents (parent state file gone but subagent still running)
+    for s in sessions {
+        if s.parent_session_id.is_some()
+            && !parents.iter().any(|p| Some(p.session_id.as_str()) == s.parent_session_id.as_deref())
+        {
+            rows.push(DisplayRow {
+                session: s.clone(),
+                is_subagent: true,
+                is_last_child: true,
+            });
+        }
+    }
+
+    rows
+}
+
+// ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
 
 struct App {
     poller: ClaudeStatePoller,
     sessions: Vec<ClaudeSessionState>,
+    display_rows: Vec<DisplayRow>,
     table_state: TableState,
     should_quit: bool,
     /// Previous state per session: (status, current_tool) for change detection
     prev_state: HashMap<String, (ClaudeStatus, Option<String>)>,
+    /// Cached context_percent per session (persists across updates that omit it)
+    cached_context_pct: HashMap<String, f32>,
     /// Status history per session
     history: HashMap<String, VecDeque<HistoryEntry>>,
     /// Which session_id has the history popup open, if any
@@ -207,16 +273,19 @@ impl App {
     fn new() -> anyhow::Result<Self> {
         let poller = ClaudeStatePoller::new()?;
         let sessions = poller.get_all();
+        let display_rows = build_display_order(&sessions);
         let mut table_state = TableState::default();
-        if !sessions.is_empty() {
+        if !display_rows.is_empty() {
             table_state.select(Some(0));
         }
         Ok(Self {
             poller,
             sessions,
+            display_rows,
             table_state,
             should_quit: false,
             prev_state: HashMap::new(),
+            cached_context_pct: HashMap::new(),
             history: HashMap::new(),
             history_popup: None,
         })
@@ -226,14 +295,28 @@ impl App {
         let updated = self.poller.poll();
         if !updated.is_empty() {
             self.sessions = updated;
-            self.clamp_selection();
         }
+        // Cache context_percent: if a session reports it, store it;
+        // if a session omits it, fill from cache so it doesn't flicker.
+        for s in &mut self.sessions {
+            if let Some(pct) = s.context_percent {
+                self.cached_context_pct.insert(s.session_id.clone(), pct);
+            } else if let Some(&cached) = self.cached_context_pct.get(&s.session_id) {
+                s.context_percent = Some(cached);
+            }
+        }
+        self.display_rows = build_display_order(&self.sessions);
+        self.clamp_selection();
         self.update_history();
     }
 
     fn update_history(&mut self) {
         let now = Instant::now();
         for s in &self.sessions {
+            // Skip subagent history — they're transient
+            if s.parent_session_id.is_some() {
+                continue;
+            }
             let current = (s.status.clone(), s.current_tool.clone());
             let changed = match self.prev_state.get(&s.session_id) {
                 Some(prev) => *prev != current,
@@ -257,38 +340,45 @@ impl App {
 
     fn force_refresh(&mut self) {
         self.sessions = self.poller.get_all();
+        self.display_rows = build_display_order(&self.sessions);
         self.clamp_selection();
     }
 
     fn clamp_selection(&mut self) {
-        if self.sessions.is_empty() {
+        if self.display_rows.is_empty() {
             self.table_state.select(None);
         } else if let Some(i) = self.table_state.selected() {
-            if i >= self.sessions.len() {
-                self.table_state.select(Some(self.sessions.len() - 1));
+            if i >= self.display_rows.len() {
+                self.table_state.select(Some(self.display_rows.len() - 1));
             }
         }
     }
 
     fn nav_down(&mut self) {
-        if self.sessions.is_empty() { return; }
+        if self.display_rows.is_empty() { return; }
         let i = self.table_state.selected().unwrap_or(0);
-        let next = if i >= self.sessions.len() - 1 { 0 } else { i + 1 };
+        let next = if i >= self.display_rows.len() - 1 { 0 } else { i + 1 };
         self.table_state.select(Some(next));
     }
 
     fn nav_up(&mut self) {
-        if self.sessions.is_empty() { return; }
+        if self.display_rows.is_empty() { return; }
         let i = self.table_state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.sessions.len() - 1 } else { i - 1 };
+        let prev = if i == 0 { self.display_rows.len() - 1 } else { i - 1 };
         self.table_state.select(Some(prev));
     }
 
     fn attach_selected(&self) {
         if let Some(i) = self.table_state.selected() {
-            if let Some(session) = self.sessions.get(i) {
+            if let Some(row) = self.display_rows.get(i) {
+                // For subagents, attach to the parent session
+                let target = if let Some(ref parent) = row.session.parent_session_id {
+                    parent.as_str()
+                } else {
+                    &row.session.session_id
+                };
                 let _ = Command::new("tmux")
-                    .args(["switch-client", "-t", &session.session_id])
+                    .args(["switch-client", "-t", target])
                     .status();
             }
         }
@@ -298,12 +388,15 @@ impl App {
         if self.history_popup.is_some() {
             self.history_popup = None;
         } else if let Some(i) = self.table_state.selected() {
-            if let Some(session) = self.sessions.get(i) {
-                self.history_popup = Some(session.session_id.clone());
+            if let Some(row) = self.display_rows.get(i) {
+                // Show history for parent, not subagent
+                let target = row.session.parent_session_id.as_ref()
+                    .unwrap_or(&row.session.session_id)
+                    .clone();
+                self.history_popup = Some(target);
             }
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -323,12 +416,17 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     // Background
     f.render_widget(Block::default().style(Style::default().bg(BG)), f.area());
 
-    // -- Header --
-    let total = app.sessions.len();
-    let active = app.sessions.iter()
-        .filter(|s| s.status != ClaudeStatus::Idle)
+    // -- Header -- (count only parent sessions)
+    let parent_count = app.display_rows.iter().filter(|r| !r.is_subagent).count();
+    let active = app.display_rows.iter()
+        .filter(|r| !r.is_subagent && r.session.status != ClaudeStatus::Idle)
         .count();
-    let header_text = format!("THERMAL MONITOR  [{} active / {} total]", active, total);
+    let subagent_count = app.display_rows.iter().filter(|r| r.is_subagent).count();
+    let header_text = if subagent_count > 0 {
+        format!("THERMAL MONITOR  [{} active / {} sessions, {} subagents]", active, parent_count, subagent_count)
+    } else {
+        format!("THERMAL MONITOR  [{} active / {} sessions]", active, parent_count)
+    };
     let header = Paragraph::new(header_text)
         .alignment(Alignment::Center)
         .style(Style::default().fg(TEXT_BRIGHT).bg(BG_SURFACE).add_modifier(Modifier::BOLD))
@@ -350,7 +448,8 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         });
     let header_row = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = app.sessions.iter().map(|s| {
+    let rows: Vec<Row> = app.display_rows.iter().map(|row| {
+        let s = &row.session;
         let color = status_color(&s.status);
         let label = status_label(&s.status);
 
@@ -375,21 +474,39 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .map(|ts| relative_time(ts))
             .unwrap_or_else(|| "-".into());
 
-        // Short session ID
-        let short_id = if s.session_id.len() > 12 {
-            &s.session_id[..12]
-        } else {
-            &s.session_id
-        };
+        if row.is_subagent {
+            // Subagent: tree indicator + short agent_id, dimmer styling
+            let tree = if row.is_last_child { "\u{2514}\u{2500}" } else { "\u{251C}\u{2500}" };
+            let agent_label = s.agent_id.as_deref()
+                .map(|id| if id.len() > 8 { &id[..8] } else { id })
+                .unwrap_or("agent");
+            let id_str = format!("{} {}", tree, agent_label);
 
-        Row::new(vec![
-            Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
-            Cell::from(label).style(Style::default().fg(color)),
-            Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
-            Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
-            Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
-            Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
-        ])
+            Row::new(vec![
+                Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
+                Cell::from(label).style(Style::default().fg(color)),
+                Cell::from(activity).style(Style::default().fg(TEXT)),
+                Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
+                Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+            ])
+        } else {
+            // Parent session
+            let short_id = if s.session_id.len() > 12 {
+                &s.session_id[..12]
+            } else {
+                &s.session_id
+            };
+
+            Row::new(vec![
+                Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
+                Cell::from(label).style(Style::default().fg(color)),
+                Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
+                Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
+                Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+            ])
+        }
     }).collect();
 
     let table = Table::new(

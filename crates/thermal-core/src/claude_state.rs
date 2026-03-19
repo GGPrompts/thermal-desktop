@@ -50,6 +50,9 @@ pub struct ToolDetails {
 #[serde(default)]
 pub struct ClaudeSessionState {
     pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_type: Option<String>,
     pub status: ClaudeStatus,
     pub current_tool: Option<String>,
     pub subagent_count: Option<u32>,
@@ -66,6 +69,9 @@ impl Default for ClaudeSessionState {
     fn default() -> Self {
         Self {
             session_id: String::new(),
+            parent_session_id: None,
+            agent_id: None,
+            agent_type: None,
             status: ClaudeStatus::Idle,
             current_tool: None,
             subagent_count: Some(0),

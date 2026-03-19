@@ -1,0 +1,49 @@
+# Trust tier configuration for thermal-dispatcher.
+#
+# Each tool is assigned a tier that controls execution policy:
+#   AUTO    — execute immediately, no user confirmation
+#   CONFIRM — show action plan on HUD, wait for user confirmation
+#   BLOCK   — reject outright, announce via thermal-audio
+#
+# Tools not listed here default to CONFIRM.
+
+[tiers]
+# Safe read-only / informational tools — execute automatically
+screenshot = "AUTO"
+list_windows = "AUTO"
+active_window = "AUTO"
+list_workspaces = "AUTO"
+claude_status = "AUTO"
+clipboard_get = "AUTO"
+
+# Desktop interaction — require confirmation
+click = "CONFIRM"
+type_text = "CONFIRM"
+key_combo = "CONFIRM"
+scroll = "CONFIRM"
+focus_window = "CONFIRM"
+move_window = "CONFIRM"
+open_app = "CONFIRM"
+open_browser = "CONFIRM"
+open_files = "CONFIRM"
+open_terminal = "CONFIRM"
+clipboard_set = "CONFIRM"
+notify = "CONFIRM"
+
+# Agent orchestration — require confirmation
+spawn_claude = "CONFIRM"
+
+# Destructive operations — blocked entirely
+kill_claude = "BLOCK"
+
+# Beads issue tracking — all AUTO (read/write to issue tracker is safe)
+"beads:list" = "AUTO"
+"beads:show" = "AUTO"
+"beads:stats" = "AUTO"
+"beads:create" = "AUTO"
+"beads:update" = "AUTO"
+"beads:close" = "AUTO"
+"beads:claim" = "AUTO"
+"beads:ready" = "AUTO"
+"beads:blocked" = "AUTO"
+"beads:reopen" = "AUTO"

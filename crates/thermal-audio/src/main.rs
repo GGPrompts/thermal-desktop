@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Instant;
@@ -8,7 +7,10 @@ use std::{fs, thread};
 use anyhow::{Context, Result};
 use clap::Parser;
 use md5::{Digest, Md5};
+use serde::{Deserialize, Serialize};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 use tracing::{info, warn};
 
 /// Thermal Audio — TTS voice announcements for Claude session state changes.
@@ -39,6 +41,9 @@ const VOICES: [&str; 12] = [
     "en-IE-ConnorNeural",
 ];
 
+/// Dedicated assistant voice for socket API requests (distinct from agent pool).
+const ASSISTANT_VOICE: &str = "en-US-JennyNeural";
+
 struct VoicePool {
     assignments: HashMap<String, usize>,
     next_index: usize,
@@ -66,16 +71,54 @@ impl VoicePool {
 }
 
 // ---------------------------------------------------------------------------
+// Socket API types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct TtsRequest {
+    text: String,
+    voice: Option<String>,
+    #[serde(default = "default_priority")]
+    priority: Priority,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum Priority {
+    Normal,
+    High,
+}
+
+fn default_priority() -> Priority {
+    Priority::Normal
+}
+
+#[derive(Serialize)]
+struct TtsResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Audio manager
 // ---------------------------------------------------------------------------
 
 /// Debounce window per session.
 const DEBOUNCE_MS: u128 = 500;
 
+use std::sync::{Arc, Mutex};
+
+/// Shared handle to the currently-playing mpv process.
+/// The main (tokio) thread can kill it for high-priority interrupts,
+/// while the audio player thread owns the actual playback loop.
+type CurrentChild = Arc<Mutex<Option<std::process::Child>>>;
+
 struct AudioManager {
     cache_dir: PathBuf,
     last_play: HashMap<String, Instant>,
     audio_tx: mpsc::Sender<PathBuf>,
+    current_child: CurrentChild,
     edge_tts_available: bool,
 }
 
@@ -97,12 +140,14 @@ impl AudioManager {
             warn!("edge-tts not found on PATH — TTS generation will be skipped");
         }
 
-        let audio_tx = spawn_audio_thread();
+        let current_child: CurrentChild = Arc::new(Mutex::new(None));
+        let audio_tx = spawn_audio_thread(Arc::clone(&current_child));
 
         Ok(Self {
             cache_dir,
             last_play: HashMap::new(),
             audio_tx,
+            current_child,
             edge_tts_available,
         })
     }
@@ -122,6 +167,33 @@ impl AudioManager {
             warn!("audio channel send failed: {e}");
         }
         Ok(())
+    }
+
+    /// Speak text via the socket API. Supports high-priority (interrupt).
+    fn speak(&mut self, voice: &str, text: &str, high_priority: bool) -> Result<()> {
+        let path = self.generate_tts(voice, text)?;
+
+        if high_priority {
+            // Kill current playback from this thread (not the audio thread).
+            self.interrupt_current();
+        }
+
+        if let Err(e) = self.audio_tx.send(path) {
+            warn!("audio channel send failed: {e}");
+        }
+        Ok(())
+    }
+
+    /// Kill the currently-playing mpv process (if any) to allow immediate playback.
+    fn interrupt_current(&self) {
+        if let Ok(mut guard) = self.current_child.lock() {
+            if let Some(ref mut child) = *guard {
+                info!("interrupting current playback (pid {})", child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            *guard = None;
+        }
     }
 
     fn generate_tts(&self, voice: &str, text: &str) -> Result<PathBuf> {
@@ -165,15 +237,16 @@ impl AudioManager {
 }
 
 /// Spawn a dedicated audio thread that plays files via mpv.
-/// Returns a sender to push file paths for playback.
-fn spawn_audio_thread() -> mpsc::Sender<PathBuf> {
+/// The thread registers each spawned mpv process in `current_child` so that
+/// external callers (e.g. high-priority interrupt) can kill it.
+fn spawn_audio_thread(current_child: CurrentChild) -> mpsc::Sender<PathBuf> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
 
     thread::Builder::new()
         .name("thermal-audio-player".into())
         .spawn(move || {
             for path in rx {
-                if let Err(e) = play_file(&path) {
+                if let Err(e) = play_file(&path, &current_child) {
                     warn!("audio play error: {e}");
                 }
             }
@@ -183,19 +256,62 @@ fn spawn_audio_thread() -> mpsc::Sender<PathBuf> {
     tx
 }
 
-fn play_file(path: &Path) -> Result<()> {
-    let status = std::process::Command::new("mpv")
+/// Play an audio file via mpv, registering the child process in the shared
+/// mutex so it can be killed externally for interrupt support.
+fn play_file(path: &Path, current_child: &CurrentChild) -> Result<()> {
+    let child = std::process::Command::new("mpv")
         .arg("--no-video")
         .arg("--really-quiet")
         .arg(path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .context("failed to run mpv")?;
-    if !status.success() {
-        anyhow::bail!("mpv exited with status {status}");
+        .spawn()
+        .context("failed to spawn mpv")?;
+
+    // Register child so it can be killed on interrupt.
+    {
+        let mut guard = current_child.lock().unwrap();
+        *guard = Some(child);
     }
-    Ok(())
+
+    // Poll for completion (non-blocking) so that an external kill is
+    // reflected promptly rather than blocking forever on wait().
+    loop {
+        // Take the child out briefly to check status.
+        let mut guard = current_child.lock().unwrap();
+        match guard.as_mut() {
+            Some(c) => {
+                match c.try_wait() {
+                    Ok(Some(status)) => {
+                        *guard = None;
+                        drop(guard);
+                        if !status.success() {
+                            // Exit code 4 = killed (expected on interrupt).
+                            if status.code() != Some(4) {
+                                warn!("mpv exited with status {status} for {}", path.display());
+                            }
+                        }
+                        return Ok(());
+                    }
+                    Ok(None) => {
+                        // Still running, keep polling.
+                        drop(guard);
+                        thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        *guard = None;
+                        drop(guard);
+                        anyhow::bail!("failed to wait on mpv: {e}");
+                    }
+                }
+            }
+            None => {
+                // Child was taken and killed by interrupt handler.
+                drop(guard);
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Returns `~/.cache` (or XDG_CACHE_HOME if set).
@@ -207,6 +323,18 @@ fn dirs_cache() -> PathBuf {
         return PathBuf::from(home).join(".cache");
     }
     PathBuf::from("/tmp")
+}
+
+// ---------------------------------------------------------------------------
+// Unix socket listener
+// ---------------------------------------------------------------------------
+
+/// Determine the socket path. Uses $XDG_RUNTIME_DIR/thermal/audio.sock,
+/// falling back to /run/user/1000/thermal/audio.sock.
+fn socket_path() -> PathBuf {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .unwrap_or_else(|_| "/run/user/1000".to_string());
+    PathBuf::from(runtime_dir).join("thermal").join("audio.sock")
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +445,8 @@ fn session_label(session: &ClaudeSessionState) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -340,7 +469,7 @@ fn main() -> Result<()> {
                     warn!("audio send failed: {e}");
                 }
                 // Wait for playback.
-                thread::sleep(std::time::Duration::from_secs(4));
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
             Err(e) => {
                 warn!("TTS generation failed: {e}");
@@ -352,17 +481,53 @@ fn main() -> Result<()> {
     // Daemon mode.
     info!("thermal-audio daemon starting");
 
+    // Set up the Unix socket listener.
+    let sock_path = socket_path();
+    if let Some(parent) = sock_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating socket dir {:?}", parent))?;
+    }
+    // Remove stale socket if it exists.
+    if sock_path.exists() {
+        fs::remove_file(&sock_path)
+            .with_context(|| format!("removing stale socket {:?}", sock_path))?;
+    }
+    let listener = UnixListener::bind(&sock_path)
+        .with_context(|| format!("binding socket {:?}", sock_path))?;
+    info!("socket API listening on {}", sock_path.display());
+
+    // Use a tokio mpsc channel to forward socket requests to the main loop,
+    // which owns the AudioManager (not Send-safe across tasks).
+    let (sock_tx, mut sock_rx) = tokio::sync::mpsc::unbounded_channel::<TtsRequest>();
+
+    // Spawn a task that accepts socket connections and parses requests.
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let tx = sock_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_socket_connection(stream, tx).await {
+                            warn!("socket connection error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("socket accept error: {e}");
+                }
+            }
+        }
+    });
+
+    // State poller (synchronous) — we run it on a timer.
     let mut poller = ClaudeStatePoller::new().context("creating state poller")?;
     let mut prev_states: HashMap<String, ClaudeStatus> = HashMap::new();
-    // Track which context % threshold was last announced per session
-    // 0 = none, 50 = warned at 50%, 75 = warned at 75%, 90 = warned at 90%
     let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
 
     // Seed initial states without announcing.
     for session in poller.poll() {
         if !session.session_id.is_empty() {
             prev_states.insert(session.session_id.clone(), session.status.clone());
-            // Seed context alerts so we don't fire on startup
             if let Some(pct) = session.context_percent {
                 let threshold = context_threshold(pct as u32);
                 prev_context_alert.insert(session.session_id.clone(), threshold);
@@ -370,63 +535,135 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+
     loop {
-        thread::sleep(std::time::Duration::from_millis(500));
+        tokio::select! {
+            _ = poll_interval.tick() => {
+                let sessions = poller.poll();
 
-        let sessions = poller.poll();
+                for session in &sessions {
+                    if session.session_id.is_empty() {
+                        continue;
+                    }
 
-        for session in &sessions {
-            if session.session_id.is_empty() {
-                continue;
-            }
+                    let label = session_label(session);
 
-            let label = session_label(session);
+                    // State transition announcements
+                    let prev = prev_states
+                        .get(&session.session_id)
+                        .cloned()
+                        .unwrap_or(ClaudeStatus::Idle);
 
-            // State transition announcements
-            let prev = prev_states
-                .get(&session.session_id)
-                .cloned()
-                .unwrap_or(ClaudeStatus::Idle);
+                    if prev != session.status {
+                        if let Some(text) = transition_text(&label, &prev, &session.status, session) {
+                            info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
+                            let voice = voices.assign(&session.session_id);
+                            if let Err(e) = audio.announce(&session.session_id, voice, &text) {
+                                warn!("announce failed: {e}");
+                            }
+                        }
+                        prev_states.insert(session.session_id.clone(), session.status.clone());
+                    }
 
-            if prev != session.status {
-                if let Some(text) = transition_text(&label, &prev, &session.status, session) {
-                    info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
-                    let voice = voices.assign(&session.session_id);
-                    if let Err(e) = audio.announce(&session.session_id, voice, &text) {
-                        warn!("announce failed: {e}");
+                    // Context % alerts at 50%, 75%, 90%
+                    if let Some(pct) = session.context_percent {
+                        let pct = pct as u32;
+                        let threshold = context_threshold(pct);
+                        let prev_threshold = prev_context_alert.get(&session.session_id).copied().unwrap_or(0);
+
+                        if threshold > prev_threshold {
+                            let urgency = if pct >= 90 { "Alert" } else { "Warning" };
+                            let text = format!("{urgency}, {label} at {pct}% context");
+                            info!("[{}] context alert: {text}", session.session_id);
+                            let voice = voices.assign(&session.session_id);
+                            if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
+                                warn!("context announce failed: {e}");
+                            }
+                            prev_context_alert.insert(session.session_id.clone(), threshold);
+                        }
                     }
                 }
-                prev_states.insert(session.session_id.clone(), session.status.clone());
+
+                // Clean up sessions that are no longer present.
+                let active_ids: Vec<String> = sessions
+                    .iter()
+                    .filter(|s| !s.session_id.is_empty())
+                    .map(|s| s.session_id.clone())
+                    .collect();
+                prev_states.retain(|id, _| active_ids.contains(id));
+                prev_context_alert.retain(|id, _| active_ids.contains(id));
             }
-
-            // Context % alerts at 50%, 75%, 90%
-            if let Some(pct) = session.context_percent {
-                let pct = pct as u32;
-                let threshold = context_threshold(pct);
-                let prev_threshold = prev_context_alert.get(&session.session_id).copied().unwrap_or(0);
-
-                if threshold > prev_threshold {
-                    let urgency = if pct >= 90 { "Alert" } else { "Warning" };
-                    let text = format!("{urgency}, {label} at {pct}% context");
-                    info!("[{}] context alert: {text}", session.session_id);
-                    let voice = voices.assign(&session.session_id);
-                    if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
-                        warn!("context announce failed: {e}");
-                    }
-                    prev_context_alert.insert(session.session_id.clone(), threshold);
+            Some(req) = sock_rx.recv() => {
+                let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
+                let high_priority = req.priority == Priority::High;
+                info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
+                if let Err(e) = audio.speak(voice, &req.text, high_priority) {
+                    warn!("socket TTS failed: {e}");
                 }
             }
         }
-
-        // Clean up sessions that are no longer present.
-        let active_ids: Vec<String> = sessions
-            .iter()
-            .filter(|s| !s.session_id.is_empty())
-            .map(|s| s.session_id.clone())
-            .collect();
-        prev_states.retain(|id, _| active_ids.contains(id));
-        prev_context_alert.retain(|id, _| active_ids.contains(id));
     }
+}
+
+/// Handle a single socket connection: read one JSON line, parse, forward, respond.
+async fn handle_socket_connection(
+    stream: tokio::net::UnixStream,
+    tx: tokio::sync::mpsc::UnboundedSender<TtsRequest>,
+) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut buf_reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    // Read one line (newline-delimited JSON).
+    buf_reader
+        .read_line(&mut line)
+        .await
+        .context("reading from socket")?;
+
+    let line = line.trim();
+    if line.is_empty() {
+        let resp = serde_json::to_string(&TtsResponse {
+            ok: false,
+            error: Some("empty request".to_string()),
+        })?;
+        writer.write_all(resp.as_bytes()).await?;
+        writer.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    match serde_json::from_str::<TtsRequest>(line) {
+        Ok(req) => {
+            if req.text.is_empty() {
+                let resp = serde_json::to_string(&TtsResponse {
+                    ok: false,
+                    error: Some("text field is empty".to_string()),
+                })?;
+                writer.write_all(resp.as_bytes()).await?;
+                writer.write_all(b"\n").await?;
+                return Ok(());
+            }
+
+            tx.send(req).context("forwarding TTS request to main loop")?;
+
+            let resp = serde_json::to_string(&TtsResponse {
+                ok: true,
+                error: None,
+            })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        Err(e) => {
+            let resp = serde_json::to_string(&TtsResponse {
+                ok: false,
+                error: Some(format!("invalid JSON: {e}")),
+            })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Map a context percentage to the highest alert threshold crossed.

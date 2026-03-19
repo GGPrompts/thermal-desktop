@@ -11,6 +11,7 @@ members = [
     "crates/thermal-core",
     "crates/thermal-commander",
     "crates/thermal-hud",
+    "crates/thermal-dispatcher",
 ]
 
 [workspace.package]

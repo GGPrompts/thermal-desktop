@@ -358,6 +358,14 @@ impl DaemonClient {
         }
     }
 
+    /// Clone the underlying request sender.
+    ///
+    /// Used by `window.rs` for fire-and-forget sends (input, resize) from
+    /// the synchronous event loop without needing `&mut self`.
+    pub fn request_tx_clone(&self) -> mpsc::Sender<Request> {
+        self.request_tx.clone()
+    }
+
     /// Send a ping and wait for pong.
     pub async fn ping(&mut self) -> Result<()> {
         let response = self.request(Request::Ping).await?;

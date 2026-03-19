@@ -197,31 +197,22 @@ pub fn run() -> anyhow::Result<()> {
     // ── Context heatmap pipeline ─────────────────────────────────────────────
     let context_heatmap = ContextHeatmapPipeline::new(&device, surface_format);
 
-    // ── Terminal + PTY ────────────────────────────────────────────────────────
+    // ── Terminal + session (daemon client or standalone PTY) ──────────────────
     // Calculate initial grid size from the renderer's cell metrics.
     let (init_cols, init_rows) = grid_renderer.grid_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
     let mut terminal = Terminal::with_size(init_cols, init_rows);
 
-    // Start a tokio runtime for the async PTY reader and byte processor.
+    // Start a tokio runtime for the async PTY reader / daemon client.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
         .build()
         .expect("Failed to create tokio runtime");
 
-    // Spawn the PTY inside the tokio runtime.
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut pty = tokio_rt
-        .block_on(async { PtySession::spawn(&shell) })
-        .expect("Failed to spawn PTY");
-
-    // Connect PTY output to the terminal byte processor.
-    let pty_output_rx = pty.take_output();
-    // Shared dirty flag: the byte processor sets this to true whenever new
-    // PTY output has been processed, so the render loop knows to re-render.
+    // Shared dirty flag: set to true whenever new terminal content is
+    // available (from either the PTY byte processor or daemon screen updates).
     let pty_dirty = Arc::new(AtomicBool::new(false));
-    // Wakeup pipe: the byte processor writes a byte here after processing
-    // PTY output so the poll() in the event loop wakes immediately.
+    // Wakeup pipe: written to after content updates so poll() wakes immediately.
     let (wakeup_read, wakeup_write) = nix::unistd::pipe().expect("Failed to create wakeup pipe");
     // Set read end to non-blocking so we can drain it without blocking.
     {
@@ -233,16 +224,138 @@ pub fn run() -> anyhow::Result<()> {
         );
     }
     let wakeup_read_fd = wakeup_read.as_raw_fd();
-    // The byte processor needs the tokio runtime to spawn its task.
+
+    // Enter the tokio runtime context for spawning async tasks.
     let _guard = tokio_rt.enter();
-    terminal.spawn_byte_processor(pty_output_rx, Arc::clone(&pty_dirty), wakeup_write);
 
-    // Take the terminal event receiver — we need to relay PtyWrite responses
-    // (DA1, DA2, mode queries, etc.) back to the PTY so TUI apps don't timeout.
-    let term_event_rx = terminal.take_event_rx().expect("event_rx already taken");
+    // Try to connect to the session daemon. If it is running, use client
+    // mode; otherwise fall back to standalone mode with a local PTY.
+    let (session_mode, term_event_rx, pty_child_pid) = tokio_rt.block_on(async {
+        match DaemonClient::connect().await {
+            Ok(Some(mut client)) => {
+                tracing::info!("Session daemon available — entering client mode");
 
-    // Resize PTY to match grid.
-    let _ = pty.resize(init_cols as u16, init_rows as u16);
+                // List existing sessions.
+                let sessions = match client.list_sessions().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("Failed to list sessions: {e} — falling back to standalone");
+                        return setup_standalone_session(
+                            &mut terminal,
+                            init_cols,
+                            init_rows,
+                            Arc::clone(&pty_dirty),
+                            wakeup_write,
+                        );
+                    }
+                };
+
+                // Pick an existing live session or spawn a new one.
+                let session_id = if let Some(session) = sessions.iter().find(|s| s.is_alive) {
+                    tracing::info!(id = %session.id, "Attaching to existing session");
+                    session.id.clone()
+                } else {
+                    let shell =
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                    match client.spawn_session(Some(shell), None).await {
+                        Ok(id) => {
+                            tracing::info!(id = %id, "Spawned new session on daemon");
+                            id
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to spawn session on daemon: {e} — falling back to standalone"
+                            );
+                            return setup_standalone_session(
+                                &mut terminal,
+                                init_cols,
+                                init_rows,
+                                Arc::clone(&pty_dirty),
+                                wakeup_write,
+                            );
+                        }
+                    }
+                };
+
+                // Attach to the session with our initial grid size.
+                let attach_response = match client
+                    .attach(&session_id, Some((init_cols as u16, init_rows as u16)))
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to attach to session: {e} — falling back to standalone"
+                        );
+                        return setup_standalone_session(
+                            &mut terminal,
+                            init_cols,
+                            init_rows,
+                            Arc::clone(&pty_dirty),
+                            wakeup_write,
+                        );
+                    }
+                };
+
+                // If the daemon sent initial session state, apply it to the
+                // local alacritty Term so the first frame renders correctly.
+                if let Response::SessionState {
+                    cols,
+                    rows,
+                    cells: ref _cells,
+                    ..
+                } = attach_response
+                {
+                    tracing::info!(
+                        cols,
+                        rows,
+                        "Received initial session state from daemon"
+                    );
+                    apply_session_state_to_term(&terminal, &attach_response);
+                }
+
+                // Take the terminal event receiver.
+                let term_event_rx =
+                    terminal.take_event_rx().expect("event_rx already taken");
+
+                // Spawn a background task that reads daemon responses and
+                // feeds screen updates into the local Term + dirty flag.
+                spawn_daemon_reader_task(
+                    &terminal,
+                    Arc::clone(&pty_dirty),
+                    wakeup_read_fd,
+                );
+
+                let mode = SessionMode::Client {
+                    client,
+                    session_id,
+                };
+
+                // No PTY child PID in client mode — the daemon owns it.
+                (mode, term_event_rx, 0i32)
+            }
+            Ok(None) => {
+                tracing::info!("No session daemon running — standalone mode");
+                setup_standalone_session(
+                    &mut terminal,
+                    init_cols,
+                    init_rows,
+                    Arc::clone(&pty_dirty),
+                    wakeup_write,
+                )
+            }
+            Err(e) => {
+                tracing::warn!("Daemon connection error: {e} — standalone mode");
+                setup_standalone_session(
+                    &mut terminal,
+                    init_cols,
+                    init_rows,
+                    Arc::clone(&pty_dirty),
+                    wakeup_write,
+                )
+            }
+        }
+    });
 
     tracing::info!(cols = init_cols, rows = init_rows, "Terminal initialized");
 
@@ -257,8 +370,6 @@ pub fn run() -> anyhow::Result<()> {
             None
         }
     };
-
-    let pty_child_pid = pty.child_pid().as_raw();
 
     // ── Build state ───────────────────────────────────────────────────────────
     let mut state = ConductorWindow {
@@ -275,7 +386,7 @@ pub fn run() -> anyhow::Result<()> {
         grid_renderer,
         context_heatmap,
         terminal,
-        pty,
+        session_mode,
         _tokio_rt: tokio_rt,
         configured: false,
         dirty: true,
@@ -366,9 +477,7 @@ pub fn run() -> anyhow::Result<()> {
             if std::time::Instant::now() >= next {
                 let key_clone = key.clone();
                 if let Some(bytes) = input::encode_key(&key_clone, &state.modifiers) {
-                    if let Err(e) = state.pty.write(&bytes) {
-                        tracing::warn!("Failed to write repeat key to PTY: {e}");
-                    }
+                    state.write_session(&bytes);
                 }
                 state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
                 // Don't set dirty — PTY echo will set pty_dirty.
@@ -382,9 +491,7 @@ pub fn run() -> anyhow::Result<()> {
         while let Ok(event) = state.term_event_rx.try_recv() {
             match event {
                 TermEvent::PtyWrite(text) => {
-                    if let Err(e) = state.pty.write(text.as_bytes()) {
-                        tracing::warn!("Failed to write terminal response to PTY: {e}");
-                    }
+                    state.write_session(text.as_bytes());
                 }
                 TermEvent::Title(title) => {
                     state.window.set_title(&title);
@@ -426,7 +533,7 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // Exit if the shell process died (e.g. user typed `exit`).
-        if state.pty.has_exited() {
+        if state.session_has_exited() {
             tracing::info!("Shell exited, closing window");
             break;
         }
@@ -438,6 +545,142 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ── Standalone session setup ──────────────────────────────────────────────────
+
+/// Set up a standalone PTY session (no daemon). This is the legacy code path.
+///
+/// Spawns a PTY, connects its output to the terminal byte processor, and
+/// returns the session mode, event receiver, and child PID.
+fn setup_standalone_session(
+    terminal: &mut Terminal,
+    init_cols: usize,
+    init_rows: usize,
+    pty_dirty: Arc<AtomicBool>,
+    wakeup_write: std::os::fd::OwnedFd,
+) -> (
+    SessionMode,
+    tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
+    i32,
+) {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    let mut pty = PtySession::spawn(&shell).expect("Failed to spawn PTY");
+
+    // Connect PTY output to the terminal byte processor.
+    let pty_output_rx = pty.take_output();
+    terminal.spawn_byte_processor(pty_output_rx, pty_dirty, wakeup_write);
+
+    // Take the terminal event receiver.
+    let term_event_rx = terminal.take_event_rx().expect("event_rx already taken");
+
+    // Resize PTY to match grid.
+    let _ = pty.resize(init_cols as u16, init_rows as u16);
+
+    let child_pid = pty.child_pid().as_raw();
+
+    let mode = SessionMode::Standalone { pty };
+    (mode, term_event_rx, child_pid)
+}
+
+// ── Daemon reader task ────────────────────────────────────────────────────────
+
+/// Spawn a tokio task that reads daemon responses and applies screen updates
+/// to the local terminal. Signals the wakeup pipe so the render loop wakes.
+///
+/// NOTE: In client mode the daemon streams `ScreenUpdate` and `SessionExited`
+/// messages. This task processes them in the background, writing dirty cells
+/// into the Term and setting the pty_dirty flag.
+fn spawn_daemon_reader_task(
+    _terminal: &Terminal,
+    _pty_dirty: Arc<AtomicBool>,
+    _wakeup_read_fd: i32,
+) {
+    // TODO: Wire up the daemon response channel once the daemon sends
+    // ScreenUpdate messages. For now, the attach response provides the
+    // initial state and we rely on the daemon for input forwarding.
+    //
+    // The full implementation will:
+    // 1. Clone the terminal's term_handle
+    // 2. In a loop, receive Response from the client
+    // 3. For ScreenUpdate: apply dirty cells to the term
+    // 4. Set pty_dirty and write to the wakeup pipe
+    // 5. For SessionExited: signal the main loop
+    tracing::debug!("Daemon reader task placeholder — screen updates not yet streamed");
+}
+
+// ── Apply daemon session state to local term ──────────────────────────────────
+
+/// Apply a `SessionState` response from the daemon to the local alacritty Term.
+///
+/// This paints the initial grid contents received on attach so the first
+/// frame renders the correct terminal state.
+fn apply_session_state_to_term(terminal: &Terminal, response: &Response) {
+    if let Response::SessionState {
+        cols,
+        rows,
+        cells,
+        cursor,
+        ..
+    } = response
+    {
+        let term_handle = terminal.term_handle();
+        let mut term = term_handle.lock();
+
+        // Resize the term to match the daemon's grid if needed.
+        let current_cols = term.columns();
+        let current_rows = term.screen_lines();
+        if current_cols != *cols as usize || current_rows != *rows as usize {
+            use crate::terminal::TerminalSize;
+            let size = TerminalSize::new(*cols as usize, *rows as usize);
+            term.resize(size);
+        }
+
+        // Apply cells to the grid.
+        for (i, cell_data) in cells.iter().enumerate() {
+            let row = i / (*cols as usize);
+            let col = i % (*cols as usize);
+            if row < *rows as usize {
+                let point = Point::new(
+                    alacritty_terminal::index::Line(row as i32),
+                    Column(col),
+                );
+                let grid_cell = &mut term.grid_mut()[point];
+                grid_cell.c = cell_data.ch;
+                grid_cell.flags = Flags::from_bits_truncate(cell_data.flags);
+                // Map protocol colors to alacritty Color.
+                grid_cell.fg = alacritty_terminal::vte::ansi::Color::Spec(
+                    alacritty_terminal::vte::ansi::Rgb {
+                        r: cell_data.fg.r,
+                        g: cell_data.fg.g,
+                        b: cell_data.fg.b,
+                    },
+                );
+                grid_cell.bg = alacritty_terminal::vte::ansi::Color::Spec(
+                    alacritty_terminal::vte::ansi::Rgb {
+                        r: cell_data.bg.r,
+                        g: cell_data.bg.g,
+                        b: cell_data.bg.b,
+                    },
+                );
+            }
+        }
+
+        // Position the cursor.
+        if cursor.visible {
+            term.grid_mut().cursor.point = Point::new(
+                alacritty_terminal::index::Line(cursor.row as i32),
+                Column(cursor.col as usize),
+            );
+        }
+
+        tracing::debug!(
+            cols,
+            rows,
+            cells = cells.len(),
+            "Applied daemon session state to local term"
+        );
+    }
 }
 
 // ── wgpu state ────────────────────────────────────────────────────────────────
@@ -462,13 +705,15 @@ struct ConductorWindow {
     /// Context heatmap vignette — subtle edge glow driven by context_percent.
     context_heatmap: ContextHeatmapPipeline,
     terminal: Terminal,
-    pty: PtySession,
+    /// Session mode: either daemon client or standalone PTY.
+    session_mode: SessionMode,
     _tokio_rt: tokio::runtime::Runtime,
     configured: bool,
     /// Whether the window needs to be redrawn this iteration.
     dirty: bool,
-    /// Set to `true` by the PTY byte processor when new terminal output has
-    /// been processed; cleared each time the render loop checks it.
+    /// Set to `true` by the PTY byte processor (or daemon reader) when new
+    /// terminal output has been processed; cleared each time the render loop
+    /// checks it.
     pty_dirty: Arc<AtomicBool>,
     width: u32,
     height: u32,
@@ -505,10 +750,77 @@ struct ConductorWindow {
     /// Cached matching Claude session for the HUD overlay.
     claude_session: Option<ClaudeSessionState>,
     /// PID of the PTY child process, used to read cwd via /proc/<pid>/cwd.
+    /// Zero in client mode (daemon owns the process).
     pty_child_pid: i32,
 }
 
 impl ConductorWindow {
+    // ── Session mode dispatch helpers ─────────────────────────────────────
+
+    /// Write bytes to the active session (PTY or daemon).
+    fn write_session(&self, bytes: &[u8]) {
+        match &self.session_mode {
+            SessionMode::Standalone { pty } => {
+                if let Err(e) = pty.write(bytes) {
+                    tracing::warn!("Failed to write to PTY: {e}");
+                }
+            }
+            SessionMode::Client {
+                client,
+                session_id,
+            } => {
+                let data = bytes.to_vec();
+                let id = session_id.clone();
+                // Fire-and-forget async send — input is latency-sensitive so
+                // we don't block the event loop waiting for a response.
+                let client_tx = client.request_tx_clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client_tx
+                        .send(crate::protocol::Request::SendInput { id, data })
+                        .await
+                    {
+                        tracing::warn!("Failed to send input to daemon: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    /// Resize the active session (PTY or daemon).
+    fn resize_session(&self, cols: u16, rows: u16) {
+        match &self.session_mode {
+            SessionMode::Standalone { pty } => {
+                let _ = pty.resize(cols, rows);
+            }
+            SessionMode::Client {
+                client,
+                session_id,
+            } => {
+                let id = session_id.clone();
+                let client_tx = client.request_tx_clone();
+                tokio::spawn(async move {
+                    if let Err(e) = client_tx
+                        .send(crate::protocol::Request::Resize { id, cols, rows })
+                        .await
+                    {
+                        tracing::warn!("Failed to send resize to daemon: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    /// Check whether the session has exited.
+    fn session_has_exited(&self) -> bool {
+        match &self.session_mode {
+            SessionMode::Standalone { pty } => pty.has_exited(),
+            // In client mode, the daemon sends SessionExited which will be
+            // handled by the daemon reader task (setting `self.exit`).
+            // For now, we never report exited from here.
+            SessionMode::Client { .. } => false,
+        }
+    }
+
     /// Render a frame: clear to BG, then render the terminal grid.
     fn render_frame(&mut self) {
         let output = match self.wgpu.surface.get_current_texture() {
@@ -909,7 +1221,7 @@ impl ConductorWindow {
         term.selection = None;
     }
 
-    /// Paste from the primary selection (middle-click) into the PTY.
+    /// Paste from the primary selection (middle-click) into the session.
     fn primary_paste(&self) {
         let output = match std::process::Command::new("wl-paste")
             .arg("--primary")
@@ -950,21 +1262,19 @@ impl ConductorWindow {
             payload.extend_from_slice(b"\x1b[200~");
             payload.extend_from_slice(text);
             payload.extend_from_slice(b"\x1b[201~");
-            if let Err(e) = self.pty.write(&payload) {
-                tracing::warn!("Failed to write bracketed primary paste to PTY: {}", e);
-            }
-        } else if let Err(e) = self.pty.write(text) {
-            tracing::warn!("Failed to write primary paste to PTY: {}", e);
+            self.write_session(&payload);
+        } else {
+            self.write_session(text);
         }
 
         tracing::debug!(
             len = text.len(),
             bracketed,
-            "Primary paste: sent to PTY"
+            "Primary paste: sent to session"
         );
     }
 
-    /// Paste from the Wayland clipboard into the PTY, with bracketed paste
+    /// Paste from the Wayland clipboard into the session, with bracketed paste
     /// support when the terminal has DECSET 2004 enabled.
     fn clipboard_paste(&self) {
         // Read clipboard contents via wl-paste.
@@ -1003,19 +1313,15 @@ impl ConductorWindow {
             payload.extend_from_slice(b"\x1b[200~");
             payload.extend_from_slice(text);
             payload.extend_from_slice(b"\x1b[201~");
-            if let Err(e) = self.pty.write(&payload) {
-                tracing::warn!("Failed to write bracketed paste to PTY: {}", e);
-            }
+            self.write_session(&payload);
         } else {
-            if let Err(e) = self.pty.write(text) {
-                tracing::warn!("Failed to write paste to PTY: {}", e);
-            }
+            self.write_session(text);
         }
 
         tracing::debug!(
             len = text.len(),
             bracketed,
-            "Clipboard paste: sent to PTY"
+            "Clipboard paste: sent to session"
         );
     }
 }
@@ -1194,7 +1500,7 @@ impl WindowHandler for ConductorWindow {
                 self.grid_renderer.cell_width as u16,
                 self.grid_renderer.cell_height as u16,
             );
-            let _ = self.pty.resize(cols as u16, rows as u16);
+            self.resize_session(cols as u16, rows as u16);
 
             tracing::debug!("Window configured: {}x{} (grid: {}x{})", w, h, cols, rows);
         }
@@ -1354,11 +1660,9 @@ impl KeyboardHandler for ConductorWindow {
             }
         }
 
-        // Encode the key press into PTY bytes and send to the shell.
+        // Encode the key press into bytes and send to the session.
         if let Some(bytes) = input::encode_key(&event, &self.modifiers) {
-            if let Err(e) = self.pty.write(&bytes) {
-                tracing::warn!("Failed to write to PTY: {}", e);
-            }
+            self.write_session(&bytes);
         }
 
         // Start key repeat for this key. Modifier-only keys don't repeat.
@@ -1427,7 +1731,7 @@ impl PointerHandler for ConductorWindow {
             let cy = line.0 + 1;
 
             if mouse_mode {
-                // Forward mouse events to PTY as SGR escape sequences.
+                // Forward mouse events to session as SGR escape sequences.
                 // Format: \x1b[<btn;col;row M (press) or m (release)
                 let sgr = match event.kind {
                     PointerEventKind::Press { button, .. } => {
@@ -1479,9 +1783,7 @@ impl PointerHandler for ConductorWindow {
                 };
 
                 if let Some(seq) = sgr {
-                    if let Err(e) = self.pty.write(seq.as_bytes()) {
-                        tracing::warn!("Failed to write mouse event to PTY: {e}");
-                    }
+                    self.write_session(seq.as_bytes());
                     self.dirty = true;
                 }
 

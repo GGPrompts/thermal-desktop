@@ -27,3 +27,4 @@ alacritty_terminal = { workspace = true }
 glyphon = { workspace = true }
 bytemuck = { workspace = true }
 parking_lot = "0.12"
+rmp-serde = { workspace = true }

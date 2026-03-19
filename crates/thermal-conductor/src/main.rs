@@ -3,10 +3,13 @@
 //! Spawns, tracks, polls, and sends to kitty windows running Claude sessions.
 //! Hyprland auto-tiles the spawned OS windows.
 
+mod client;
+mod daemon;
 mod grid_renderer;
 mod input;
 mod kitty;
 mod osc633;
+mod protocol;
 mod pty;
 mod terminal;
 mod window;
@@ -75,6 +78,9 @@ enum Commands {
 
     /// Launch the GPU-rendered terminal window
     Window,
+
+    /// Start the session daemon (PTY ownership, Unix socket server)
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -108,6 +114,14 @@ fn main() -> Result<()> {
         return window::run();
     }
 
+    // Daemon subcommand runs a long-lived async event loop.
+    if matches!(cli.command, Commands::Daemon) {
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(daemon::run_daemon());
+    }
+
     // All other subcommands use async kitty/process commands.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -125,6 +139,7 @@ fn main() -> Result<()> {
                 Commands::Kill { window_id } => cmd_kill(window_id).await,
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Window => unreachable!(),
+                Commands::Daemon => unreachable!(),
             }
         })
 }

@@ -1,7 +1,7 @@
-//! Thermal Conductor — kitty remote control CLI for orchestrating Claude agent therminals.
+//! Thermal Conductor — CLI for orchestrating Claude agent therminals via the session daemon.
 //!
-//! Spawns, tracks, polls, and sends to kitty windows running Claude sessions.
-//! Hyprland auto-tiles the spawned OS windows.
+//! CLI commands communicate with the session daemon over a Unix socket.
+//! The daemon owns PTY sessions; clients spawn, list, send input, and kill sessions.
 
 mod client;
 mod daemon;
@@ -18,9 +18,9 @@ use anyhow::{Result, Context, bail};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
-use kitty::KittyController;
+use client::DaemonClient;
 
-/// Thermal Conductor — orchestrate Claude agent therminals via kitty remote control.
+/// Thermal Conductor — orchestrate Claude agent therminals via the session daemon.
 #[derive(Parser)]
 #[command(name = "thermal-conductor", version, about)]
 struct Cli {
@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Spawn new kitty therminals running Claude
+    /// Spawn new therminal sessions on the daemon
     Spawn {
         /// Number of therminals to spawn
         #[arg(short = 'n', long, default_value_t = 1)]
@@ -40,34 +40,34 @@ enum Commands {
         #[arg(short, long)]
         project: Option<String>,
 
-        /// Title prefix for spawned windows
-        #[arg(short, long, default_value = "Therminal")]
-        title: String,
+        /// Shell to use (defaults to $SHELL)
+        #[arg(short, long)]
+        shell: Option<String>,
     },
 
     /// Show status of all tracked therminals with Claude state
     Status,
 
-    /// Send text to a therminal
+    /// Send text to a therminal session
     Send {
-        /// Kitty window id to send to
-        window_id: u64,
+        /// Session id to send to
+        session_id: String,
 
         /// Text/prompt to send
         prompt: String,
     },
 
-    /// List all kitty windows
+    /// List all daemon sessions
     List {
         /// Output raw JSON instead of table
         #[arg(long)]
         json: bool,
     },
 
-    /// Kill (close) a therminal
+    /// Kill (close) a therminal session
     Kill {
-        /// Kitty window id to close
-        window_id: u64,
+        /// Session id to close
+        session_id: String,
     },
 
     /// Toggle TTS audio announcements on/off
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
             .block_on(daemon::run_daemon());
     }
 
-    // All other subcommands use async kitty/process commands.
+    // All other subcommands talk to the session daemon via DaemonClient.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -131,12 +131,12 @@ fn main() -> Result<()> {
                 Commands::Spawn {
                     count,
                     project,
-                    title,
-                } => cmd_spawn(count, project, title).await,
+                    shell,
+                } => cmd_spawn(count, project, shell).await,
                 Commands::Status => cmd_status().await,
-                Commands::Send { window_id, prompt } => cmd_send(window_id, prompt).await,
+                Commands::Send { session_id, prompt } => cmd_send(session_id, prompt).await,
                 Commands::List { json } => cmd_list(json).await,
-                Commands::Kill { window_id } => cmd_kill(window_id).await,
+                Commands::Kill { session_id } => cmd_kill(session_id).await,
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
@@ -144,35 +144,37 @@ fn main() -> Result<()> {
         })
 }
 
-/// Spawn N therminals running Claude.
-async fn cmd_spawn(count: u32, project: Option<String>, title: String) -> Result<()> {
-    let kitty = KittyController::new()?;
+/// Connect to the session daemon, or print an error and exit if it's not running.
+async fn connect_daemon() -> Result<DaemonClient> {
+    match DaemonClient::connect().await? {
+        Some(client) => Ok(client),
+        None => {
+            eprintln!("Session daemon not running. Start with: thc daemon");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Spawn N therminal sessions on the daemon.
+async fn cmd_spawn(count: u32, project: Option<String>, shell: Option<String>) -> Result<()> {
+    let mut client = connect_daemon().await?;
 
     println!("Spawning {count} therminal{}...", if count == 1 { "" } else { "s" });
 
-    for i in 0..count {
-        let window_title = if count == 1 {
-            title.clone()
-        } else {
-            format!("{title} {}", i + 1)
-        };
-
-        let command_args: Vec<&str> = vec!["claude"];
-        let cwd = project.as_deref();
-
-        let window_id = kitty.spawn(&window_title, &command_args, cwd).await?;
-        println!("  Therminal \"{}\" spawned (window id: {})", window_title, window_id);
+    for _i in 0..count {
+        let id = client.spawn_session(shell.clone(), project.clone()).await?;
+        println!("  Therminal spawned (session: {id})");
     }
 
     println!(
-        "{count} therminal{} active.",
+        "{count} therminal{} spawned.",
         if count == 1 { "" } else { "s" }
     );
     Ok(())
 }
 
 /// Show status of all Claude sessions from state files.
-/// This reads directly from /tmp/claude-code-state/ — no kitty dependency needed.
+/// This reads directly from /tmp/claude-code-state/ — no daemon dependency needed.
 async fn cmd_status() -> Result<()> {
     let sessions: Vec<ClaudeSessionState> = match ClaudeStatePoller::new() {
         Ok(poller) => poller.get_all(),
@@ -211,59 +213,69 @@ async fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-/// Send text/prompt to a specific therminal.
-async fn cmd_send(window_id: u64, prompt: String) -> Result<()> {
-    let kitty = KittyController::new()?;
-    let match_arg = format!("id:{window_id}");
+/// Send text/prompt to a specific therminal session.
+async fn cmd_send(session_id: String, prompt: String) -> Result<()> {
+    let mut client = connect_daemon().await?;
 
-    kitty.send_text(&match_arg, &prompt).await?;
-    println!("Sent to therminal {window_id}.");
+    // Send the text as bytes, appending a newline to simulate pressing Enter.
+    let mut data = prompt.into_bytes();
+    data.push(b'\n');
+
+    client.send_input(&session_id, data).await?;
+    println!("Sent to session {session_id}.");
     Ok(())
 }
 
-/// List all kitty windows.
+/// List all sessions from the daemon.
 async fn cmd_list(json: bool) -> Result<()> {
-    let kitty = KittyController::new()?;
-    let windows_json = kitty.list_windows().await?;
+    let mut client = connect_daemon().await?;
+    let sessions = client.list_sessions().await?;
 
     if json {
-        let pretty = serde_json::to_string_pretty(&windows_json)?;
+        let pretty = serde_json::to_string_pretty(&sessions)?;
         println!("{pretty}");
         return Ok(());
     }
 
-    // Compact table output
-    let mut count = 0u32;
-    if let Some(os_windows) = windows_json.as_array() {
-        for os_window in os_windows {
-            if let Some(tabs) = os_window.get("tabs").and_then(|t| t.as_array()) {
-                for tab in tabs {
-                    if let Some(windows) = tab.get("windows").and_then(|w| w.as_array()) {
-                        for window in windows {
-                            let id = window.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let title = window.get("title").and_then(|v| v.as_str()).unwrap_or("untitled");
-                            let pid = window.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let is_focused = window.get("is_focused").and_then(|v| v.as_bool()).unwrap_or(false);
-                            let focus = if is_focused { " *" } else { "" };
-                            println!("  [{id}] {title}{focus}  (pid: {pid})");
-                            count += 1;
-                        }
-                    }
-                }
-            }
-        }
+    if sessions.is_empty() {
+        println!("No active sessions.");
+        return Ok(());
     }
-    println!("\n{count} window{}.", if count == 1 { "" } else { "s" });
+
+    // Compact table output
+    for session in &sessions {
+        let alive = if session.is_alive { "" } else { " (exited)" };
+        let clients = if session.connected_client_count > 0 {
+            format!("  clients: {}", session.connected_client_count)
+        } else {
+            String::new()
+        };
+        println!(
+            "  [{}] {}  ({}x{})  pid: {}  cwd: {}{}{}",
+            session.id,
+            session.title,
+            session.cols,
+            session.rows,
+            session.shell_pid,
+            session.cwd,
+            alive,
+            clients,
+        );
+    }
+    println!(
+        "\n{} session{}.",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
     Ok(())
 }
 
-/// Kill (close) a therminal.
-async fn cmd_kill(window_id: u64) -> Result<()> {
-    let kitty = KittyController::new()?;
-    let match_arg = format!("id:{window_id}");
+/// Kill (close) a therminal session.
+async fn cmd_kill(session_id: String) -> Result<()> {
+    let mut client = connect_daemon().await?;
 
-    kitty.close_window(&match_arg).await?;
-    println!("Therminal {window_id} closed.");
+    client.kill_session(&session_id).await?;
+    println!("Session {session_id} killed.");
     Ok(())
 }
 

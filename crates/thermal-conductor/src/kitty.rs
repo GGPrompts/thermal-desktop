@@ -2,6 +2,10 @@
 //!
 //! All communication goes through `kitty @` CLI commands over unix sockets.
 //! Supports multiple kitty instances by scanning all `/tmp/kitty-*` sockets.
+//!
+//! DEPRECATED: This module is no longer used by the CLI commands.
+//! CLI subcommands now talk to the session daemon via `DaemonClient` (client.rs).
+//! This module is kept for reference and will be removed in a future cleanup.
 
 use anyhow::{Context, Result, bail};
 use tokio::process::Command;

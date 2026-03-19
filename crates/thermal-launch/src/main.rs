@@ -7,13 +7,14 @@ use raw_window_handle::{
 };
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
-    delegate_seat,
+    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
+    delegate_registry, delegate_seat,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
     shell::{
@@ -26,7 +27,7 @@ use smithay_client_toolkit::{
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_seat, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, Proxy, QueueHandle,
 };
 
@@ -39,7 +40,10 @@ pub mod desktop;
 use desktop::{DesktopEntry, fuzzy_filter};
 
 const WIDTH: u32 = 700;
-const HEIGHT: u32 = 500;
+const HEIGHT: u32 = 600;
+const ENTRY_START_Y: f32 = 76.0;
+const ROW_HEIGHT: f32 = 36.0;
+const MAX_VISIBLE: usize = ((HEIGHT as f32 - ENTRY_START_Y) / ROW_HEIGHT) as usize; // ~14
 
 /// Thermal-launch — fuzzy app launcher with targeting reticle UI.
 #[derive(Parser, Debug)]
@@ -188,6 +192,7 @@ fn main() {
         exit: false,
         dismiss_mode: DismissMode::Escape,
         keyboard: None,
+        pointer: None,
         state: launcher_state,
         wgpu: WgpuState {
             device,
@@ -203,6 +208,7 @@ fn main() {
         cached_entry_bufs: Vec::new(),
         cached_results: Vec::new(),
         cached_selected: 0,
+        cached_scroll_offset: 0,
     };
 
     // Event loop
@@ -330,10 +336,10 @@ impl ReticlePipeline {
             cache: None,
         });
 
-        // Pre-allocate buffer for UI quads: 11 quads × 6 vertices = 66 vertices max
+        // Pre-allocate buffer for UI quads: 12 quads × 6 vertices = 72 vertices max
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reticle verts"),
-            size: (72 * std::mem::size_of::<ReticleVertex>()) as wgpu::BufferAddress,
+            size: (78 * std::mem::size_of::<ReticleVertex>()) as wgpu::BufferAddress,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -440,17 +446,18 @@ struct LauncherState {
     query: String,
     results: Vec<usize>,
     selected: usize,
+    scroll_offset: usize,
 }
 
 impl LauncherState {
     fn new(all_entries: Vec<DesktopEntry>) -> Self {
-        let initial_results: Vec<usize> =
-            all_entries.iter().take(8).enumerate().map(|(i, _)| i).collect();
+        let initial_results: Vec<usize> = (0..all_entries.len()).collect();
         Self {
             all_entries,
             query: String::new(),
             results: initial_results,
             selected: 0,
+            scroll_offset: 0,
         }
     }
 
@@ -465,7 +472,18 @@ impl LauncherState {
         if self.selected >= self.results.len() {
             self.selected = self.results.len().saturating_sub(1);
         }
+        self.scroll_offset = 0;
     }
+
+    /// Ensure the selected item is visible in the scroll window.
+    fn ensure_visible(&mut self) {
+        if self.selected < self.scroll_offset {
+            self.scroll_offset = self.selected;
+        } else if self.selected >= self.scroll_offset + MAX_VISIBLE {
+            self.scroll_offset = self.selected + 1 - MAX_VISIBLE;
+        }
+    }
+
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -485,6 +503,7 @@ struct LauncherSurface {
     exit: bool,
     dismiss_mode: DismissMode,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    pointer: Option<wl_pointer::WlPointer>,
     state: LauncherState,
     wgpu: WgpuState,
     text: TextState,
@@ -502,6 +521,8 @@ struct LauncherSurface {
     cached_results: Vec<usize>,
     /// Last selected index used to build cached_entry_bufs (selection changes color).
     cached_selected: usize,
+    /// Last scroll offset used to build cached_entry_bufs.
+    cached_scroll_offset: usize,
 }
 
 impl LauncherSurface {
@@ -527,8 +548,6 @@ impl LauncherSurface {
         const QUERY_BAR_TOP: f32 = 12.0;
         const QUERY_BAR_HEIGHT: f32 = 44.0;
         const SEPARATOR_Y: f32 = 62.0;
-        const ENTRY_START_Y: f32 = 76.0;
-        const ROW_HEIGHT: f32 = 36.0;
         const FONT_SIZE: f32 = 16.0;
         const LINE_HEIGHT: f32 = 20.0;
 
@@ -538,7 +557,7 @@ impl LauncherSurface {
         // At ~60fps this eliminates ~540 glyphon allocations/sec.
 
         let query_color_arr = if self.state.query.is_empty() {
-            ThermalPalette::TEXT_MUTED
+            ThermalPalette::MILD
         } else {
             ThermalPalette::HOT
         };
@@ -578,19 +597,26 @@ impl LauncherSurface {
             self.cached_query = self.state.query.clone();
         }
 
-        // Rebuild entry buffers when results list or selection changes.
-        let entries_dirty = self.cached_results != self.state.results
-            || self.cached_selected != self.state.selected;
+        // Visible window of results
+        let visible_start = self.state.scroll_offset;
+        let visible_end = (visible_start + MAX_VISIBLE).min(self.state.results.len());
+        let visible_results: Vec<usize> = self.state.results[visible_start..visible_end].to_vec();
+
+        // Rebuild entry buffers when visible results, selection, or scroll changes.
+        let entries_dirty = self.cached_results != visible_results
+            || self.cached_selected != self.state.selected
+            || self.cached_scroll_offset != self.state.scroll_offset;
         if entries_dirty {
             self.cached_entry_bufs.clear();
-            for (i, &entry_idx) in self.state.results.iter().enumerate() {
+            for (vi, &entry_idx) in visible_results.iter().enumerate() {
                 let entry = &self.state.all_entries[entry_idx];
-                let is_selected = i == self.state.selected;
+                let abs_index = visible_start + vi;
+                let is_selected = abs_index == self.state.selected;
 
                 let color_arr = if is_selected {
                     ThermalPalette::WHITE_HOT
                 } else {
-                    ThermalPalette::TEXT
+                    ThermalPalette::TEXT_BRIGHT
                 };
                 let color = GlyphonColor::rgba(
                     (color_arr[0] * 255.0) as u8,
@@ -617,8 +643,9 @@ impl LauncherSurface {
                 buf.shape_until_scroll(&mut self.text.font_system, false);
                 self.cached_entry_bufs.push(buf);
             }
-            self.cached_results = self.state.results.clone();
+            self.cached_results = visible_results.clone();
             self.cached_selected = self.state.selected;
+            self.cached_scroll_offset = self.state.scroll_offset;
         }
 
         // Build text areas referencing the cached buffers (which live in self).
@@ -643,12 +670,13 @@ impl LauncherSurface {
             });
         }
 
-        for (i, buf) in self.cached_entry_bufs.iter().enumerate() {
-            let row_y = ENTRY_START_Y + i as f32 * ROW_HEIGHT;
-            let color_arr = if i == self.cached_selected {
+        for (vi, buf) in self.cached_entry_bufs.iter().enumerate() {
+            let row_y = ENTRY_START_Y + vi as f32 * ROW_HEIGHT;
+            let abs_index = self.state.scroll_offset + vi;
+            let color_arr = if abs_index == self.state.selected {
                 ThermalPalette::WHITE_HOT
             } else {
-                ThermalPalette::TEXT
+                ThermalPalette::TEXT_BRIGHT
             };
             let color = GlyphonColor::rgba(
                 (color_arr[0] * 255.0) as u8,
@@ -691,10 +719,11 @@ impl LauncherSurface {
 
         // ── Build reticle verts for selected row ──────────────────────────────
 
-        // Reticle tightly wraps the text, not the full row
-        let selected_row_y = ENTRY_START_Y + self.state.selected as f32 * ROW_HEIGHT;
+        // Selected row position relative to the visible window
+        let selected_visible = self.state.selected.saturating_sub(self.state.scroll_offset);
+        let selected_row_y = ENTRY_START_Y + selected_visible as f32 * ROW_HEIGHT;
         let text_center_y = selected_row_y + LINE_HEIGHT * 0.5;
-        let reticle_half = LINE_HEIGHT * 0.5 + 6.0; // tight around text + small margin
+        let reticle_half = LINE_HEIGHT * 0.5 + 6.0;
         let rx0 = PADDING_X - 10.0;
         let ry0 = text_center_y - reticle_half;
         let rx1 = WIDTH as f32 - PADDING_X + 10.0;
@@ -711,16 +740,38 @@ impl LauncherSurface {
             WIDTH as f32, HEIGHT as f32, bar_color,
         ));
 
-        // ── Separator line ───────────────────────────────────────────────
-        let sep_color = ThermalPalette::COLD;
+        // ── Separator line (teal instead of purple) ──────────────────────
+        let sep_color = ThermalPalette::MILD;
         verts.extend_from_slice(&quad_verts(
             PADDING_X - 12.0, SEPARATOR_Y,
             WIDTH as f32 - PADDING_X + 12.0, SEPARATOR_Y + 1.0,
             WIDTH as f32, HEIGHT as f32, sep_color,
         ));
 
+        // ── Scroll indicator ─────────────────────────────────────────────
+        if self.state.results.len() > MAX_VISIBLE {
+            let track_top = ENTRY_START_Y;
+            let track_height = MAX_VISIBLE as f32 * ROW_HEIGHT;
+            let total = self.state.results.len() as f32;
+            let thumb_height = (MAX_VISIBLE as f32 / total * track_height).max(12.0);
+            let max_offset = self.state.results.len().saturating_sub(MAX_VISIBLE) as f32;
+            let thumb_y = if max_offset > 0.0 {
+                track_top + (self.state.scroll_offset as f32 / max_offset) * (track_height - thumb_height)
+            } else {
+                track_top
+            };
+            let scrollbar_color = [ThermalPalette::MILD[0], ThermalPalette::MILD[1], ThermalPalette::MILD[2], 0.4];
+            verts.extend_from_slice(&quad_verts(
+                WIDTH as f32 - PADDING_X + 14.0, thumb_y,
+                WIDTH as f32 - PADDING_X + 18.0, thumb_y + thumb_height,
+                WIDTH as f32, HEIGHT as f32, scrollbar_color,
+            ));
+        }
+
         // ── Selected row highlight ───────────────────────────────────────
-        if !self.state.results.is_empty() {
+        let selected_in_view = self.state.selected >= self.state.scroll_offset
+            && self.state.selected < self.state.scroll_offset + MAX_VISIBLE;
+        if !self.state.results.is_empty() && selected_in_view {
             let highlight_color = [ThermalPalette::BG_SURFACE[0], ThermalPalette::BG_SURFACE[1], ThermalPalette::BG_SURFACE[2], 0.6];
             verts.extend_from_slice(&quad_verts(
                 PADDING_X - 12.0, selected_row_y - 2.0,
@@ -730,7 +781,7 @@ impl LauncherSurface {
         }
 
         // ── Reticle brackets ─────────────────────────────────────────────
-        if !self.state.results.is_empty() {
+        if !self.state.results.is_empty() && selected_in_view {
             verts.extend(ReticlePipeline::build_reticle_verts(
                 rx0, ry0, rx1, ry1,
                 WIDTH as f32, HEIGHT as f32,
@@ -926,6 +977,13 @@ impl SeatHandler for LauncherSurface {
                 .expect("Failed to create keyboard");
             self.keyboard = Some(keyboard);
         }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            let pointer = self
+                .seat_state
+                .get_pointer(qh, &seat)
+                .expect("Failed to create pointer");
+            self.pointer = Some(pointer);
+        }
     }
 
     fn remove_capability(
@@ -938,6 +996,11 @@ impl SeatHandler for LauncherSurface {
         if capability == Capability::Keyboard {
             if let Some(kb) = self.keyboard.take() {
                 kb.release();
+            }
+        }
+        if capability == Capability::Pointer {
+            if let Some(ptr) = self.pointer.take() {
+                ptr.release();
             }
         }
     }
@@ -1008,6 +1071,7 @@ impl KeyboardHandler for LauncherSurface {
         if raw == 103 || event.keysym == Keysym::Up {
             if self.state.selected > 0 {
                 self.state.selected -= 1;
+                self.state.ensure_visible();
             }
             return;
         }
@@ -1016,6 +1080,7 @@ impl KeyboardHandler for LauncherSurface {
             let max = self.state.results.len().saturating_sub(1);
             if self.state.selected < max {
                 self.state.selected += 1;
+                self.state.ensure_visible();
             }
             return;
         }
@@ -1076,12 +1141,50 @@ fn keysym_to_char(keysym: Keysym) -> Option<char> {
     if (0x0020..=0x007e).contains(&raw) { char::from_u32(raw) } else { None }
 }
 
+// ── Pointer handler ───────────────────────────────────────────────────────────
+
+impl PointerHandler for LauncherSurface {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            if let PointerEventKind::Axis {
+                vertical, ..
+            } = event.kind
+            {
+                let delta = if vertical.discrete != 0 {
+                    vertical.discrete as isize
+                } else if vertical.absolute != 0.0 {
+                    let lines = (vertical.absolute / 30.0) as isize;
+                    if lines != 0 { lines } else { 0 }
+                } else {
+                    0
+                };
+                if delta != 0 {
+                    let max = self.state.results.len().saturating_sub(1);
+                    if delta > 0 {
+                        self.state.selected = (self.state.selected + delta as usize).min(max);
+                    } else {
+                        self.state.selected = self.state.selected.saturating_sub((-delta) as usize);
+                    }
+                    self.state.ensure_visible();
+                }
+            }
+        }
+    }
+}
+
 // ── Delegate macros ───────────────────────────────────────────────────────────
 
 delegate_compositor!(LauncherSurface);
 delegate_output!(LauncherSurface);
 delegate_seat!(LauncherSurface);
 delegate_keyboard!(LauncherSurface);
+delegate_pointer!(LauncherSurface);
 delegate_layer!(LauncherSurface);
 delegate_registry!(LauncherSurface);
 

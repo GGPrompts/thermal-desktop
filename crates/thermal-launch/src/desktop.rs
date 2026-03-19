@@ -64,7 +64,9 @@ pub fn load_desktop_entries() -> Vec<DesktopEntry> {
     let data_dirs = std::env::var("XDG_DATA_DIRS")
         .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
 
-    let mut entries = thermal_entries();
+    let thermal = thermal_entries();
+    let thermal_count = thermal.len();
+    let mut entries = thermal;
 
     for dir in data_dirs.split(':') {
         let apps_dir = format!("{}/applications", dir);
@@ -85,6 +87,9 @@ pub fn load_desktop_entries() -> Vec<DesktopEntry> {
         }
     }
 
+    // Sort system entries alphabetically (keep thermal entries at the top)
+    entries[thermal_count..].sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
     entries
 }
 
@@ -98,8 +103,8 @@ pub fn fuzzy_filter<'a>(
     query: &str,
 ) -> Vec<(usize, &'a DesktopEntry)> {
     if query.is_empty() {
-        // Return first 8 entries with equal score when no query
-        return entries.iter().take(8).map(|e| (0usize, e)).collect();
+        // Return all entries when no query (scroll to see more)
+        return entries.iter().map(|e| (0usize, e)).collect();
     }
 
     let query_lower = query.to_lowercase();
@@ -125,7 +130,7 @@ pub fn fuzzy_filter<'a>(
 
     // Sort descending by score
     results.sort_by(|a, b| b.0.cmp(&a.0));
-    results.truncate(8);
+    results.truncate(50);
     results
 }
 

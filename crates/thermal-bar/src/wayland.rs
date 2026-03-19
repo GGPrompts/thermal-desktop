@@ -370,7 +370,7 @@ pub async fn run() -> anyhow::Result<()> {
         match renderer.render_layout(&layout, &spark_rects) {
             Ok(()) => {}
             Err(e) => {
-                tracing::warn!("render error: {e}");
+                tracing::debug!("render skipped: {e}");
             }
         }
 

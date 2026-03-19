@@ -433,6 +433,8 @@ pub fn run() -> anyhow::Result<()> {
         pty_child_pid,
         inject_session_id,
         inject_watcher,
+        context_warning_active: false,
+        context_critical_active: false,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -522,6 +524,9 @@ pub fn run() -> anyhow::Result<()> {
             let sessions = poller.poll();
             state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
         }
+
+        // ── Update context saturation warnings ──────────────────────────
+        state.update_context_warnings();
 
         // ── Poll cross-pane inject watcher ────────────────────────────────
         // Non-blocking: picks up inject files from other windows.
@@ -777,6 +782,11 @@ struct ConductorWindow {
     inject_session_id: String,
     /// File watcher on `/tmp/thermal-inject/` for receiving injections from other windows.
     inject_watcher: Option<InjectWatcher>,
+    // Context saturation warning state
+    /// Whether the 85% context warning overlay is currently displayed.
+    context_warning_active: bool,
+    /// Whether the 95% context critical overlay is currently displayed.
+    context_critical_active: bool,
 }
 
 impl ConductorWindow {
@@ -1003,6 +1013,24 @@ impl ConductorWindow {
                         );
                     }
 
+                    // ── Context saturation warning overlay ─────────────────
+                    if self.context_warning_active {
+                        let ctx_pct = self
+                            .claude_session
+                            .as_ref()
+                            .and_then(|s| s.context_percent)
+                            .unwrap_or(0.0);
+                        self.grid_renderer.render_context_warning(
+                            ctx_pct,
+                            &self.wgpu.device,
+                            &self.wgpu.queue,
+                            &mut encoder,
+                            &view,
+                            self.width,
+                            self.height,
+                        );
+                    }
+
                     self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                     output.present();
                     return;
@@ -1124,6 +1152,24 @@ impl ConductorWindow {
         if let Some(ref session) = self.claude_session {
             self.grid_renderer.render_claude_hud(
                 session,
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
+
+        // ── Context saturation warning overlay ──────────────────────────
+        if self.context_warning_active {
+            let ctx_pct = self
+                .claude_session
+                .as_ref()
+                .and_then(|s| s.context_percent)
+                .unwrap_or(0.0);
+            self.grid_renderer.render_context_warning(
+                ctx_pct,
                 &self.wgpu.device,
                 &self.wgpu.queue,
                 &mut encoder,
@@ -1463,6 +1509,122 @@ impl ConductorWindow {
             inject::notify_injection("received", text.len());
         }
     }
+
+    // ── Context saturation monitoring ──────────────────────────────────────
+
+    /// Update context warning state based on the current Claude session.
+    ///
+    /// Sets `context_warning_active` when context_percent >= 85% and
+    /// `context_critical_active` when >= 95%. Resets flags when context
+    /// drops below thresholds (e.g. after a new session starts).
+    fn update_context_warnings(&mut self) {
+        let context_pct = self
+            .claude_session
+            .as_ref()
+            .and_then(|s| s.context_percent)
+            .unwrap_or(0.0);
+
+        let was_warning = self.context_warning_active;
+        let was_critical = self.context_critical_active;
+
+        self.context_warning_active = context_pct >= 85.0;
+        self.context_critical_active = context_pct >= 95.0;
+
+        // Log transitions for observability.
+        if self.context_warning_active && !was_warning {
+            tracing::warn!(
+                context_percent = context_pct,
+                "Context window approaching limit (>= 85%)"
+            );
+        }
+        if self.context_critical_active && !was_critical {
+            tracing::warn!(
+                context_percent = context_pct,
+                "Context window saturated (>= 95%) — Ctrl+Shift+N to spawn continuation"
+            );
+        }
+        if !self.context_warning_active && was_warning {
+            tracing::info!("Context warning cleared (dropped below 85%)");
+        }
+
+        // Mark dirty if state changed so the overlay is rendered/cleared.
+        if self.context_warning_active != was_warning
+            || self.context_critical_active != was_critical
+        {
+            self.dirty = true;
+        }
+    }
+
+    /// Spawn a continuation session in a new window.
+    ///
+    /// In client mode: asks the daemon to spawn a new session.
+    /// In standalone mode: spawns a new `thermal-conductor window` process.
+    fn spawn_continuation(&self) {
+        tracing::info!("Spawning continuation session (Ctrl+Shift+N)");
+
+        match &self.session_mode {
+            SessionMode::Client { client, .. } => {
+                let client_tx = client.request_tx_clone();
+                let shell =
+                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                tokio::spawn(async move {
+                    // Spawn a new session on the daemon.
+                    if let Err(e) = client_tx
+                        .send(crate::protocol::Request::SpawnSession {
+                            shell: Some(shell),
+                            cwd: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!("Failed to spawn continuation session on daemon: {e}");
+                        return;
+                    }
+                    tracing::info!("Continuation session spawn request sent to daemon");
+
+                    // Launch a new window process to attach to the new session.
+                    match std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| {
+                        std::path::PathBuf::from("thermal-conductor")
+                    }))
+                    .arg("window")
+                    .spawn()
+                    {
+                        Ok(_) => {
+                            tracing::info!("Launched new thermal-conductor window for continuation");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to launch continuation window: {e}");
+                        }
+                    }
+                });
+            }
+            SessionMode::Standalone { .. } => {
+                // Spawn a new thermal-conductor window process directly.
+                match std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| {
+                    std::path::PathBuf::from("thermal-conductor")
+                }))
+                .arg("window")
+                .spawn()
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Launched new thermal-conductor window (standalone continuation)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to launch continuation window: {e}");
+                    }
+                }
+            }
+        }
+
+        // Try to place the new window adjacent via hyprctl.
+        if let Err(e) = std::process::Command::new("hyprctl")
+            .args(["dispatch", "layoutmsg", "preselect", "r"])
+            .spawn()
+        {
+            tracing::debug!("hyprctl preselect hint failed (non-fatal): {e}");
+        }
+    }
 }
 
 // ── Claude session matching ───────────────────────────────────────────────────
@@ -1785,6 +1947,15 @@ impl KeyboardHandler for ConductorWindow {
         if self.modifiers.ctrl && self.modifiers.shift {
             if matches!(event.keysym, Keysym::Return | Keysym::KP_Enter) {
                 self.inject_selection();
+                return;
+            }
+        }
+
+        // ── Context continuation: Ctrl+Shift+N ──────────────────────────
+        // Spawns a new continuation session when the context window is saturated.
+        if self.modifiers.ctrl && self.modifiers.shift {
+            if matches!(event.keysym, Keysym::N | Keysym::n) {
+                self.spawn_continuation();
                 return;
             }
         }

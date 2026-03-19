@@ -24,6 +24,7 @@ use wgpu::util::DeviceExt;
 
 use tracing::debug;
 
+use crate::agent_timeline::{AgentTimeline, ToolCategory, TIMELINE_BAR_HEIGHT};
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
@@ -1639,6 +1640,475 @@ impl GridRenderer {
 
             if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
                 tracing::warn!("Claude HUD text render failed: {}", e);
+            }
+        }
+    }
+
+    /// Render a context saturation warning bar at the top of the terminal.
+    ///
+    /// - At 85-94%: subtle warning bar with WARM/HOT colors
+    /// - At 95%+: prominent critical bar with SEARING/CRITICAL colors and
+    ///   a prompt to spawn a continuation session
+    pub fn render_context_warning(
+        &mut self,
+        context_percent: f32,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        let sw = surface_width as f32;
+        let _sh = surface_height as f32;
+
+        let critical = context_percent >= 95.0;
+
+        // ── Build warning text ──────────────────────────────────────────
+        let text = if critical {
+            format!(
+                " Context saturated ({:.0}%) \u{2014} Press Ctrl+Shift+N to spawn continuation ",
+                context_percent
+            )
+        } else {
+            format!(
+                " Context: {:.0}% \u{2014} approaching limit ",
+                context_percent
+            )
+        };
+
+        // ── Bar dimensions ──────────────────────────────────────────────
+        let bar_h = self.cell_height + 4.0;
+        let bar_w = sw;
+        let bar_x = 0.0;
+        let bar_y = 0.0;
+
+        // ── Bar background ──────────────────────────────────────────────
+        let bg_color = if critical {
+            let c = PaletteColor::CRITICAL.to_f32_array();
+            [c[0], c[1], c[2], 0.90]
+        } else {
+            let c = PaletteColor::HOT.to_f32_array();
+            [c[0], c[1], c[2], 0.70]
+        };
+
+        let verts = pixel_rect_to_ndc(bar_x, bar_y, bar_w, bar_h, sw, _sh, bg_color);
+        let data = bytemuck::cast_slice::<ColorVertex, u8>(&verts);
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("context_warning_bg"),
+            contents: data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("context_warning_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── Warning text ────────────────────────────────────────────────
+        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let text_color = if critical {
+            PaletteColor::WHITE_HOT
+        } else {
+            PaletteColor::BG
+        };
+
+        let mut buf = Buffer::new(&mut self.font_system, metrics);
+        buf.set_size(
+            &mut self.font_system,
+            Some(sw),
+            Some(bar_h),
+        );
+        buf.set_text(
+            &mut self.font_system,
+            &text,
+            Attrs::new()
+                .family(Family::Name(TERM_FONT_FAMILY))
+                .color(GlyphColor::rgba(text_color.r, text_color.g, text_color.b, 255)),
+            Shaping::Basic,
+        );
+        buf.shape_until_scroll(&mut self.font_system, false);
+
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: surface_width,
+                height: surface_height,
+            },
+        );
+
+        let text_areas = vec![TextArea {
+            buffer: &buf,
+            left: self.padding_x,
+            top: 2.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right: surface_width as i32,
+                bottom: surface_height as i32,
+            },
+            default_color: GlyphColor::rgba(text_color.r, text_color.g, text_color.b, 255),
+            custom_glyphs: &[],
+        }];
+
+        if let Err(e) = self.overlay_text_renderer.prepare(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.overlay_atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        ) {
+            tracing::warn!("Context warning text prepare failed: {}", e);
+            return;
+        }
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("context_warning_text_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
+                tracing::warn!("Context warning text render failed: {}", e);
+            }
+        }
+    }
+
+    /// Render the agent timeline bar at the bottom of the window.
+    ///
+    /// Each tool entry is a colored horizontal segment. Time axis has newest
+    /// entries on the right. The current (active) tool pulses with alpha
+    /// oscillation. Tool names are rendered for entries wider than 50px.
+    pub fn render_agent_timeline(
+        &mut self,
+        timeline: &AgentTimeline,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        if !timeline.visible || timeline.entries.is_empty() {
+            return;
+        }
+
+        let sw = surface_width as f32;
+        let sh = surface_height as f32;
+        let bar_h = TIMELINE_BAR_HEIGHT as f32;
+        let bar_y = sh - bar_h;
+
+        // ── Dark background rect ──────────────────────────────────────────
+        let bg = PaletteColor::BG.to_f32_array();
+        let bg_color = [bg[0], bg[1], bg[2], 0.92];
+        let bg_verts = pixel_rect_to_ndc(0.0, bar_y, sw, bar_h, sw, sh, bg_color);
+        let bg_data = bytemuck::cast_slice::<ColorVertex, u8>(&bg_verts);
+        let bg_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("timeline_bg"),
+            contents: bg_data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("timeline_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, bg_vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── Thin separator line at top of timeline bar ────────────────────
+        let sep_color = PaletteColor::TEXT_MUTED.to_f32_array();
+        let sep_color_dim = [sep_color[0], sep_color[1], sep_color[2], 0.4];
+        let sep_verts = pixel_rect_to_ndc(0.0, bar_y, sw, 1.0, sw, sh, sep_color_dim);
+        let sep_data = bytemuck::cast_slice::<ColorVertex, u8>(&sep_verts);
+        let sep_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("timeline_sep"),
+            contents: sep_data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("timeline_sep_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, sep_vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── Compute time range ────────────────────────────────────────────
+        let now = Instant::now();
+        let content_y = bar_y + 4.0; // top padding inside the bar
+        let content_h = bar_h - 8.0; // vertical space for segments
+        let content_x = 4.0; // left padding
+        let content_w = sw - 8.0; // usable width for segments
+
+        // The total visible time window: we show seconds_per_pixel * content_w seconds.
+        // Use a fixed scale: 120 seconds across the full width.
+        let visible_seconds: f64 = 120.0;
+        let pixels_per_second = content_w as f64 / visible_seconds;
+
+        // The right edge of the bar is "now - scroll_offset".
+        let right_time = now;
+        let scroll_secs = timeline.scroll_offset;
+
+        // ── Collect segment rects and label positions ──────────────────────
+        let mut segment_verts: Vec<ColorVertex> = Vec::new();
+        let mut label_entries: Vec<(f32, f32, f32, String, PaletteColor)> = Vec::new();
+
+        // Current time elapsed for pulse animation.
+        let pulse_phase = now.elapsed().as_secs_f32(); // This is 0 — use frame_count instead.
+        let pulse_t = (self.frame_count as f32 * 0.05).sin() * 0.5 + 0.5; // 0..1 oscillation
+
+        for entry in timeline.entries.iter() {
+            let entry_end = entry.end_time.unwrap_or(now);
+
+            // Time from right edge (in seconds). Positive = further back in time.
+            let end_offset_secs =
+                right_time.duration_since(entry_end).as_secs_f64() + scroll_secs;
+            let start_offset_secs =
+                right_time.duration_since(entry.start_time).as_secs_f64() + scroll_secs;
+
+            // Convert to pixel positions from the right edge.
+            let x_right = content_x + content_w - (end_offset_secs * pixels_per_second) as f32;
+            let x_left = content_x + content_w - (start_offset_secs * pixels_per_second) as f32;
+
+            // Clamp to visible area.
+            let x0 = x_left.max(content_x);
+            let x1 = x_right.min(content_x + content_w);
+
+            if x1 <= x0 || x1 < content_x || x0 > content_x + content_w {
+                continue; // Off-screen
+            }
+
+            let segment_w = x1 - x0;
+
+            // Determine color from tool category.
+            let base_color = match entry.category {
+                ToolCategory::Read => PaletteColor::COOL,
+                ToolCategory::Write => PaletteColor::HOT,
+                ToolCategory::Execute => PaletteColor::HOTTER,
+                ToolCategory::Thinking => PaletteColor::MILD,
+                ToolCategory::Idle => PaletteColor::FREEZING,
+            };
+
+            let mut color_arr = base_color.to_f32_array();
+
+            // Pulse the active (current) entry.
+            if entry.end_time.is_none() {
+                let alpha = 0.6 + 0.4 * pulse_t;
+                color_arr[3] = alpha;
+            } else {
+                color_arr[3] = 0.75;
+            }
+
+            // Idle entries are more transparent.
+            if entry.category == ToolCategory::Idle {
+                color_arr[3] *= 0.3;
+            }
+
+            // Add segment rect vertices.
+            let verts =
+                pixel_rect_to_ndc(x0, content_y, segment_w, content_h, sw, sh, color_arr);
+            segment_verts.extend_from_slice(&verts);
+
+            // Add thin separator between entries (1px wide line at the right edge).
+            if segment_w > 2.0 {
+                let line_color = [bg[0], bg[1], bg[2], 0.6];
+                let line_verts =
+                    pixel_rect_to_ndc(x1 - 1.0, content_y, 1.0, content_h, sw, sh, line_color);
+                segment_verts.extend_from_slice(&line_verts);
+            }
+
+            // Collect label if entry is wide enough.
+            if segment_w > 50.0 {
+                let text_color = if entry.category == ToolCategory::Idle {
+                    PaletteColor::TEXT_MUTED
+                } else {
+                    PaletteColor::TEXT_BRIGHT
+                };
+                label_entries.push((
+                    x0 + 4.0,
+                    segment_w - 8.0,
+                    content_y,
+                    entry.tool_name.clone(),
+                    text_color,
+                ));
+            }
+        }
+
+        // ── Draw segment rects ────────────────────────────────────────────
+        if !segment_verts.is_empty() {
+            let seg_data = bytemuck::cast_slice::<ColorVertex, u8>(&segment_verts);
+            let seg_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("timeline_segments"),
+                contents: seg_data,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("timeline_segments_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, seg_vbuf.slice(..));
+                pass.draw(0..segment_verts.len() as u32, 0..1);
+            }
+        }
+
+        // ── Draw tool name labels ─────────────────────────────────────────
+        if !label_entries.is_empty() {
+            let metrics = Metrics::new(FONT_SIZE * 0.75, LINE_HEIGHT * 0.75);
+
+            let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
+            for (_, max_w, _, ref text, color) in &label_entries {
+                let mut buf = Buffer::new(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(*max_w), Some(content_h));
+                buf.set_text(
+                    &mut self.font_system,
+                    text,
+                    Attrs::new()
+                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .color(GlyphColor::rgba(color.r, color.g, color.b, 220)),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                label_buffers.push(buf);
+            }
+
+            self.viewport.update(
+                queue,
+                Resolution {
+                    width: surface_width,
+                    height: surface_height,
+                },
+            );
+
+            let text_areas: Vec<TextArea<'_>> = label_buffers
+                .iter()
+                .enumerate()
+                .map(|(i, buf)| {
+                    let (x, _, y, _, _) = &label_entries[i];
+                    TextArea {
+                        buffer: buf,
+                        left: *x,
+                        top: *y + (content_h - LINE_HEIGHT * 0.75) / 2.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: surface_width as i32,
+                            bottom: surface_height as i32,
+                        },
+                        default_color: GlyphColor::rgba(
+                            PaletteColor::TEXT.r,
+                            PaletteColor::TEXT.g,
+                            PaletteColor::TEXT.b,
+                            220,
+                        ),
+                        custom_glyphs: &[],
+                    }
+                })
+                .collect();
+
+            if let Err(e) = self.overlay_text_renderer.prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.overlay_atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            ) {
+                tracing::warn!("Timeline text prepare failed: {}", e);
+                return;
+            }
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("timeline_text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                if let Err(e) =
+                    self.overlay_text_renderer
+                        .render(&self.overlay_atlas, &self.viewport, &mut pass)
+                {
+                    tracing::warn!("Timeline text render failed: {}", e);
+                }
             }
         }
     }

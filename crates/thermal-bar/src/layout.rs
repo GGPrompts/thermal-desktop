@@ -84,9 +84,9 @@ impl BarLayout {
         let padding: f32 = 16.0;
         let margin: f32 = 8.0;
 
-        // Estimate text pixel width.
+        // Estimate text pixel width (char count, not byte length, for unicode).
         let text_px = |m: &ModuleOutput| -> f32 {
-            m.text.len() as f32 * char_width
+            m.text.chars().count() as f32 * char_width
         };
 
         let mut result = Vec::new();

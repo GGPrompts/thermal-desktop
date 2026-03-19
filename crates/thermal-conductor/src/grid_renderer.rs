@@ -1973,11 +1973,12 @@ impl GridRenderer {
             }
 
             // Collect label if entry is wide enough.
+            // Use dark text on bright segments (Hot/Hotter) for contrast.
             if segment_w > 50.0 {
-                let text_color = if entry.category == ToolCategory::Idle {
-                    PaletteColor::TEXT_MUTED
-                } else {
-                    PaletteColor::TEXT_BRIGHT
+                let text_color = match entry.category {
+                    ToolCategory::Idle => PaletteColor::TEXT_MUTED,
+                    ToolCategory::Execute | ToolCategory::Write => PaletteColor::BG,
+                    _ => PaletteColor::TEXT_BRIGHT,
                 };
                 label_entries.push((
                     x0 + 4.0,

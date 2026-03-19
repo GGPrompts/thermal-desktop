@@ -164,7 +164,7 @@ impl AudioManager {
     }
 }
 
-/// Spawn a dedicated audio thread that owns the rodio OutputStream.
+/// Spawn a dedicated audio thread that plays files via mpv.
 /// Returns a sender to push file paths for playback.
 fn spawn_audio_thread() -> mpsc::Sender<PathBuf> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
@@ -172,14 +172,8 @@ fn spawn_audio_thread() -> mpsc::Sender<PathBuf> {
     thread::Builder::new()
         .name("thermal-audio-player".into())
         .spawn(move || {
-            // OutputStream must live on this thread (it is !Send).
-            let Ok((_stream, handle)) = rodio::OutputStream::try_default() else {
-                warn!("no default audio output — audio disabled");
-                return;
-            };
-
             for path in rx {
-                if let Err(e) = play_file(&handle, &path) {
+                if let Err(e) = play_file(&path) {
                     warn!("audio play error: {e}");
                 }
             }
@@ -189,17 +183,18 @@ fn spawn_audio_thread() -> mpsc::Sender<PathBuf> {
     tx
 }
 
-fn play_file(handle: &rodio::OutputStreamHandle, path: &Path) -> Result<()> {
-    let file = fs::File::open(path).context("opening audio file")?;
-    let reader = BufReader::new(file);
-    let source =
-        rodio::Decoder::new(reader).context("decoding audio file")?;
-    handle
-        .play_raw(rodio::Source::convert_samples(source))
-        .context("playing audio")?;
-    // Give time for playback before accepting the next file.
-    // A short sleep is acceptable here — the audio thread is dedicated.
-    thread::sleep(std::time::Duration::from_secs(3));
+fn play_file(path: &Path) -> Result<()> {
+    let status = std::process::Command::new("mpv")
+        .arg("--no-video")
+        .arg("--really-quiet")
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("failed to run mpv")?;
+    if !status.success() {
+        anyhow::bail!("mpv exited with status {status}");
+    }
     Ok(())
 }
 

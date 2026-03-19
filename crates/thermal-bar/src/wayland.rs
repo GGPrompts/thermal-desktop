@@ -30,6 +30,7 @@ use wayland_client::{
 use crate::layout::BarLayout;
 use crate::modules::claude_module::ClaudeModule;
 use crate::modules::clock::ClockModule;
+use crate::modules::hotkeys::HotkeysModule;
 use crate::modules::metrics_module::MetricsModule;
 use crate::renderer::Renderer;
 use crate::sparkline::SparklineSet;
@@ -299,6 +300,7 @@ pub async fn run() -> anyhow::Result<()> {
     // Phase 3: Render loop — poll metrics, build layout, render, dispatch events.
     let metrics_module = MetricsModule::new();
     let clock_module = ClockModule::new();
+    let hotkeys_module = HotkeysModule::new();
     let mut claude_module = ClaudeModule::new();
     let mut sparklines = SparklineSet::new();
     let mut last_metrics = Instant::now();
@@ -331,8 +333,10 @@ pub async fn run() -> anyhow::Result<()> {
         let mut layout = BarLayout::new(bar.width);
 
         // Left zone: system metrics.
-        let metric_outputs = metrics_module.render();
-        layout.left = metric_outputs;
+        layout.left = metrics_module.render();
+
+        // Center zone: hotkey cheat sheet.
+        layout.center = hotkeys_module.render();
 
         // Right zone: Claude status + clock + date.
         let mut right_outputs = claude_module.render();

@@ -1019,6 +1019,11 @@ impl ConductorWindow {
                     );
 
                     // ── Claude HUD overlay ──────────────────────────────────
+                    let hud_h = if self.agent_timeline.visible {
+                        self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
+                    } else {
+                        self.height
+                    };
                     if let Some(ref session) = self.claude_session {
                         self.grid_renderer.render_claude_hud(
                             session,
@@ -1027,7 +1032,7 @@ impl ConductorWindow {
                             &mut encoder,
                             &view,
                             self.width,
-                            self.height,
+                            hud_h,
                         );
                     }
 
@@ -1178,6 +1183,11 @@ impl ConductorWindow {
         );
 
         // ── Claude HUD overlay ──────────────────────────────────────────
+        let hud_h = if self.agent_timeline.visible {
+            self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
+        } else {
+            self.height
+        };
         if let Some(ref session) = self.claude_session {
             self.grid_renderer.render_claude_hud(
                 session,
@@ -1186,7 +1196,7 @@ impl ConductorWindow {
                 &mut encoder,
                 &view,
                 self.width,
-                self.height,
+                hud_h,
             );
         }
 

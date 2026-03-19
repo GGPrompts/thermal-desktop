@@ -11,14 +11,60 @@ pub struct DesktopEntry {
     pub categories: Vec<String>,
 }
 
+/// Built-in thermal desktop component entries.
+///
+/// These always appear at the top of the launcher so thermal tools
+/// are always one keystroke away.
+fn thermal_entries() -> Vec<DesktopEntry> {
+    vec![
+        DesktopEntry {
+            name: "\u{2388} thermal-monitor".into(),
+            exec: "kitty --title thermal-monitor thermal-monitor".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+        DesktopEntry {
+            name: "\u{25b8} thermal-conductor".into(),
+            exec: "thermal-conductor window".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+        DesktopEntry {
+            name: "\u{2581} thermal-bar".into(),
+            exec: "pkill -x thermal-bar; sleep 0.3; thermal-bar".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+        DesktopEntry {
+            name: "\u{25a3} thermal-hud".into(),
+            exec: "thermal-hud".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+        DesktopEntry {
+            name: "\u{266b} thermal-audio".into(),
+            exec: "thermal-audio".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+        DesktopEntry {
+            name: "\u{1f512} thermal-lock".into(),
+            exec: "thermal-lock".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
+    ]
+}
+
 /// Read and parse .desktop files from XDG_DATA_DIRS.
 ///
 /// Falls back to `/usr/local/share:/usr/share` if the env var is not set.
+/// Built-in thermal entries are prepended so they always appear first.
 pub fn load_desktop_entries() -> Vec<DesktopEntry> {
     let data_dirs = std::env::var("XDG_DATA_DIRS")
         .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
 
-    let mut entries = Vec::new();
+    let mut entries = thermal_entries();
 
     for dir in data_dirs.split(':') {
         let apps_dir = format!("{}/applications", dir);

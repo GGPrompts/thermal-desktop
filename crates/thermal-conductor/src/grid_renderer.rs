@@ -6,6 +6,7 @@
 //! visual element (inverted block).
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
@@ -173,6 +174,15 @@ pub struct GridRenderer {
 
     // Frame counter for throttled atlas trimming.
     frame_count: u64,
+
+    // Persistent vertex buffer (CPU-side) for cell backgrounds / cursor / selection.
+    // Cleared and refilled each frame to avoid heap allocation churn.
+    rect_verts_cpu: Vec<ColorVertex>,
+
+    // Frame timing: rolling average over the last N frames.
+    frame_times_us: Vec<u64>,
+    frame_time_idx: usize,
+    frame_time_sum: u64,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -222,7 +232,7 @@ impl GridRenderer {
             &mut font_system,
             "M",
             Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
-            Shaping::Advanced,
+            Shaping::Basic,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
 
@@ -316,6 +326,10 @@ impl GridRenderer {
             cell_buffers: Vec::new(),
             last_cursor_pos: None,
             frame_count: 0,
+            rect_verts_cpu: Vec::new(),
+            frame_times_us: vec![0u64; 100],
+            frame_time_idx: 0,
+            frame_time_sum: 0,
         }
     }
 
@@ -438,7 +452,7 @@ impl GridRenderer {
             Attrs::new()
                 .family(Family::Name(TERM_FONT_FAMILY))
                 .color(f32_to_glyph_color(text_color)),
-            Shaping::Advanced,
+            Shaping::Basic,
         );
         buf.shape_until_scroll(&mut self.font_system, false);
 
@@ -683,7 +697,7 @@ impl GridRenderer {
                             (color[2] * 255.0) as u8,
                             (color[3] * 255.0) as u8,
                         )),
-                    Shaping::Advanced,
+                    Shaping::Basic,
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
                 label_buffers.push(buf);
@@ -932,7 +946,7 @@ impl GridRenderer {
                 Attrs::new()
                     .family(Family::Name(TERM_FONT_FAMILY))
                     .color(GlyphColor::rgba(color.r, color.g, color.b, 255)),
-                Shaping::Advanced,
+                Shaping::Basic,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
             line_buffers.push(buf);
@@ -1131,6 +1145,8 @@ impl GridRenderer {
         surface_width: u32,
         surface_height: u32,
     ) {
+        let frame_start = Instant::now();
+
         let sw = surface_width as f32;
         let sh = surface_height as f32;
 
@@ -1214,16 +1230,17 @@ impl GridRenderer {
         }
 
         // ── Write rect vertices into persistent buffer ──────────────────
-        let mut rect_vertices: Vec<ColorVertex> = Vec::new();
+        // Reuse the persistent CPU-side Vec to avoid allocation each frame.
+        self.rect_verts_cpu.clear();
         for (xywh, color) in &bg_rects {
             let verts = pixel_rect_to_ndc(xywh[0], xywh[1], xywh[2], xywh[3], sw, sh, *color);
-            rect_vertices.extend_from_slice(&verts);
+            self.rect_verts_cpu.extend_from_slice(&verts);
         }
 
-        let rect_vertex_count = rect_vertices.len() as u32;
+        let rect_vertex_count = self.rect_verts_cpu.len() as u32;
 
-        if !rect_vertices.is_empty() {
-            let needed = rect_vertices.len() as u64;
+        if !self.rect_verts_cpu.is_empty() {
+            let needed = self.rect_verts_cpu.len() as u64;
 
             // If the persistent buffer is too small, reallocate it.
             if needed > self.rect_buf_capacity {
@@ -1238,7 +1255,7 @@ impl GridRenderer {
                 self.rect_buf_capacity = new_capacity;
             }
 
-            let data = bytemuck::cast_slice::<ColorVertex, u8>(&rect_vertices);
+            let data = bytemuck::cast_slice::<ColorVertex, u8>(&self.rect_verts_cpu);
             queue.write_buffer(&self.rect_buf, 0, data);
         }
 
@@ -1350,7 +1367,7 @@ impl GridRenderer {
                 let attrs = Attrs::new()
                     .family(Family::Name(TERM_FONT_FAMILY))
                     .color(f32_to_glyph_color(fg));
-                buf.set_text(&mut self.font_system, &s, attrs, Shaping::Advanced);
+                buf.set_text(&mut self.font_system, &s, attrs, Shaping::Basic);
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -1462,6 +1479,37 @@ impl GridRenderer {
         if self.frame_count % ATLAS_TRIM_INTERVAL == 0 {
             self.atlas.trim();
             self.overlay_atlas.trim();
+        }
+
+        // ── Frame timing ────────────────────────────────────────────────
+        let elapsed_us = frame_start.elapsed().as_micros() as u64;
+
+        // Update rolling average (circular buffer of 100 samples).
+        let idx = self.frame_time_idx % self.frame_times_us.len();
+        self.frame_time_sum = self.frame_time_sum
+            .wrapping_sub(self.frame_times_us[idx])
+            .wrapping_add(elapsed_us);
+        self.frame_times_us[idx] = elapsed_us;
+        self.frame_time_idx = self.frame_time_idx.wrapping_add(1);
+
+        // Log if this frame exceeds 2ms.
+        if elapsed_us > 2000 {
+            debug!(
+                elapsed_us,
+                frame = self.frame_count,
+                "grid render frame exceeded 2ms"
+            );
+        }
+
+        // Log rolling average every 100 frames.
+        if self.frame_count % 100 == 0 {
+            let n = self.frame_times_us.len() as u64;
+            let avg_us = self.frame_time_sum / n;
+            debug!(
+                avg_us,
+                frame = self.frame_count,
+                "grid render 100-frame avg"
+            );
         }
     }
 }

@@ -1,0 +1,28 @@
+[package]
+name = "thermal-hud"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "thermal-hud"
+path = "src/main.rs"
+
+[dependencies]
+thermal-core = { path = "../thermal-core" }
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
+wgpu = { workspace = true }
+glyphon = { workspace = true }
+cosmic-text = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+raw-window-handle = { workspace = true }
+pollster = { workspace = true }
+notify = { workspace = true }
+bytemuck = { workspace = true }

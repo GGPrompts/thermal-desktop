@@ -238,13 +238,21 @@ fn simplex2d(v: vec2<f32>) -> f32 {{
     return 130.0 * dot(m, vec3<f32>(g0, g1, g2));
 }}
 
+// Circular time path — avoids seam when time wraps by tracing a circle
+// in 2D noise space instead of a linear ramp.
+fn time_offset(speed: f32, scale: f32) -> vec2<f32> {{
+    let t = u.time * speed * scale * 0.1;
+    let radius = 3.0;
+    return vec2<f32>(cos(t) * radius, sin(t) * radius);
+}}
+
 fn fbm(p: vec2<f32>, octaves: i32, speed: f32) -> f32 {{
     var val = 0.0;
     var amp = 0.5;
     var freq = 1.0;
     var pos = p;
     for (var i = 0; i < octaves; i = i + 1) {{
-        val = val + amp * simplex2d(pos * freq + vec2<f32>(u.time * speed * freq * 0.1, u.time * speed * freq * 0.07));
+        val = val + amp * simplex2d(pos * freq + time_offset(speed, freq));
         amp = amp * 0.5;
         freq = freq * 2.0;
     }}
@@ -283,7 +291,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     // Multi-layer noise for organic feel
     let n1 = fbm(uv * freq, octaves, speed);
     let n2 = fbm(uv * freq * 0.7 + vec2<f32>(5.3, 1.7), max(octaves - 1, 2), speed * 0.8);
-    let n3 = simplex2d(uv * freq * 0.3 + vec2<f32>(u.time * 0.05, u.time * 0.03));
+    let n3 = simplex2d(uv * freq * 0.3 + time_offset(1.0, 0.5));
 
     // Combine noise layers
     var heat = (n1 * 0.5 + n2 * 0.3 + n3 * 0.2) * 0.5 + 0.5;
@@ -417,7 +425,9 @@ impl WallpaperPipeline {
         load: &SystemLoad,
     ) {
         let uniforms = Uniforms {
-            time: self.start.elapsed().as_secs_f32(),
+            // Wrap time to avoid float precision loss and ensure smooth looping.
+            // 600s period (~10 min) keeps fractional precision high.
+            time: self.start.elapsed().as_secs_f32() % 600.0,
             cpu_load: load.cpu,
             gpu_load: load.gpu,
             mem_load: load.mem,

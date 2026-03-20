@@ -61,6 +61,9 @@ struct Profile {
     icon: Option<String>,
     #[serde(default = "default_count")]
     count: u32,
+    /// If true, create a git worktree per session to avoid file-edit conflicts.
+    #[serde(default)]
+    git_worktree: bool,
 }
 
 fn default_count() -> u32 {
@@ -100,6 +103,7 @@ fn load_profiles() -> (Option<String>, Vec<Profile>) {
         cwd: None,
         icon: Some("⚡".into()),
         count: 1,
+        git_worktree: false,
     }])
 }
 
@@ -113,6 +117,7 @@ enum Focus {
     CwdField,
     CommandField,
     CountField,
+    WorktreeToggle,
 }
 
 impl Focus {
@@ -121,15 +126,17 @@ impl Focus {
             Focus::ProfileList => Focus::CwdField,
             Focus::CwdField => Focus::CommandField,
             Focus::CommandField => Focus::CountField,
-            Focus::CountField => Focus::ProfileList,
+            Focus::CountField => Focus::WorktreeToggle,
+            Focus::WorktreeToggle => Focus::ProfileList,
         }
     }
     fn prev(self) -> Self {
         match self {
-            Focus::ProfileList => Focus::CountField,
+            Focus::ProfileList => Focus::WorktreeToggle,
             Focus::CwdField => Focus::ProfileList,
             Focus::CommandField => Focus::CwdField,
             Focus::CountField => Focus::CommandField,
+            Focus::WorktreeToggle => Focus::CountField,
         }
     }
 }
@@ -146,6 +153,8 @@ pub struct SpawnPage {
     cwd_input: String,
     command_input: String,
     count_input: String,
+    /// Whether to create git worktrees for spawned sessions.
+    worktree_enabled: bool,
     focus: Focus,
     status_msg: Option<(String, bool)>,
     spawning: bool,
@@ -167,14 +176,15 @@ impl SpawnPage {
         }
 
         // Initialize fields from first profile
-        let (cwd, cmd, count) = if let Some(p) = profiles.first() {
+        let (cwd, cmd, count, worktree) = if let Some(p) = profiles.first() {
             (
                 p.cwd.as_deref().map(expand_tilde).unwrap_or_default(),
                 p.command.clone().unwrap_or_default(),
                 p.count.to_string(),
+                p.git_worktree,
             )
         } else {
-            (String::new(), String::new(), "1".into())
+            (String::new(), String::new(), "1".into(), false)
         };
 
         Self {
@@ -184,6 +194,7 @@ impl SpawnPage {
             cwd_input: cwd,
             command_input: cmd,
             count_input: count,
+            worktree_enabled: worktree,
             focus: Focus::ProfileList,
             status_msg: None,
             spawning: false,
@@ -198,6 +209,7 @@ impl SpawnPage {
                 self.cwd_input = p.cwd.as_deref().map(expand_tilde).unwrap_or_default();
                 self.command_input = p.command.clone().unwrap_or_default();
                 self.count_input = p.count.to_string();
+                self.worktree_enabled = p.git_worktree;
                 self.status_msg = None;
             }
         }
@@ -243,6 +255,7 @@ impl SpawnPage {
         self.spawning = true;
 
         let project_clone = project.clone();
+        let worktree = self.worktree_enabled;
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -252,7 +265,7 @@ impl SpawnPage {
                     match crate::client::DaemonClient::connect().await {
                         Ok(Some(mut client)) => {
                             for _ in 0..count {
-                                let _ = client.spawn_session(None, project_clone.clone()).await;
+                                let _ = client.spawn_session(None, project_clone.clone(), worktree).await;
                             }
                         }
                         _ => {}
@@ -352,7 +365,8 @@ impl TuiPage for SpawnPage {
                 Constraint::Length(3), // cwd field
                 Constraint::Length(3), // command field
                 Constraint::Length(3), // count field
-                Constraint::Length(2), // spacer
+                Constraint::Length(3), // worktree toggle
+                Constraint::Length(1), // spacer
                 Constraint::Length(1), // hint
                 Constraint::Length(2), // status
                 Constraint::Min(0),   // rest
@@ -406,6 +420,25 @@ impl TuiPage for SpawnPage {
         render_field(f, form_chunks[2], "Command", &self.command_input, self.focus == Focus::CommandField, "(default: claude)");
         render_field(f, form_chunks[3], "Count (1-16)", &self.count_input, self.focus == Focus::CountField, "1");
 
+        // Worktree toggle
+        {
+            let focused = self.focus == Focus::WorktreeToggle;
+            let border_color = if focused { ACCENT_COLD } else { COLD };
+            let indicator = if self.worktree_enabled { "[x]" } else { "[ ]" };
+            let label = format!("{} Git worktree per session", indicator);
+            let text_color = if focused { TEXT_BRIGHT } else { TEXT };
+            let toggle = Paragraph::new(label)
+                .style(Style::default().fg(text_color))
+                .block(
+                    Block::default()
+                        .title(" Worktree ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(border_color))
+                        .style(Style::default().bg(BG_SURFACE)),
+                );
+            f.render_widget(toggle, form_chunks[4]);
+        }
+
         // Hint
         let hint = Paragraph::new(Line::from(vec![
             Span::styled("Enter", Style::default().fg(WARM).add_modifier(Modifier::BOLD)),
@@ -416,7 +449,7 @@ impl TuiPage for SpawnPage {
             Span::styled(": select profile", Style::default().fg(TEXT_MUTED)),
         ]))
         .alignment(Alignment::Center);
-        f.render_widget(hint, form_chunks[5]);
+        f.render_widget(hint, form_chunks[6]);
 
         // Status message
         if let Some((ref msg, is_error)) = self.status_msg {
@@ -424,7 +457,7 @@ impl TuiPage for SpawnPage {
             let status = Paragraph::new(msg.as_str())
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(color));
-            f.render_widget(status, form_chunks[6]);
+            f.render_widget(status, form_chunks[7]);
         }
     }
 
@@ -443,6 +476,17 @@ impl TuiPage for SpawnPage {
                 KeyCode::Tab => self.focus = self.focus.next(),
                 KeyCode::BackTab => self.focus = self.focus.prev(),
                 KeyCode::Esc => self.status_msg = None,
+                _ => {}
+            },
+            Focus::WorktreeToggle => match key.code {
+                KeyCode::Char(' ') => self.worktree_enabled = !self.worktree_enabled,
+                KeyCode::Tab => self.focus = self.focus.next(),
+                KeyCode::BackTab => self.focus = self.focus.prev(),
+                KeyCode::Enter => self.do_spawn(),
+                KeyCode::Esc => {
+                    self.focus = Focus::ProfileList;
+                    self.status_msg = None;
+                }
                 _ => {}
             },
             _ => match key.code {
@@ -558,6 +602,7 @@ name = "My Profile"
         assert!(p.cwd.is_none());
         assert!(p.icon.is_none());
         assert_eq!(p.count, 1); // default_count()
+        assert!(!p.git_worktree); // default false
     }
 
     #[test]
@@ -569,6 +614,7 @@ command = "claude"
 cwd = "~/projects/myapp"
 icon = "🚀"
 count = 4
+git_worktree = true
 "#;
         let cfg = parse_config(toml);
         assert_eq!(cfg.profiles.len(), 1);
@@ -578,6 +624,7 @@ count = 4
         assert_eq!(p.cwd.as_deref(), Some("~/projects/myapp"));
         assert_eq!(p.icon.as_deref(), Some("🚀"));
         assert_eq!(p.count, 4);
+        assert!(p.git_worktree);
     }
 
     #[test]
@@ -644,15 +691,17 @@ cwd = "~/code"
         assert_eq!(Focus::ProfileList.next(), Focus::CwdField);
         assert_eq!(Focus::CwdField.next(), Focus::CommandField);
         assert_eq!(Focus::CommandField.next(), Focus::CountField);
-        assert_eq!(Focus::CountField.next(), Focus::ProfileList);
+        assert_eq!(Focus::CountField.next(), Focus::WorktreeToggle);
+        assert_eq!(Focus::WorktreeToggle.next(), Focus::ProfileList);
     }
 
     #[test]
     fn focus_prev_cycles_backward() {
-        assert_eq!(Focus::ProfileList.prev(), Focus::CountField);
+        assert_eq!(Focus::ProfileList.prev(), Focus::WorktreeToggle);
         assert_eq!(Focus::CwdField.prev(), Focus::ProfileList);
         assert_eq!(Focus::CommandField.prev(), Focus::CwdField);
         assert_eq!(Focus::CountField.prev(), Focus::CommandField);
+        assert_eq!(Focus::WorktreeToggle.prev(), Focus::CountField);
     }
 
     #[test]
@@ -664,7 +713,7 @@ cwd = "~/code"
     #[test]
     fn focus_full_cycle_via_next() {
         let mut f = Focus::ProfileList;
-        for _ in 0..4 {
+        for _ in 0..5 {
             f = f.next();
         }
         assert_eq!(f, Focus::ProfileList);
@@ -673,7 +722,7 @@ cwd = "~/code"
     #[test]
     fn focus_full_cycle_via_prev() {
         let mut f = Focus::ProfileList;
-        for _ in 0..4 {
+        for _ in 0..5 {
             f = f.prev();
         }
         assert_eq!(f, Focus::ProfileList);
@@ -698,6 +747,7 @@ cwd = "~/code"
             cwd_input: cwd_input.to_string(),
             command_input: String::new(),
             count_input: "1".into(),
+            worktree_enabled: false,
             focus: Focus::ProfileList,
             status_msg: None,
             spawning: false,

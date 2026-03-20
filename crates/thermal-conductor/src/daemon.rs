@@ -36,6 +36,9 @@ struct Session {
     shell_command: String,
     /// Working directory the session was started in.
     cwd: String,
+    /// If this session uses a git worktree, the path to that worktree.
+    /// Used for cleanup when the session is killed or exits.
+    worktree_path: Option<String>,
     /// Broadcast channel for sending responses to all attached clients.
     update_tx: broadcast::Sender<Response>,
     /// Monotonically increasing sequence number for screen updates.
@@ -66,10 +69,15 @@ impl Daemon {
     }
 
     /// Spawn a new PTY session and register it.
+    ///
+    /// When `worktree` is true, a git worktree is created from the cwd's repo
+    /// and the PTY session runs in the worktree directory instead. If the cwd
+    /// is not a git repo, the worktree request is silently ignored.
     fn spawn_session(
         &self,
         shell: Option<String>,
         cwd: Option<String>,
+        worktree: bool,
     ) -> Result<String> {
         let shell_path =
             shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
@@ -80,7 +88,23 @@ impl Daemon {
         let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = format!("session-{id_num}");
 
-        let mut pty = PtySession::spawn(&shell_path)
+        // Optionally create a git worktree for this session.
+        let (effective_cwd, worktree_path) = if worktree {
+            match Self::create_worktree(&cwd_path, &id) {
+                Ok(wt_path) => {
+                    info!(session = %id, worktree = %wt_path, "Created git worktree");
+                    (wt_path.clone(), Some(wt_path))
+                }
+                Err(e) => {
+                    warn!(session = %id, error = %e, "Failed to create worktree, using original cwd");
+                    (cwd_path.clone(), None)
+                }
+            }
+        } else {
+            (cwd_path.clone(), None)
+        };
+
+        let mut pty = PtySession::spawn(&shell_path, Some(&effective_cwd))
             .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?;
 
         let terminal = Terminal::with_size(120, 36);
@@ -120,6 +144,7 @@ impl Daemon {
             pty,
             shell_command: shell_path.clone(),
             cwd: cwd_path,
+            worktree_path,
             update_tx: update_tx.clone(),
             seq: Arc::clone(&seq),
             pty_dirty: Arc::clone(&pty_dirty),
@@ -322,6 +347,78 @@ impl Daemon {
         Ok(id)
     }
 
+    /// Create a git worktree for a session.
+    ///
+    /// Detects the repo name from the cwd's git toplevel, then creates a
+    /// worktree at `/tmp/thermal-worktrees/{repo_name}-{session_id}`.
+    /// Returns the worktree path on success, or an error if the cwd is not
+    /// a git repo or the worktree command fails.
+    fn create_worktree(cwd: &str, session_id: &str) -> Result<String> {
+        // Check if cwd is inside a git repo.
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(cwd)
+            .output()
+            .context("Failed to run git rev-parse")?;
+
+        if !output.status.success() {
+            anyhow::bail!("Not a git repository: {cwd}");
+        }
+
+        let repo_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let repo_name = std::path::Path::new(&repo_root)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "repo".to_string());
+
+        let worktree_dir = format!("/tmp/thermal-worktrees/{repo_name}-{session_id}");
+
+        // Ensure the parent directory exists.
+        std::fs::create_dir_all("/tmp/thermal-worktrees")
+            .context("Failed to create /tmp/thermal-worktrees")?;
+
+        // Create the worktree from the current HEAD.
+        let wt_output = std::process::Command::new("git")
+            .args(["worktree", "add", &worktree_dir, "HEAD"])
+            .current_dir(&repo_root)
+            .output()
+            .context("Failed to run git worktree add")?;
+
+        if !wt_output.status.success() {
+            let stderr = String::from_utf8_lossy(&wt_output.stderr);
+            anyhow::bail!("git worktree add failed: {stderr}");
+        }
+
+        Ok(worktree_dir)
+    }
+
+    /// Remove a git worktree, cleaning up the directory.
+    fn remove_worktree(worktree_path: &str) {
+        // Use `git worktree remove --force` to clean up even if there are
+        // uncommitted changes (the session is being killed anyway).
+        let result = std::process::Command::new("git")
+            .args(["worktree", "remove", "--force", worktree_path])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                info!(path = %worktree_path, "Removed git worktree");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!(path = %worktree_path, error = %stderr, "Failed to remove git worktree");
+                // Fall back to removing the directory directly.
+                if let Err(e) = std::fs::remove_dir_all(worktree_path) {
+                    warn!(path = %worktree_path, error = %e, "Failed to remove worktree directory");
+                }
+            }
+            Err(e) => {
+                warn!(path = %worktree_path, error = %e, "Failed to run git worktree remove");
+                let _ = std::fs::remove_dir_all(worktree_path);
+            }
+        }
+    }
+
     /// Get a list of all sessions.
     fn list_sessions(&self) -> Vec<SessionInfo> {
         let sessions = self.sessions.lock();
@@ -348,6 +445,7 @@ impl Daemon {
                     start_time: start_secs,
                     connected_client_count: session.attached_count.load(Ordering::Relaxed) as usize,
                     is_alive: !session.pty.has_exited(),
+                    worktree_path: session.worktree_path.clone(),
                 }
             })
             .collect()
@@ -389,8 +487,8 @@ impl Daemon {
     /// Handle a single client request and return the response.
     fn handle_request(&self, request: &Request) -> Response {
         match request {
-            Request::SpawnSession { shell, cwd } => {
-                match self.spawn_session(shell.clone(), cwd.clone()) {
+            Request::SpawnSession { shell, cwd, worktree } => {
+                match self.spawn_session(shell.clone(), cwd.clone(), *worktree) {
                     Ok(id) => Response::SessionSpawned { id },
                     Err(e) => Response::Error {
                         message: format!("Failed to spawn session: {e}"),
@@ -400,7 +498,12 @@ impl Daemon {
 
             Request::KillSession { id } => {
                 let mut sessions = self.sessions.lock();
-                if sessions.remove(id).is_some() {
+                if let Some(session_arc) = sessions.remove(id) {
+                    let session = session_arc.lock();
+                    if let Some(ref wt_path) = session.worktree_path {
+                        Self::remove_worktree(wt_path);
+                    }
+                    drop(session);
                     info!(session = %id, "Session killed");
                     Response::Ok
                 } else {
@@ -922,7 +1025,7 @@ mod tests {
 
         // Spawn a session.
         let session_id = client
-            .spawn_session(Some("/bin/sh".to_string()), None)
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
             .await
             .expect("spawn_session failed");
         assert!(session_id.starts_with("session-"), "Unexpected session id: {session_id}");

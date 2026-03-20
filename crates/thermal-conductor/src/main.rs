@@ -50,6 +50,10 @@ enum Commands {
         /// Shell to use (defaults to $SHELL)
         #[arg(short, long)]
         shell: Option<String>,
+
+        /// Create a git worktree per session to avoid file-edit conflicts
+        #[arg(short = 'w', long)]
+        worktree: bool,
     },
 
     /// Show status of all tracked therminals with Claude state
@@ -150,7 +154,8 @@ fn main() -> Result<()> {
                     count,
                     project,
                     shell,
-                } => cmd_spawn(count, project, shell).await,
+                    worktree,
+                } => cmd_spawn(count, project, shell, worktree).await,
                 Commands::Status => cmd_status().await,
                 Commands::Send { session_id, prompt } => cmd_send(session_id, prompt).await,
                 Commands::List { json } => cmd_list(json).await,
@@ -175,13 +180,14 @@ async fn connect_daemon() -> Result<DaemonClient> {
 }
 
 /// Spawn N therminal sessions on the daemon.
-async fn cmd_spawn(count: u32, project: Option<String>, shell: Option<String>) -> Result<()> {
+async fn cmd_spawn(count: u32, project: Option<String>, shell: Option<String>, worktree: bool) -> Result<()> {
     let mut client = connect_daemon().await?;
 
-    println!("Spawning {count} therminal{}...", if count == 1 { "" } else { "s" });
+    let wt_label = if worktree { " (with worktrees)" } else { "" };
+    println!("Spawning {count} therminal{}{wt_label}...", if count == 1 { "" } else { "s" });
 
     for _i in 0..count {
-        let id = client.spawn_session(shell.clone(), project.clone()).await?;
+        let id = client.spawn_session(shell.clone(), project.clone(), worktree).await?;
         println!("  Therminal spawned (session: {id})");
     }
 

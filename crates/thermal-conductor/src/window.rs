@@ -259,7 +259,7 @@ pub fn run() -> anyhow::Result<()> {
                 } else {
                     let shell =
                         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    match client.spawn_session(Some(shell), None).await {
+                    match client.spawn_session(Some(shell), None, false).await {
                         Ok(id) => {
                             tracing::info!(id = %id, "Spawned new session on daemon");
                             id
@@ -606,7 +606,7 @@ fn setup_standalone_session(
     i32,
 ) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut pty = PtySession::spawn(&shell).expect("Failed to spawn PTY");
+    let mut pty = PtySession::spawn(&shell, None).expect("Failed to spawn PTY");
 
     // Connect PTY output to the terminal byte processor.
     let pty_output_rx = pty.take_output();
@@ -1623,6 +1623,7 @@ impl ConductorWindow {
                         .send(crate::protocol::Request::SpawnSession {
                             shell: Some(shell),
                             cwd: None,
+                            worktree: false,
                         })
                         .await
                     {

@@ -2,11 +2,12 @@
 # Each [[profile]] defines a preset for the Spawn page in `thc tui`.
 #
 # Fields:
-#   name     — display name (required)
-#   command  — shell command to run after spawning (optional, default: claude)
-#   cwd      — working directory (optional, inherits from TUI's cwd)
-#   icon     — emoji/symbol shown in the list (optional)
-#   count    — default number of sessions to spawn (optional, default: 1)
+#   name          — display name (required)
+#   command       — shell command to run after spawning (optional, default: claude)
+#   cwd           — working directory (optional, inherits from TUI's cwd)
+#   icon          — emoji/symbol shown in the list (optional)
+#   count         — default number of sessions to spawn (optional, default: 1)
+#   git_worktree  — create a git worktree per session (optional, default: false)
 
 # Default working directory when a profile doesn't specify one.
 # Supports ~ expansion. If unset, uses the directory thc was launched from.
@@ -16,22 +17,27 @@
 name = "thermal-desktop"
 icon = "🔥"
 cwd = "~/projects/thermal-desktop"
+git_worktree = false
 
 [[profile]]
 name = "thermobile"
 icon = "📱"
 cwd = "~/projects/thermobile"
+git_worktree = false
 
 [[profile]]
 name = "pocketforge"
 icon = "🔨"
 cwd = "~/projects/pocketforge"
+git_worktree = false
 
 [[profile]]
 name = "Shell"
 icon = "🖥️"
 command = ""
+git_worktree = false
 
 [[profile]]
 name = "Custom"
 icon = "⚡"
+git_worktree = false

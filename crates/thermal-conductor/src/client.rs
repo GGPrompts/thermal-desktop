@@ -249,12 +249,16 @@ impl DaemonClient {
     // ── High-level API methods ──────────────────────────────────────────────
 
     /// Spawn a session on the daemon.
+    ///
+    /// If `worktree` is true, the daemon will create a git worktree from the
+    /// cwd's repo so this session gets its own working directory.
     pub async fn spawn_session(
         &mut self,
         shell: Option<String>,
         cwd: Option<String>,
+        worktree: bool,
     ) -> Result<String> {
-        let response = self.request(Request::SpawnSession { shell, cwd }).await?;
+        let response = self.request(Request::SpawnSession { shell, cwd, worktree }).await?;
         match response {
             Response::SessionSpawned { id } => Ok(id),
             Response::Error { message } => anyhow::bail!("Daemon error: {message}"),

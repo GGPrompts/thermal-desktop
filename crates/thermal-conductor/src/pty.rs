@@ -47,10 +47,12 @@ impl PtySession {
     ///
     /// # Arguments
     /// * `shell` - Path to the shell binary (e.g. "/bin/zsh")
+    /// * `cwd` - Optional working directory for the child process. If `None`,
+    ///   the child inherits the parent's working directory.
     ///
     /// # Returns
     /// A `PtySession` with the master fd, child pid, and output channel.
-    pub fn spawn(shell: &str) -> Result<Self> {
+    pub fn spawn(shell: &str, cwd: Option<&str>) -> Result<Self> {
         // Open the PTY pair.
         let pty = openpty(None, None).context("openpty() failed")?;
         let master_fd = pty.master;
@@ -89,6 +91,14 @@ impl PtySession {
                 // Close the original slave fd if it isn't one of 0/1/2.
                 if slave_raw > 2 {
                     drop(slave_fd);
+                }
+
+                // Change working directory if requested.
+                if let Some(dir) = cwd {
+                    let dir_cstr = CString::new(dir).expect("cwd contains null byte");
+                    if unistd::chdir(dir_cstr.as_c_str()).is_err() {
+                        eprintln!("chdir({dir}) failed, using parent cwd");
+                    }
                 }
 
                 // Set TERM so the shell knows it has color support.

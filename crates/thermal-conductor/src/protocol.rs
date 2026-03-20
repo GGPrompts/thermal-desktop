@@ -32,6 +32,10 @@ pub enum Request {
         shell: Option<String>,
         /// Initial working directory. `None` means use `$HOME`.
         cwd: Option<String>,
+        /// If true, create a git worktree for the session so multiple agents
+        /// can work on the same repo without file-edit conflicts.
+        #[serde(default)]
+        worktree: bool,
     },
 
     /// Kill a session (sends SIGHUP to PTY child).
@@ -139,6 +143,9 @@ pub struct SessionInfo {
     pub connected_client_count: usize,
     /// Whether the child process is still alive.
     pub is_alive: bool,
+    /// If the session was spawned in a git worktree, the worktree path.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
 }
 
 /// A single terminal cell.
@@ -295,12 +302,14 @@ mod tests {
         let req = Request::SpawnSession {
             shell: Some("/bin/zsh".into()),
             cwd: Some("/home/builder".into()),
+            worktree: false,
         };
         let decoded = rt_request(&req);
         match decoded {
-            Request::SpawnSession { shell, cwd } => {
+            Request::SpawnSession { shell, cwd, worktree } => {
                 assert_eq!(shell.as_deref(), Some("/bin/zsh"));
                 assert_eq!(cwd.as_deref(), Some("/home/builder"));
+                assert!(!worktree);
             }
             other => panic!("unexpected variant: {:?}", other),
         }
@@ -308,12 +317,13 @@ mod tests {
 
     #[test]
     fn request_spawn_session_none_fields_round_trip() {
-        let req = Request::SpawnSession { shell: None, cwd: None };
+        let req = Request::SpawnSession { shell: None, cwd: None, worktree: false };
         let decoded = rt_request(&req);
         match decoded {
-            Request::SpawnSession { shell, cwd } => {
+            Request::SpawnSession { shell, cwd, worktree } => {
                 assert!(shell.is_none());
                 assert!(cwd.is_none());
+                assert!(!worktree);
             }
             other => panic!("unexpected variant: {:?}", other),
         }
@@ -503,6 +513,7 @@ mod tests {
             start_time: 1_700_000_000,
             connected_client_count: 2,
             is_alive: true,
+            worktree_path: None,
         };
         let resp = Response::SessionList { sessions: vec![info] };
         let decoded = rt_response(&resp);
@@ -645,6 +656,7 @@ mod tests {
             start_time: 0,
             connected_client_count: 0,
             is_alive: false,
+            worktree_path: None,
         };
         let bytes = rmp_serde::to_vec(&info).unwrap();
         let decoded: SessionInfo = rmp_serde::from_slice(&bytes).unwrap();

@@ -733,7 +733,7 @@ impl LauncherSurface {
         let mut verts: Vec<ReticleVertex> = Vec::new();
 
         // ── Search bar background panel ──────────────────────────────────
-        let bar_color = ThermalPalette::BG_SURFACE;
+        let bar_color: [f32; 4] = [0.06, 0.06, 0.08, 1.0]; // neutral dark panel
         verts.extend_from_slice(&quad_verts(
             PADDING_X - 12.0, QUERY_BAR_TOP,
             WIDTH as f32 - PADDING_X + 12.0, QUERY_BAR_TOP + QUERY_BAR_HEIGHT,
@@ -772,7 +772,7 @@ impl LauncherSurface {
         let selected_in_view = self.state.selected >= self.state.scroll_offset
             && self.state.selected < self.state.scroll_offset + MAX_VISIBLE;
         if !self.state.results.is_empty() && selected_in_view {
-            let highlight_color = [ThermalPalette::BG_SURFACE[0], ThermalPalette::BG_SURFACE[1], ThermalPalette::BG_SURFACE[2], 0.6];
+            let highlight_color: [f32; 4] = [0.08, 0.08, 0.10, 0.6]; // neutral dark highlight
             verts.extend_from_slice(&quad_verts(
                 PADDING_X - 12.0, selected_row_y - 2.0,
                 WIDTH as f32 - PADDING_X + 12.0, selected_row_y + LINE_HEIGHT + 8.0,
@@ -800,7 +800,8 @@ impl LauncherSurface {
 
         // ── Record render pass ────────────────────────────────────────────────
 
-        let bg = ThermalPalette::BG;
+        // Near-black background — neutral dark instead of purple-tinted palette BG
+        let bg: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("launch pass"),
@@ -1057,7 +1058,7 @@ impl KeyboardHandler for LauncherSurface {
             return;
         }
 
-        if raw == 28 || event.keysym == Keysym::Return {
+        if raw == 28 || raw == 96 || event.keysym == Keysym::Return || event.keysym == Keysym::KP_Enter {
             if !self.state.results.is_empty() {
                 let idx = self.state.results[self.state.selected];
                 let exec = self.state.all_entries[idx].exec.clone();

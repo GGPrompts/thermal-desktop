@@ -61,7 +61,7 @@ use std::sync::{
     Arc,
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
-use thermal_core::ThermalPalette;
+
 
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
@@ -899,7 +899,8 @@ impl ConductorWindow {
                 });
 
         // ── Clear pass ───────────────────────────────────────────────────
-        let bg = ThermalPalette::BG;
+        // Near-black background — neutral dark instead of purple-tinted palette BG
+        let bg: [f32; 4] = [0.03, 0.03, 0.04, 1.0]; // ~#080808-#0a0a0a
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("conductor clear pass"),
@@ -1018,23 +1019,8 @@ impl ConductorWindow {
                         self.height,
                     );
 
-                    // ── Claude HUD overlay ──────────────────────────────────
-                    let hud_h = if self.agent_timeline.visible {
-                        self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
-                    } else {
-                        self.height
-                    };
-                    if let Some(ref session) = self.claude_session {
-                        self.grid_renderer.render_claude_hud(
-                            session,
-                            &self.wgpu.device,
-                            &self.wgpu.queue,
-                            &mut encoder,
-                            &view,
-                            self.width,
-                            hud_h,
-                        );
-                    }
+                    // Claude HUD overlay disabled — redundant with Claude's
+                    // built-in statusline and thermal-monitor dashboard.
 
                     // ── Context saturation warning overlay ─────────────────
                     if self.context_warning_active {
@@ -1182,23 +1168,8 @@ impl ConductorWindow {
             self.height,
         );
 
-        // ── Claude HUD overlay ──────────────────────────────────────────
-        let hud_h = if self.agent_timeline.visible {
-            self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
-        } else {
-            self.height
-        };
-        if let Some(ref session) = self.claude_session {
-            self.grid_renderer.render_claude_hud(
-                session,
-                &self.wgpu.device,
-                &self.wgpu.queue,
-                &mut encoder,
-                &view,
-                self.width,
-                hud_h,
-            );
-        }
+        // Claude HUD overlay disabled — redundant with Claude's
+        // built-in statusline and thermal-monitor dashboard.
 
         // ── Context saturation warning overlay ──────────────────────────
         if self.context_warning_active {

@@ -376,6 +376,7 @@ impl ImageStore {
     }
 
     /// Remove placements that have scrolled out of the visible area.
+    #[allow(dead_code)]
     pub fn cleanup_scrolled(&mut self, max_visible_row: usize) {
         self.placements.retain(|p| {
             let bottom = p.row + p.rows_span.max(1);

@@ -28,6 +28,10 @@ use crate::agent_timeline::{AgentTimeline, ToolCategory, TIMELINE_BAR_HEIGHT};
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
+/// Near-black terminal background — neutral dark, not purple-tinted.
+/// Must match the clear color in window.rs.
+const TERM_BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Font size in points for the terminal grid.
@@ -413,6 +417,7 @@ pub struct ImageRenderPipeline {
 struct CachedImageTexture {
     #[allow(dead_code)]
     texture: wgpu::Texture,
+    #[allow(dead_code)]
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
 }
@@ -691,6 +696,7 @@ impl ImageRenderPipeline {
     }
 
     /// Remove cached textures for images that no longer exist in the store.
+    #[allow(dead_code)]
     pub fn cleanup_cache(&mut self, image_store: &ImageStore) {
         let active_ids: HashSet<u32> = image_store
             .visible_placements()
@@ -1004,6 +1010,7 @@ impl GridRenderer {
     }
 
     /// Clean up GPU texture cache for images no longer in the store.
+    #[allow(dead_code)]
     pub fn cleanup_image_cache(&mut self, image_store: &ImageStore) {
         self.image_pipeline.cleanup_cache(image_store);
     }
@@ -1407,6 +1414,7 @@ impl GridRenderer {
     /// Shows status, context percentage (thermal-gradient colored), current tool,
     /// and subagent count. Only renders when a matching session is provided.
     /// Follows the same rect-bg + glyphon-text pattern as render_scroll_indicator.
+    #[allow(dead_code)]
     pub fn render_claude_hud(
         &mut self,
         session: &ClaudeSessionState,
@@ -2430,9 +2438,9 @@ impl GridRenderer {
                     && cursor_col == cell.col
                     && cursor_row == cell.row;
                 let fg = if is_block_cursor {
-                    PaletteColor::BG.to_f32_array()
+                    TERM_BG
                 } else if cell.flags.contains(Flags::INVERSE) {
-                    ansi_to_glyphon_bg(&cell.bg).unwrap_or(PaletteColor::BG.to_f32_array())
+                    ansi_to_glyphon_bg(&cell.bg).unwrap_or(TERM_BG)
                 } else {
                     ansi_to_glyphon_fg(&cell.fg)
                 };
@@ -2649,6 +2657,10 @@ fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
 }
 
 /// Map named ANSI colors to thermal palette foreground colors.
+///
+/// Spread across the full thermal spectrum: dark bg → blue → teal → green →
+/// yellow → orange → red → white-hot.  Avoids clustering everything in the
+/// purple/indigo range.
 fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
     match named {
         NamedColor::Black => PaletteColor::BG_SURFACE.to_f32_array(),
@@ -2656,30 +2668,30 @@ fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::Green => PaletteColor::WARM.to_f32_array(),
         NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
         NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::Cyan => PaletteColor::COLD.to_f32_array(),
-        NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT.to_f32_array(),
+        NamedColor::Magenta => PaletteColor::HOTTER.to_f32_array(),
+        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
+        NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(),
 
-        NamedColor::BrightBlack => PaletteColor::TEXT_MUTED.to_f32_array(),
+        NamedColor::BrightBlack => [0.40, 0.38, 0.45, 1.0], // neutral gray with slight warmth
         NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(),
         NamedColor::BrightGreen => PaletteColor::WARM.to_f32_array(),
         NamedColor::BrightYellow => PaletteColor::WHITE_HOT.to_f32_array(),
         NamedColor::BrightBlue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::BrightMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
+        NamedColor::BrightMagenta => PaletteColor::ACCENT_WARM.to_f32_array(),
         NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),
-        NamedColor::BrightWhite | NamedColor::BrightForeground => PaletteColor::TEXT_BRIGHT.to_f32_array(),
+        NamedColor::BrightWhite | NamedColor::BrightForeground => PaletteColor::WHITE_HOT.to_f32_array(),
 
-        NamedColor::DimBlack => PaletteColor::BG.to_f32_array(),
+        NamedColor::DimBlack => TERM_BG,
         NamedColor::DimRed => PaletteColor::SEARING.to_f32_array(),
-        NamedColor::DimGreen => PaletteColor::COOL.to_f32_array(),
+        NamedColor::DimGreen => PaletteColor::MILD.to_f32_array(),
         NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
         NamedColor::DimBlue => PaletteColor::COOL.to_f32_array(),
-        NamedColor::DimMagenta => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::DimCyan => PaletteColor::COLD.to_f32_array(),
+        NamedColor::DimMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
+        NamedColor::DimCyan => [0.08, 0.45, 0.42, 1.0], // muted teal
         NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
 
-        NamedColor::Background => PaletteColor::BG.to_f32_array(),
-        NamedColor::Cursor => PaletteColor::TEXT_BRIGHT.to_f32_array(),
+        NamedColor::Background => TERM_BG,
+        NamedColor::Cursor => PaletteColor::WHITE_HOT.to_f32_array(),
     }
 }
 
@@ -2692,16 +2704,16 @@ fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
 fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
     match named {
         // Standard backgrounds
-        NamedColor::Black => PaletteColor::BG.to_f32_array(),
+        NamedColor::Black => TERM_BG,
         NamedColor::Red => PaletteColor::SEARING.to_f32_array(),
         NamedColor::Green => PaletteColor::WARM.to_f32_array(),
         NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
         NamedColor::Blue => PaletteColor::COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::COLD.to_f32_array(),
-        NamedColor::Cyan => PaletteColor::COLD.to_f32_array(),
+        NamedColor::Magenta => PaletteColor::HOTTER.to_f32_array(),
+        NamedColor::Cyan => [0.05, 0.36, 0.33, 1.0], // dark teal
         NamedColor::White => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Foreground => PaletteColor::TEXT_MUTED.to_f32_array(),
-        NamedColor::Background => PaletteColor::BG.to_f32_array(),
+        NamedColor::Background => TERM_BG,
         NamedColor::Cursor => PaletteColor::BG_SURFACE.to_f32_array(),
 
         // Bright backgrounds — use muted/dark variants, never vivid foreground colors
@@ -2711,17 +2723,17 @@ fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
         NamedColor::BrightYellow => PaletteColor::HOT.to_f32_array(),
         NamedColor::BrightBlue => PaletteColor::COOL.to_f32_array(),
         NamedColor::BrightMagenta => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::BrightCyan => PaletteColor::COLD.to_f32_array(),
+        NamedColor::BrightCyan => [0.04, 0.28, 0.26, 1.0], // muted dark teal
         NamedColor::BrightWhite => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::BrightForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
 
         // Dim backgrounds — use deep dark palette entries
-        NamedColor::DimBlack => PaletteColor::BG.to_f32_array(),
+        NamedColor::DimBlack => TERM_BG,
         NamedColor::DimRed => PaletteColor::FREEZING.to_f32_array(),
         NamedColor::DimGreen => PaletteColor::BG_SURFACE.to_f32_array(),
         NamedColor::DimYellow => PaletteColor::BG_SURFACE.to_f32_array(),
         NamedColor::DimBlue => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::DimMagenta => PaletteColor::BG.to_f32_array(),
+        NamedColor::DimMagenta => PaletteColor::BG_SURFACE.to_f32_array(),
         NamedColor::DimCyan => PaletteColor::BG_SURFACE.to_f32_array(),
         NamedColor::DimWhite => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::DimForeground => PaletteColor::TEXT_MUTED.to_f32_array(),

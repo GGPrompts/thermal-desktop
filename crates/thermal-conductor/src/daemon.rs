@@ -884,6 +884,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
 ///
 /// This is the core accept loop, factored out so that tests and alternative
 /// entry points can supply their own socket path and shutdown signal.
+#[allow(dead_code)]
 pub async fn run_daemon_on(
     listener: UnixListener,
     mut shutdown: tokio::sync::mpsc::Receiver<()>,

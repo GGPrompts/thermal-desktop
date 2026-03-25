@@ -75,8 +75,24 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.
 
 ## Development
+
+### Build Environment
+`CARGO_TARGET_DIR` is set to `/tmp/cargo-target` (for Android NDK cross-compilation support). This means:
+- `cargo build` outputs go to `/tmp/cargo-target/debug/`, **not** `target/debug/`
+- Stale binaries may exist at `target/debug/` or `target/release/` from before this was set — **do not trust them**
+- `/usr/local/bin/thermal-*` are symlinks to `target/release/` — these are **dead links**, ignore them
+- The authoritative installed binaries live in `~/.cargo/bin/` via `cargo install`
+
+### Installing / Updating Binaries
+After making changes to a crate, **you must `cargo install`** to update the running binary:
 ```bash
-cargo build                           # Build all
+cargo install --path crates/thermal-audio    # Installs to ~/.cargo/bin/thermal-audio
+cargo install --path crates/thermal-bar      # etc.
+```
+`cargo build` alone does NOT update `~/.cargo/bin/`. Running daemons use the `~/.cargo/bin/` copies (resolved via PATH), so forgetting `cargo install` means your changes won't take effect at runtime.
+
+### Running from Source
+```bash
 cargo run -p thermal-conductor        # Run TUI hub (thc)
 cargo run -p thermal-conductor -- window  # Run GPU terminal window
 cargo run -p thermal-conductor -- daemon  # Run session daemon

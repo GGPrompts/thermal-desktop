@@ -24,14 +24,14 @@ These launch automatically at login via Hyprland `exec-once`:
 |-----------|-------------|
 | **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), hotkey cheat sheet (center), Claude sessions + clock (right) |
 | **thermal-audio** | TTS daemon — announces Claude session state changes (idle, tool use, awaiting input, context warnings) |
-| **thc daemon** | Session daemon — owns PTY sessions, provides Unix socket API for the TUI and other clients |
+| **thc daemon** | Optional session daemon — PTY backend fallback when kitty is unavailable |
 
 ### On-Demand
 | Component | How to Launch | What It Does |
 |-----------|--------------|-------------|
 | **thermal-launch** | Super+D | Fuzzy app launcher overlay with thermal components at the top |
 | **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all Claude sessions with subagent nesting, context %, tools |
-| **thermal-conductor** | `thc` or `thc tui` | Tabbed ratatui TUI dashboard — Sessions, Spawn, Profiles, Services tabs |
+| **thermal-conductor** | `thc` or Super+T | Tabbed ratatui TUI dashboard — Sessions (with timeline bars), Spawn, Profiles, Services (with audio mute/volume) |
 | **thermal-conductor** | `thermal-conductor window` | GPU-rendered terminal with agent overlays (HUD badge, timeline bar) |
 | **thermal-hud** | `thermal-hud` | Layer-shell overlay showing Claude session tabs or voice assistant state |
 | **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
@@ -44,49 +44,41 @@ These launch automatically at login via Hyprland `exec-once`:
 # Interactive TUI dashboard (default when no subcommand given)
 thc                            # Launch tabbed TUI (Sessions/Spawn/Profiles/Services)
 thc tui                        # Same, explicit subcommand
+thc --backend=kitty            # Force kitty backend
+thc --backend=daemon           # Force daemon backend
 
-# Session management
-thc daemon                     # Start session daemon
-thc spawn                      # Spawn a shell session
+# Session management (via kitty @ or daemon fallback)
+thc spawn                      # Spawn a shell session in kitty
 thc spawn -n 3                 # Spawn 3 sessions
-thc list                       # List sessions
-thc status                     # Show Claude state for all sessions
+thc list                       # List sessions (kitty windows or daemon PTYs)
 thc kill ID                    # Kill a session
+thc send ID "text"             # Send text to a session
 
-# Audio control
-thc audio on                   # Start TTS daemon
-thc audio off                  # Stop TTS daemon
-thc audio status               # Check if running
-thc audio test "hello world"   # Test TTS
+# Audio control (via socket API)
+# Use thc Services tab for mute/volume (m/+/- keys), or direct:
+echo '{"action":"toggle_mute"}' | socat - UNIX:/run/user/$UID/thermal/audio.sock
+echo '{"action":"set_volume","value":0.7}' | socat - UNIX:/run/user/$UID/thermal/audio.sock
+thermal-audio --test "hello"   # Test TTS
 
 # MCP server (used by Claude for desktop control)
 thermal-commander              # 20 tools: screenshots, window mgmt, app launch, clipboard
 ```
 
 ### Voice Assistant Pipeline
-Push-to-talk voice input with Whisper transcription, routed through Claude Haiku for tool execution:
+Push-to-talk voice input with local Whisper transcription:
 
 ```
-Voice (Super+\) → thermal-voice (Whisper STT) → thermal-dispatcher (Haiku API)
-    → tool execution (trust-tier gated) → thermal-audio (TTS response)
+Super+\ → thermal-voice (cpal mic capture → Whisper STT) → transcript to clipboard + notification
 ```
+
+Planned: pipe transcript to `claude -p` for AI-powered voice commands (replacing the custom Haiku API dispatcher).
 
 ```bash
-# Install dependencies
-pip install faster-whisper sounddevice numpy
+# Start voice daemon
+thermal-voice &                  # Listens on voice.sock
 
-# Start daemons
-python3 scripts/thermal-voice.py --daemon   # STT daemon (voice.sock)
-thermal-dispatcher &                         # Command routing (dispatcher.sock)
-thermal-audio &                              # TTS playback (audio.sock)
-
-# Toggle recording: Super+Backslash
+# Toggle recording: Super+Backslash (auto-starts daemon if needed)
 ```
-
-**Trust tiers** (`config/trust-tiers.toml`):
-- **AUTO** — safe read-only tools execute immediately (screenshot, clipboard, beads)
-- **CONFIRM** — desktop interaction tools require HUD confirmation (click, type, open_app)
-- **BLOCK** — destructive tools are rejected with TTS announcement (kill_claude)
 
 ### Spawn Profiles
 The TUI Spawn page loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`):
@@ -121,7 +113,7 @@ Key ones:
 - **Super+Q** — Close window
 - **Super+\\** — Push-to-talk voice input
 - **Super+B** — btop system monitor
-- **Super+T** — thermal-status readout
+- **Super+T** — TUI Hub (thc — sessions, spawn, services)
 - **Super+N** — Notification center
 - **Print** — Screenshot region select
 
@@ -192,9 +184,9 @@ thermal-notify ───────── D-Bus notification server
 thermal-audio ────────── TTS daemon (edge-tts + mpv, Unix socket API)
 thermal-voice ────────── push-to-talk STT daemon (cpal + Whisper)
 thermal-monitor ──────── standalone ratatui TUI dashboard
-thermal-conductor ────── tabbed TUI hub + PTY session daemon + GPU terminal
+thermal-conductor ────── tabbed TUI hub (kitty backend + daemon fallback) + GPU terminal
 thermal-commander ────── MCP server (20 desktop control tools)
-thermal-dispatcher ───── voice command router (Whisper → Haiku → tool execution)
+thermal-dispatcher ───── voice command router (planned: replace with claude -p)
 thermal-screensaver ──── idle-triggered thermal fluid simulation overlay
 thermal-wallpaper ────── animated WGSL thermal shader wallpaper daemon
 ```
@@ -233,8 +225,9 @@ python3 scripts/generate-theme.py --check  # Verify in sync
 | Dispatcher socket | `/run/user/1000/thermal/dispatcher.sock` |
 | Audio socket | `/run/user/1000/thermal/audio.sock` |
 | TTS cache | `~/.cache/thermal-audio/` |
+| Audio settings (mute/vol) | `~/.config/thermal/audio.toml` |
 | Spawn profiles | `config/profiles.toml` or `~/.config/thermal/profiles.toml` |
-| Trust tiers | `config/trust-tiers.toml` or `~/.config/thermal/trust-tiers.toml` |
+| Kitty sessions sidecar | `/run/user/1000/thermal/sessions.json` |
 | Hyprland config | `~/.config/hypr/hyprland.conf` |
 | Screenshots | `~/Pictures/Screenshots/` |
 | Color definitions | `colors/thermal.toml` |

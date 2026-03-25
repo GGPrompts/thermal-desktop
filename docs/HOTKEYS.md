@@ -41,18 +41,36 @@
 ## Thermal Tools
 | Key | Action |
 |-----|--------|
+| Super + T | TUI Hub — sessions, spawn, profiles, services (thc tui) |
 | Super + D | Launcher with thermal components at top |
 | Super + B | btop (system monitor) |
-| Super + T | thermal-status (quick readout) |
+| Super + \ | Push-to-talk voice input (start/stop toggle) |
+| Super + . | Emoji picker (bemoji) |
 | Super + N | Notification center (swaync) |
 | Super + / | Cheatsheet |
-| Super + \ | Push-to-talk voice input |
 
 ## Screenshots
 | Key | Action |
 |-----|--------|
 | Print | Region select + swappy annotation |
 | Shift + Print | Full screen + swappy |
+
+## thc TUI (all tabs)
+| Key | Action |
+|-----|--------|
+| 1-4 | Switch tab (Sessions/Spawn/Profiles/Services) |
+| Tab | Next tab |
+| Shift+Tab | Previous tab |
+| q / Ctrl+C | Quit |
+
+## thc Services Tab
+| Key | Action |
+|-----|--------|
+| Enter / Space | Start/stop selected service |
+| r | Restart selected service |
+| m | Toggle mute (thermal-audio only) |
+| + / - | Volume up/down 10% (thermal-audio only) |
+| j/k / Up/Down | Navigate |
 
 ## thermal-conductor Window
 These work inside a `thermal-conductor window`:

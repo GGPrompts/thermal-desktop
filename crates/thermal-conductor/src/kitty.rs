@@ -27,8 +27,13 @@ fn validate_session_id(id: &str) -> Result<()> {
     if id.is_empty() {
         bail!("session ID must not be empty");
     }
-    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
-        bail!("session ID contains invalid characters (allowed: alphanumeric, hyphen, underscore, dot): {id}");
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        bail!(
+            "session ID contains invalid characters (allowed: alphanumeric, hyphen, underscore, dot): {id}"
+        );
     }
     Ok(())
 }
@@ -228,10 +233,7 @@ impl KittyController {
             for tab in &os_win.tabs {
                 for win in &tab.windows {
                     if let Some(session_id) = win.title.strip_prefix(TITLE_PREFIX) {
-                        let side = sidecar
-                            .sessions
-                            .iter()
-                            .find(|e| e.session_id == session_id);
+                        let side = sidecar.sessions.iter().find(|e| e.session_id == session_id);
 
                         let foreground_command = win
                             .foreground_processes
@@ -373,13 +375,10 @@ async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static
 
         f(&mut data);
 
-        let json = serde_json::to_string_pretty(&data)
-            .context("failed to serialize sidecar")?;
+        let json = serde_json::to_string_pretty(&data).context("failed to serialize sidecar")?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json.as_bytes())
-            .context("failed to write sidecar temp file")?;
-        std::fs::rename(&tmp, &path)
-            .context("failed to rename sidecar temp file")?;
+        std::fs::write(&tmp, json.as_bytes()).context("failed to write sidecar temp file")?;
+        std::fs::rename(&tmp, &path).context("failed to rename sidecar temp file")?;
 
         // Lock is released when lock_file is dropped.
         Ok(())
@@ -464,7 +463,10 @@ mod tests {
         let decoded: SidecarData = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.sessions.len(), 2);
         assert_eq!(decoded.sessions[0].session_id, "abc");
-        assert_eq!(decoded.sessions[0].worktree_path.as_deref(), Some("/tmp/wt-abc"));
+        assert_eq!(
+            decoded.sessions[0].worktree_path.as_deref(),
+            Some("/tmp/wt-abc")
+        );
         assert_eq!(decoded.sessions[1].profile_name, None);
     }
 
@@ -515,7 +517,10 @@ mod tests {
         assert_eq!(win.title.strip_prefix(TITLE_PREFIX), Some("agent-1"));
         assert_eq!(win.id, 1);
         assert!(win.is_focused);
-        assert_eq!(win.foreground_processes[0].cmdline.join(" "), "claude --model opus");
+        assert_eq!(
+            win.foreground_processes[0].cmdline.join(" "),
+            "claude --model opus"
+        );
 
         // Second window should not match.
         let win2 = &os_windows[0].tabs[0].windows[1];

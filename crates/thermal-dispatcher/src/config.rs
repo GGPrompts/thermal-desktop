@@ -206,11 +206,7 @@ mod tests {
             "beads:blocked",
             "beads:reopen",
         ] {
-            assert_eq!(
-                cfg.tier_for(name),
-                TrustTier::Auto,
-                "{name} should be AUTO"
-            );
+            assert_eq!(cfg.tier_for(name), TrustTier::Auto, "{name} should be AUTO");
         }
     }
 

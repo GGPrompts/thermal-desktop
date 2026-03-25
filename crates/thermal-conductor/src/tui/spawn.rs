@@ -7,14 +7,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 
-use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
+use thermal_core::{ClaudeStatePoller, palette::ThermalPalette};
 
 use super::TuiPage;
 use crate::backend::BackendPreference;
@@ -151,7 +151,11 @@ impl SpawnPage {
         // Clamp selection
         if let Some(i) = self.list_state.selected() {
             if i >= self.profiles.len() {
-                self.list_state.select(if self.profiles.is_empty() { None } else { Some(0) });
+                self.list_state.select(if self.profiles.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
             }
         }
         self.apply_selected_profile();
@@ -217,7 +221,9 @@ impl SpawnPage {
             cwd.clone()
         };
 
-        let profile_name = self.list_state.selected()
+        let profile_name = self
+            .list_state
+            .selected()
             .and_then(|i| self.profiles.get(i))
             .map(|p| p.name.clone());
 
@@ -226,7 +232,11 @@ impl SpawnPage {
 
         // Capture display strings before moving values into the spawn closure.
         let display_profile = profile_name.as_deref().unwrap_or("Custom").to_string();
-        let display_cwd = if effective_cwd.is_empty() { "(default)".to_string() } else { effective_cwd.clone() };
+        let display_cwd = if effective_cwd.is_empty() {
+            "(default)".to_string()
+        } else {
+            effective_cwd.clone()
+        };
 
         self.spawning.store(true, Ordering::SeqCst);
 
@@ -293,27 +303,36 @@ impl SpawnPage {
         self.status_msg = Some((
             format!(
                 "Spawning {} x {} in {} (backend: {})",
-                count,
-                display_profile,
-                display_cwd,
-                backend_pref,
+                count, display_profile, display_cwd, backend_pref,
             ),
             false,
         ));
     }
 
     fn nav_up(&mut self) {
-        if self.profiles.is_empty() { return; }
+        if self.profiles.is_empty() {
+            return;
+        }
         let i = self.list_state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.profiles.len() - 1 } else { i - 1 };
+        let prev = if i == 0 {
+            self.profiles.len() - 1
+        } else {
+            i - 1
+        };
         self.list_state.select(Some(prev));
         self.apply_selected_profile();
     }
 
     fn nav_down(&mut self) {
-        if self.profiles.is_empty() { return; }
+        if self.profiles.is_empty() {
+            return;
+        }
         let i = self.list_state.selected().unwrap_or(0);
-        let next = if i >= self.profiles.len() - 1 { 0 } else { i + 1 };
+        let next = if i >= self.profiles.len() - 1 {
+            0
+        } else {
+            i + 1
+        };
         self.list_state.select(Some(next));
         self.apply_selected_profile();
     }
@@ -332,28 +351,33 @@ impl TuiPage for SpawnPage {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        f.render_widget(
-            Block::default().style(Style::default().bg(BG)),
-            area,
-        );
+        f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(28), // profile list
-                Constraint::Min(30),   // form
+                Constraint::Min(30),    // form
             ])
             .margin(1)
             .split(area);
 
         // -- Profile list (left panel) --
-        let profile_items: Vec<ListItem> = self.profiles.iter().map(|p| {
-            let icon = p.icon.as_deref().unwrap_or(" ");
-            let text = format!("{} {}", icon, p.name);
-            ListItem::new(text)
-        }).collect();
+        let profile_items: Vec<ListItem> = self
+            .profiles
+            .iter()
+            .map(|p| {
+                let icon = p.icon.as_deref().unwrap_or(" ");
+                let text = format!("{} {}", icon, p.name);
+                ListItem::new(text)
+            })
+            .collect();
 
-        let list_border = if self.focus == Focus::ProfileList { ACCENT_COLD } else { COLD };
+        let list_border = if self.focus == Focus::ProfileList {
+            ACCENT_COLD
+        } else {
+            COLD
+        };
         let profile_list = List::new(profile_items)
             .block(
                 Block::default()
@@ -385,23 +409,34 @@ impl TuiPage for SpawnPage {
                 Constraint::Length(1), // spacer
                 Constraint::Length(1), // hint
                 Constraint::Length(2), // status
-                Constraint::Min(0),   // rest
+                Constraint::Min(0),    // rest
                 Constraint::Length(1), // footer
             ])
             .split(main_chunks[1]);
 
         // Title
-        let profile_name = self.list_state.selected()
+        let profile_name = self
+            .list_state
+            .selected()
             .and_then(|i| self.profiles.get(i))
             .map(|p| p.name.as_str())
             .unwrap_or("Custom");
         let title = Paragraph::new(format!("Spawn: {}", profile_name))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(TEXT_BRIGHT).add_modifier(Modifier::BOLD));
+            .style(
+                Style::default()
+                    .fg(TEXT_BRIGHT)
+                    .add_modifier(Modifier::BOLD),
+            );
         f.render_widget(title, form_chunks[0]);
 
         // Helper to render a text input field
-        let render_field = |f: &mut Frame, area: Rect, title: &str, value: &str, focused: bool, placeholder: &str| {
+        let render_field = |f: &mut Frame,
+                            area: Rect,
+                            title: &str,
+                            value: &str,
+                            focused: bool,
+                            placeholder: &str| {
             let border_color = if focused { ACCENT_COLD } else { COLD };
             let text_style = if focused {
                 Style::default().fg(TEXT_BRIGHT)
@@ -419,22 +454,41 @@ impl TuiPage for SpawnPage {
                 value.to_string()
             };
 
-            let widget = Paragraph::new(display)
-                .style(text_style)
-                .block(
-                    Block::default()
-                        .title(format!(" {} ", title))
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(border_color))
-                        .style(Style::default().bg(BG_SURFACE)),
-                );
+            let widget = Paragraph::new(display).style(text_style).block(
+                Block::default()
+                    .title(format!(" {} ", title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .style(Style::default().bg(BG_SURFACE)),
+            );
             f.render_widget(widget, area);
         };
 
         let cwd_placeholder = format!("(inherits: {})", self.effective_cwd());
-        render_field(f, form_chunks[1], "Working Directory", &self.cwd_input, self.focus == Focus::CwdField, &cwd_placeholder);
-        render_field(f, form_chunks[2], "Command", &self.command_input, self.focus == Focus::CommandField, "(default: claude)");
-        render_field(f, form_chunks[3], "Count (1-16)", &self.count_input, self.focus == Focus::CountField, "1");
+        render_field(
+            f,
+            form_chunks[1],
+            "Working Directory",
+            &self.cwd_input,
+            self.focus == Focus::CwdField,
+            &cwd_placeholder,
+        );
+        render_field(
+            f,
+            form_chunks[2],
+            "Command",
+            &self.command_input,
+            self.focus == Focus::CommandField,
+            "(default: claude)",
+        );
+        render_field(
+            f,
+            form_chunks[3],
+            "Count (1-16)",
+            &self.count_input,
+            self.focus == Focus::CountField,
+            "1",
+        );
 
         // Worktree toggle
         {
@@ -457,11 +511,24 @@ impl TuiPage for SpawnPage {
 
         // Hint
         let hint = Paragraph::new(Line::from(vec![
-            Span::styled("Enter", Style::default().fg(WARM).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Enter",
+                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": spawn  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("Tab", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": next field  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("j/k", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "j/k",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": select profile", Style::default().fg(TEXT_MUTED)),
         ]))
         .alignment(Alignment::Center);
@@ -514,9 +581,15 @@ impl TuiPage for SpawnPage {
                     self.status_msg = None;
                 }
                 KeyCode::Backspace => match self.focus {
-                    Focus::CwdField => { self.cwd_input.pop(); }
-                    Focus::CommandField => { self.command_input.pop(); }
-                    Focus::CountField => { self.count_input.pop(); }
+                    Focus::CwdField => {
+                        self.cwd_input.pop();
+                    }
+                    Focus::CommandField => {
+                        self.command_input.pop();
+                    }
+                    Focus::CountField => {
+                        self.count_input.pop();
+                    }
                     _ => {}
                 },
                 KeyCode::Char(c) => match self.focus {
@@ -595,7 +668,10 @@ impl TuiPage for SpawnPage {
     }
 
     fn has_text_focus(&self) -> bool {
-        matches!(self.focus, Focus::CwdField | Focus::CommandField | Focus::CountField)
+        matches!(
+            self.focus,
+            Focus::CwdField | Focus::CommandField | Focus::CountField
+        )
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -615,14 +691,18 @@ mod tests {
     #[test]
     fn expand_tilde_leaves_absolute_path_unchanged() {
         // Safety: test-only, single-threaded context.
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let result = expand_tilde("/absolute/path");
         assert_eq!(result, "/absolute/path");
     }
 
     #[test]
     fn expand_tilde_expands_home_prefix() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let result = expand_tilde("~/projects/foo");
         assert_eq!(result, "/home/testuser/projects/foo");
     }
@@ -648,7 +728,9 @@ mod tests {
 
     #[test]
     fn expand_tilde_deep_path() {
-        unsafe { std::env::set_var("HOME", "/home/builder"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/builder");
+        }
         let result = expand_tilde("~/a/b/c/d.toml");
         assert_eq!(result, "/home/builder/a/b/c/d.toml");
     }
@@ -830,7 +912,9 @@ cwd = "~/code"
 
     #[test]
     fn effective_cwd_uses_cwd_input_when_set() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let page = make_page_with_cwd_inputs("~/mydir", None, "/launch");
         let cwd = page.effective_cwd();
         assert_eq!(cwd, "/home/testuser/mydir");
@@ -838,7 +922,9 @@ cwd = "~/code"
 
     #[test]
     fn effective_cwd_falls_back_to_default_cwd_when_input_empty() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let page = make_page_with_cwd_inputs("", Some("~/defaults"), "/launch");
         let cwd = page.effective_cwd();
         assert_eq!(cwd, "/home/testuser/defaults");
@@ -861,7 +947,9 @@ cwd = "~/code"
 
     #[test]
     fn effective_cwd_input_takes_priority_over_default_and_launch() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let page = make_page_with_cwd_inputs("/explicit/path", Some("/default"), "/launch");
         let cwd = page.effective_cwd();
         assert_eq!(cwd, "/explicit/path");

@@ -71,12 +71,7 @@ impl ThermalTextRenderer {
 
         // No multisampling, no depth/stencil — matches the thermal compositor
         // default.  Callers that need MSAA can build their own renderer.
-        let renderer = TextRenderer::new(
-            &mut atlas,
-            device,
-            MultisampleState::default(),
-            None,
-        );
+        let renderer = TextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
         Self {
             font_system,
@@ -90,8 +85,7 @@ impl ThermalTextRenderer {
 
     /// Update the viewport when the surface is resized.
     pub fn resize(&mut self, queue: &Queue, width: u32, height: u32) {
-        self.viewport
-            .update(queue, Resolution { width, height });
+        self.viewport.update(queue, Resolution { width, height });
     }
 
     /// Create a shaped, laid-out [`Buffer`] for the given text.

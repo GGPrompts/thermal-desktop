@@ -267,7 +267,11 @@ fn parse_633_body(body: &[u8]) -> Option<Osc633Mark> {
 
     let mark_byte = body[0];
     // The rest after the mark letter (skip optional leading `;`).
-    let rest = if body.len() > 1 && body[1] == b';' { &body[2..] } else { &body[1..] };
+    let rest = if body.len() > 1 && body[1] == b';' {
+        &body[2..]
+    } else {
+        &body[1..]
+    };
 
     match mark_byte {
         b'A' => Some(Osc633Mark::PromptStart),
@@ -277,7 +281,9 @@ fn parse_633_body(body: &[u8]) -> Option<Osc633Mark> {
             let exit_code = if rest.is_empty() {
                 None
             } else {
-                std::str::from_utf8(rest).ok().and_then(|s| s.parse::<i32>().ok())
+                std::str::from_utf8(rest)
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
             };
             Some(Osc633Mark::CommandFinished { exit_code })
         }
@@ -336,14 +342,20 @@ mod tests {
     fn command_finished_with_exit_code() {
         let mut parser = Osc633Parser::new();
         let marks = parser.feed(&osc("D;0"));
-        assert_eq!(marks, vec![Osc633Mark::CommandFinished { exit_code: Some(0) }]);
+        assert_eq!(
+            marks,
+            vec![Osc633Mark::CommandFinished { exit_code: Some(0) }]
+        );
     }
 
     #[test]
     fn command_finished_nonzero_exit() {
         let mut parser = Osc633Parser::new();
         let marks = parser.feed(&osc("D;1"));
-        assert_eq!(marks, vec![Osc633Mark::CommandFinished { exit_code: Some(1) }]);
+        assert_eq!(
+            marks,
+            vec![Osc633Mark::CommandFinished { exit_code: Some(1) }]
+        );
     }
 
     #[test]
@@ -359,7 +371,9 @@ mod tests {
         let marks = parser.feed(&osc("E;cargo build"));
         assert_eq!(
             marks,
-            vec![Osc633Mark::CommandLine { command: "cargo build".to_owned() }]
+            vec![Osc633Mark::CommandLine {
+                command: "cargo build".to_owned()
+            }]
         );
     }
 

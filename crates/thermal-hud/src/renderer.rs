@@ -15,7 +15,7 @@ use raw_window_handle::{
 };
 use thermal_core::{ClaudeSessionState, ClaudeStatus, ThermalPalette};
 
-use crate::voice::{HudMode, VoiceState, RESULT_DIM_SECS};
+use crate::voice::{HudMode, RESULT_DIM_SECS, VoiceState};
 use wgpu::{
     BlendState, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, Device, FragmentState, FrontFace, Instance, InstanceDescriptor,
@@ -138,12 +138,10 @@ impl Renderer {
         });
 
         let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            NonNull::new(wl_display)
-                .ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
+            NonNull::new(wl_display).ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
         ));
         let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-            NonNull::new(wl_surface)
-                .ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
+            NonNull::new(wl_surface).ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
         ));
 
         let surface = unsafe {
@@ -324,8 +322,8 @@ impl Renderer {
             // Compute tab width: distribute evenly, clamped to min/max.
             let available = screen_w - LEFT_MARGIN * 2.0;
             let count = sessions.len() as f32;
-            let tab_width = ((available - TAB_GAP * (count - 1.0)) / count)
-                .clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+            let tab_width =
+                ((available - TAB_GAP * (count - 1.0)) / count).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
 
             for (i, session) in sessions.iter().enumerate() {
                 let is_active = i == active_tab;
@@ -341,28 +339,18 @@ impl Renderer {
 
                 // Active tab border (top 2px strip in SEARING).
                 if is_active {
-                    rect_quads.push((
-                        [tab_x, 0.0, tab_width, 2.0],
-                        ThermalPalette::SEARING,
-                    ));
+                    rect_quads.push(([tab_x, 0.0, tab_width, 2.0], ThermalPalette::SEARING));
                 }
 
                 // Status dot — small square indicating session status.
                 let dot_color = status_color(&session.status);
                 let dot_x = tab_x + TAB_PADDING;
                 let dot_y = (screen_h - CONTEXT_BAR_HEIGHT) / 2.0 - STATUS_DOT_SIZE / 2.0;
-                rect_quads.push((
-                    [dot_x, dot_y, STATUS_DOT_SIZE, STATUS_DOT_SIZE],
-                    dot_color,
-                ));
+                rect_quads.push(([dot_x, dot_y, STATUS_DOT_SIZE, STATUS_DOT_SIZE], dot_color));
 
                 // Build tab text: "session_id  ToolName"
                 let session_label = truncate_session_id(&session.session_id, 12);
-                let tool_label = session
-                    .current_tool
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_string();
+                let tool_label = session.current_tool.as_deref().unwrap_or("").to_string();
                 let tab_text = if tool_label.is_empty() {
                     format!("{session_label}  {}", status_label(&session.status))
                 } else {
@@ -427,10 +415,7 @@ impl Renderer {
                 // Filled portion — color based on context usage.
                 let bar_color = context_bar_color(ctx_pct);
                 if bar_width > 0.0 {
-                    rect_quads.push((
-                        [tab_x, bar_y, bar_width, CONTEXT_BAR_HEIGHT],
-                        bar_color,
-                    ));
+                    rect_quads.push(([tab_x, bar_y, bar_width, CONTEXT_BAR_HEIGHT], bar_color));
                 }
             }
         }
@@ -589,7 +574,10 @@ impl Renderer {
                 // Pulsing "MIC" indicator — bright ACCENT_HOT block + label.
                 let mic_width = 80.0;
                 let mic_x = LEFT_MARGIN;
-                rect_quads.push(([mic_x, 4.0, mic_width, screen_h - 8.0], ThermalPalette::ACCENT_HOT));
+                rect_quads.push((
+                    [mic_x, 4.0, mic_width, screen_h - 8.0],
+                    ThermalPalette::ACCENT_HOT,
+                ));
 
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(18.0, 24.0));
                 buf.set_size(&mut self.font_system, Some(mic_width), Some(screen_h));
@@ -607,7 +595,11 @@ impl Renderer {
                 // "Listening..." label.
                 let label_x = mic_x + mic_width + 16.0;
                 let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
-                lbl.set_size(&mut self.font_system, Some(screen_w - label_x), Some(screen_h));
+                lbl.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x),
+                    Some(screen_h),
+                );
                 lbl.set_text(
                     &mut self.font_system,
                     "LISTENING...",
@@ -624,7 +616,11 @@ impl Renderer {
                 // Show partial transcript.
                 let label_x = LEFT_MARGIN;
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
-                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0),
+                    Some(screen_h),
+                );
                 let display = if transcript.is_empty() {
                     "TRANSCRIBING..."
                 } else {
@@ -649,7 +645,11 @@ impl Renderer {
                 // Transcript line.
                 if !transcript.is_empty() {
                     let mut buf = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
-                    buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                    buf.set_size(
+                        &mut self.font_system,
+                        Some(screen_w - label_x * 2.0),
+                        Some(screen_h),
+                    );
                     buf.set_text(
                         &mut self.font_system,
                         transcript,
@@ -664,7 +664,11 @@ impl Renderer {
 
                 // "THINKING..." label on second line.
                 let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
-                lbl.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(20.0));
+                lbl.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0),
+                    Some(20.0),
+                );
                 lbl.set_text(
                     &mut self.font_system,
                     "THINKING...",
@@ -683,7 +687,11 @@ impl Renderer {
 
                 // Action text.
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
-                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0 - 140.0), Some(screen_h));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0 - 140.0),
+                    Some(screen_h),
+                );
                 buf.set_text(
                     &mut self.font_system,
                     action,
@@ -698,7 +706,10 @@ impl Renderer {
                 // "SAY YES/NO" confirmation badge on the right.
                 let badge_w = 120.0;
                 let badge_x = screen_w - badge_w - LEFT_MARGIN;
-                rect_quads.push(([badge_x, 8.0, badge_w, screen_h - 16.0], ThermalPalette::ACCENT_WARM));
+                rect_quads.push((
+                    [badge_x, 8.0, badge_w, screen_h - 16.0],
+                    ThermalPalette::ACCENT_WARM,
+                ));
 
                 let mut badge = Buffer::new(&mut self.font_system, Metrics::new(13.0, 18.0));
                 badge.set_size(&mut self.font_system, Some(badge_w), Some(screen_h));
@@ -716,7 +727,11 @@ impl Renderer {
                 // Transcript below action (smaller, muted).
                 if !transcript.is_empty() {
                     let mut tbuf = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
-                    tbuf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0 - 140.0), Some(20.0));
+                    tbuf.set_size(
+                        &mut self.font_system,
+                        Some(screen_w - label_x * 2.0 - 140.0),
+                        Some(20.0),
+                    );
                     tbuf.set_text(
                         &mut self.font_system,
                         transcript,
@@ -734,7 +749,11 @@ impl Renderer {
                 // Show "EXECUTING..." with a warm accent.
                 let label_x = LEFT_MARGIN;
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
-                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0),
+                    Some(screen_h),
+                );
                 buf.set_text(
                     &mut self.font_system,
                     "EXECUTING...",
@@ -758,7 +777,11 @@ impl Renderer {
 
                 let label_x = LEFT_MARGIN;
                 let mut buf = Buffer::new(&mut self.font_system, Metrics::new(14.0, 20.0));
-                buf.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(screen_h));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0),
+                    Some(screen_h),
+                );
                 buf.set_text(
                     &mut self.font_system,
                     summary,
@@ -772,7 +795,11 @@ impl Renderer {
 
                 // "DONE" label below.
                 let mut lbl = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
-                lbl.set_size(&mut self.font_system, Some(screen_w - label_x * 2.0), Some(20.0));
+                lbl.set_size(
+                    &mut self.font_system,
+                    Some(screen_w - label_x * 2.0),
+                    Some(20.0),
+                );
                 lbl.set_text(
                     &mut self.font_system,
                     if dimmed { "DONE" } else { "RESULT" },
@@ -916,12 +943,30 @@ fn pixel_rect_to_ndc(
     let y1 = 1.0 - ((py + ph) / screen_h) * 2.0;
 
     [
-        ColorVertex { position: [x0, y0], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x0, y1], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x1, y1], color },
-        ColorVertex { position: [x0, y1], color },
+        ColorVertex {
+            position: [x0, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
     ]
 }
 

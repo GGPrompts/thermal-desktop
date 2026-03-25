@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::selection::SelectionRange;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::RenderableCursor;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 use glyphon::{
@@ -19,12 +19,12 @@ use glyphon::{
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatus};
-use thermal_core::palette::{thermal_gradient, Color as PaletteColor};
+use thermal_core::palette::{Color as PaletteColor, thermal_gradient};
 use wgpu::util::DeviceExt;
 
 use tracing::debug;
 
-use crate::agent_timeline::{AgentTimeline, ToolCategory, TIMELINE_BAR_HEIGHT};
+use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT, ToolCategory};
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
@@ -579,7 +579,10 @@ impl ImageRenderPipeline {
             },
         );
 
-        debug!(id = image_id, width, height, "Uploaded image texture to GPU");
+        debug!(
+            id = image_id,
+            width, height, "Uploaded image texture to GPU"
+        );
     }
 
     /// Render all placed images from the ImageStore.
@@ -660,12 +663,30 @@ impl ImageRenderPipeline {
             let y1 = 1.0 - ((py + display_h) / sh) * 2.0;
 
             let vertices = [
-                ImageVertex { position: [x0, y0], uv: [0.0, 0.0] },
-                ImageVertex { position: [x1, y0], uv: [1.0, 0.0] },
-                ImageVertex { position: [x0, y1], uv: [0.0, 1.0] },
-                ImageVertex { position: [x1, y0], uv: [1.0, 0.0] },
-                ImageVertex { position: [x1, y1], uv: [1.0, 1.0] },
-                ImageVertex { position: [x0, y1], uv: [0.0, 1.0] },
+                ImageVertex {
+                    position: [x0, y0],
+                    uv: [0.0, 0.0],
+                },
+                ImageVertex {
+                    position: [x1, y0],
+                    uv: [1.0, 0.0],
+                },
+                ImageVertex {
+                    position: [x0, y1],
+                    uv: [0.0, 1.0],
+                },
+                ImageVertex {
+                    position: [x1, y0],
+                    uv: [1.0, 0.0],
+                },
+                ImageVertex {
+                    position: [x1, y1],
+                    uv: [1.0, 1.0],
+                },
+                ImageVertex {
+                    position: [x0, y1],
+                    uv: [0.0, 1.0],
+                },
             ];
 
             let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -815,8 +836,12 @@ impl GridRenderer {
         };
         let text_renderer =
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
-        let overlay_text_renderer =
-            TextRenderer::new(&mut overlay_atlas, device, wgpu::MultisampleState::default(), None);
+        let overlay_text_renderer = TextRenderer::new(
+            &mut overlay_atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
 
         // ── Measure cell dimensions from font metrics ────────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
@@ -1021,11 +1046,7 @@ impl GridRenderer {
     /// Uses `frame_count` with `IMAGE_CLEANUP_INTERVAL` following the same periodic
     /// pattern as the atlas trim in `render_from_cache`. Call once per frame after
     /// rendering; the interval check ensures actual work only runs every ~1000 frames.
-    pub fn periodic_image_cleanup(
-        &mut self,
-        image_store: &mut ImageStore,
-        max_visible_row: usize,
-    ) {
+    pub fn periodic_image_cleanup(&mut self, image_store: &mut ImageStore, max_visible_row: usize) {
         if self.frame_count % IMAGE_CLEANUP_INTERVAL == 0 {
             self.cleanup_image_cache(image_store);
             image_store.cleanup_scrolled(max_visible_row);
@@ -1093,7 +1114,11 @@ impl GridRenderer {
         // ── Badge text ──────────────────────────────────────────────────
         let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
         let mut buf = Buffer::new(&mut self.font_system, metrics);
-        buf.set_size(&mut self.font_system, Some(badge_w + 8.0), Some(badge_h + 4.0));
+        buf.set_size(
+            &mut self.font_system,
+            Some(badge_w + 8.0),
+            Some(badge_h + 4.0),
+        );
         let text_color = PaletteColor::BG.to_f32_array();
         buf.set_text(
             &mut self.font_system,
@@ -1105,7 +1130,13 @@ impl GridRenderer {
         );
         buf.shape_until_scroll(&mut self.font_system, false);
 
-        self.viewport.update(queue, Resolution { width: surface_width, height: surface_height });
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: surface_width,
+                height: surface_height,
+            },
+        );
 
         let text_areas = vec![TextArea {
             buffer: &buf,
@@ -1156,7 +1187,10 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
+            if let Err(e) =
+                self.overlay_text_renderer
+                    .render(&self.overlay_atlas, &self.viewport, &mut pass)
+            {
                 tracing::warn!("scroll indicator text render failed: {}", e);
             }
         }
@@ -1277,15 +1311,8 @@ impl GridRenderer {
                 let sep_y = self.padding_y + vis_start as f32 * self.cell_height;
                 let sep_w = surface_width as f32 - self.padding_x * 2.0;
                 let sep_color = [bar_color[0], bar_color[1], bar_color[2], SEP_ALPHA];
-                let sep_verts = pixel_rect_to_ndc(
-                    self.padding_x,
-                    sep_y,
-                    sep_w,
-                    SEP_HEIGHT,
-                    sw,
-                    sh,
-                    sep_color,
-                );
+                let sep_verts =
+                    pixel_rect_to_ndc(self.padding_x, sep_y, sep_w, SEP_HEIGHT, sw, sh, sep_color);
                 rect_vertices.extend_from_slice(&sep_verts);
             }
 
@@ -1416,9 +1443,9 @@ impl GridRenderer {
                     occlusion_query_set: None,
                 });
 
-                if let Err(e) =
-                    self.text_renderer
-                        .render(&self.atlas, &self.viewport, &mut pass)
+                if let Err(e) = self
+                    .text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
                 {
                     tracing::warn!("Command block label text render failed: {}", e);
                 }
@@ -1663,7 +1690,10 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
+            if let Err(e) =
+                self.overlay_text_renderer
+                    .render(&self.overlay_atlas, &self.viewport, &mut pass)
+            {
                 tracing::warn!("Claude HUD text render failed: {}", e);
             }
         }
@@ -1754,17 +1784,18 @@ impl GridRenderer {
         };
 
         let mut buf = Buffer::new(&mut self.font_system, metrics);
-        buf.set_size(
-            &mut self.font_system,
-            Some(sw),
-            Some(bar_h),
-        );
+        buf.set_size(&mut self.font_system, Some(sw), Some(bar_h));
         buf.set_text(
             &mut self.font_system,
             &text,
             Attrs::new()
                 .family(Family::Name(TERM_FONT_FAMILY))
-                .color(GlyphColor::rgba(text_color.r, text_color.g, text_color.b, 255)),
+                .color(GlyphColor::rgba(
+                    text_color.r,
+                    text_color.g,
+                    text_color.b,
+                    255,
+                )),
             Shaping::Basic,
         );
         buf.shape_until_scroll(&mut self.font_system, false);
@@ -1821,7 +1852,10 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.overlay_text_renderer.render(&self.overlay_atlas, &self.viewport, &mut pass) {
+            if let Err(e) =
+                self.overlay_text_renderer
+                    .render(&self.overlay_atlas, &self.viewport, &mut pass)
+            {
                 tracing::warn!("Context warning text render failed: {}", e);
             }
         }
@@ -1941,8 +1975,7 @@ impl GridRenderer {
             let entry_end = entry.end_time.unwrap_or(now);
 
             // Time from right edge (in seconds). Positive = further back in time.
-            let end_offset_secs =
-                right_time.duration_since(entry_end).as_secs_f64() + scroll_secs;
+            let end_offset_secs = right_time.duration_since(entry_end).as_secs_f64() + scroll_secs;
             let start_offset_secs =
                 right_time.duration_since(entry.start_time).as_secs_f64() + scroll_secs;
 
@@ -1985,8 +2018,7 @@ impl GridRenderer {
             }
 
             // Add segment rect vertices.
-            let verts =
-                pixel_rect_to_ndc(x0, content_y, segment_w, content_h, sw, sh, color_arr);
+            let verts = pixel_rect_to_ndc(x0, content_y, segment_w, content_h, sw, sh, color_arr);
             segment_verts.extend_from_slice(&verts);
 
             // Add thin separator between entries (1px wide line at the right edge).
@@ -2129,10 +2161,11 @@ impl GridRenderer {
                     occlusion_query_set: None,
                 });
 
-                if let Err(e) =
-                    self.overlay_text_renderer
-                        .render(&self.overlay_atlas, &self.viewport, &mut pass)
-                {
+                if let Err(e) = self.overlay_text_renderer.render(
+                    &self.overlay_atlas,
+                    &self.viewport,
+                    &mut pass,
+                ) {
                     tracing::warn!("Timeline text render failed: {}", e);
                 }
             }
@@ -2306,7 +2339,10 @@ impl GridRenderer {
                     }
                     CursorShape::Underline => {
                         let h = 2.0;
-                        bg_rects.push(([cx, cy + self.cell_height - h, self.cell_width, h], cursor_color));
+                        bg_rects.push((
+                            [cx, cy + self.cell_height - h, self.cell_width, h],
+                            cursor_color,
+                        ));
                     }
                     CursorShape::Beam => {
                         bg_rects.push(([cx, cy, 2.0, self.cell_height], cursor_color));
@@ -2314,9 +2350,15 @@ impl GridRenderer {
                     CursorShape::HollowBlock => {
                         let t = 1.0;
                         bg_rects.push(([cx, cy, self.cell_width, t], cursor_color));
-                        bg_rects.push(([cx, cy + self.cell_height - t, self.cell_width, t], cursor_color));
+                        bg_rects.push((
+                            [cx, cy + self.cell_height - t, self.cell_width, t],
+                            cursor_color,
+                        ));
                         bg_rects.push(([cx, cy, t, self.cell_height], cursor_color));
-                        bg_rects.push(([cx + self.cell_width - t, cy, t, self.cell_height], cursor_color));
+                        bg_rects.push((
+                            [cx + self.cell_width - t, cy, t, self.cell_height],
+                            cursor_color,
+                        ));
                     }
                     CursorShape::Hidden => {}
                 }
@@ -2496,7 +2538,13 @@ impl GridRenderer {
         self.last_cursor_pos = Some((cursor_row, cursor_col));
 
         // ── Update viewport ──────────────────────────────────────────────
-        self.viewport.update(queue, Resolution { width: surface_width, height: surface_height });
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: surface_width,
+                height: surface_height,
+            },
+        );
 
         // ── Prepare glyphon text from persistent cell_buffers ────────────
         let pad_x = self.padding_x;
@@ -2508,28 +2556,30 @@ impl GridRenderer {
             .iter()
             .enumerate()
             .flat_map(|(row_idx, row)| {
-                row.iter().enumerate().filter_map(move |(col_idx, opt_buf)| {
-                    let buf = opt_buf.as_ref()?;
-                    Some(TextArea {
-                        buffer: buf,
-                        left: pad_x + col_idx as f32 * cw,
-                        top: pad_y + row_idx as f32 * ch,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: 0,
-                            right: surface_width as i32,
-                            bottom: surface_height as i32,
-                        },
-                        default_color: GlyphColor::rgba(
-                            PaletteColor::TEXT.r,
-                            PaletteColor::TEXT.g,
-                            PaletteColor::TEXT.b,
-                            255,
-                        ),
-                        custom_glyphs: &[],
+                row.iter()
+                    .enumerate()
+                    .filter_map(move |(col_idx, opt_buf)| {
+                        let buf = opt_buf.as_ref()?;
+                        Some(TextArea {
+                            buffer: buf,
+                            left: pad_x + col_idx as f32 * cw,
+                            top: pad_y + row_idx as f32 * ch,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: 0,
+                                right: surface_width as i32,
+                                bottom: surface_height as i32,
+                            },
+                            default_color: GlyphColor::rgba(
+                                PaletteColor::TEXT.r,
+                                PaletteColor::TEXT.g,
+                                PaletteColor::TEXT.b,
+                                255,
+                            ),
+                            custom_glyphs: &[],
+                        })
                     })
-                })
             })
             .collect();
 
@@ -2589,7 +2639,10 @@ impl GridRenderer {
                 occlusion_query_set: None,
             });
 
-            if let Err(e) = self.text_renderer.render(&self.atlas, &self.viewport, &mut pass) {
+            if let Err(e) = self
+                .text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+            {
                 tracing::warn!("glyphon render failed: {}", e);
             }
         }
@@ -2606,7 +2659,8 @@ impl GridRenderer {
 
         // Update rolling average (circular buffer of 100 samples).
         let idx = self.frame_time_idx % self.frame_times_us.len();
-        self.frame_time_sum = self.frame_time_sum
+        self.frame_time_sum = self
+            .frame_time_sum
             .wrapping_sub(self.frame_times_us[idx])
             .wrapping_add(elapsed_us);
         self.frame_times_us[idx] = elapsed_us;
@@ -2696,7 +2750,9 @@ fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::BrightBlue => PaletteColor::ACCENT_COOL.to_f32_array(),
         NamedColor::BrightMagenta => PaletteColor::ACCENT_WARM.to_f32_array(),
         NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),
-        NamedColor::BrightWhite | NamedColor::BrightForeground => PaletteColor::WHITE_HOT.to_f32_array(),
+        NamedColor::BrightWhite | NamedColor::BrightForeground => {
+            PaletteColor::WHITE_HOT.to_f32_array()
+        }
 
         NamedColor::DimBlack => TERM_BG,
         NamedColor::DimRed => PaletteColor::SEARING.to_f32_array(),
@@ -2823,12 +2879,30 @@ fn pixel_rect_to_ndc(
     let y1 = 1.0 - ((py + ph) / screen_h) * 2.0;
 
     [
-        ColorVertex { position: [x0, y0], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x0, y1], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x1, y1], color },
-        ColorVertex { position: [x0, y1], color },
+        ColorVertex {
+            position: [x0, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
     ]
 }
 

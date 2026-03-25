@@ -12,7 +12,7 @@
 //! `BackendPreference` (auto, kitty-only, daemon-only) and returns the first
 //! match.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::client::DaemonClient;
 use crate::kitty::KittyController;
@@ -113,9 +113,7 @@ pub async fn detect_backend(preference: BackendPreference) -> Result<Backend> {
 
         BackendPreference::Daemon => match DaemonClient::connect().await? {
             Some(client) => Ok(Backend::Daemon(client)),
-            None => bail!(
-                "Daemon not available. Start it with `thc daemon`."
-            ),
+            None => bail!("Daemon not available. Start it with `thc daemon`."),
         },
     }
 }
@@ -128,21 +126,42 @@ mod tests {
 
     #[test]
     fn parse_backend_preference_auto() {
-        assert_eq!("auto".parse::<BackendPreference>().unwrap(), BackendPreference::Auto);
-        assert_eq!("Auto".parse::<BackendPreference>().unwrap(), BackendPreference::Auto);
-        assert_eq!("AUTO".parse::<BackendPreference>().unwrap(), BackendPreference::Auto);
+        assert_eq!(
+            "auto".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Auto
+        );
+        assert_eq!(
+            "Auto".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Auto
+        );
+        assert_eq!(
+            "AUTO".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Auto
+        );
     }
 
     #[test]
     fn parse_backend_preference_kitty() {
-        assert_eq!("kitty".parse::<BackendPreference>().unwrap(), BackendPreference::Kitty);
-        assert_eq!("Kitty".parse::<BackendPreference>().unwrap(), BackendPreference::Kitty);
+        assert_eq!(
+            "kitty".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Kitty
+        );
+        assert_eq!(
+            "Kitty".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Kitty
+        );
     }
 
     #[test]
     fn parse_backend_preference_daemon() {
-        assert_eq!("daemon".parse::<BackendPreference>().unwrap(), BackendPreference::Daemon);
-        assert_eq!("Daemon".parse::<BackendPreference>().unwrap(), BackendPreference::Daemon);
+        assert_eq!(
+            "daemon".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Daemon
+        );
+        assert_eq!(
+            "Daemon".parse::<BackendPreference>().unwrap(),
+            BackendPreference::Daemon
+        );
     }
 
     #[test]

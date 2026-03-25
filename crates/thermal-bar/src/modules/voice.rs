@@ -22,7 +22,7 @@ use crate::layout::{ModuleOutput, Zone};
 const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
 
 /// Unicode mic symbols.
-const MIC_MUTED: &str = "\u{1F507}";    // speaker off (muted)
+const MIC_MUTED: &str = "\u{1F507}"; // speaker off (muted)
 const MIC_LISTENING: &str = "\u{1F3A4}"; // microphone
 const MIC_PROCESSING: &str = "\u{1F525}"; // fire (processing)
 
@@ -122,21 +122,9 @@ impl VoiceModule {
         let state = refresh_cache();
 
         let (icon, label, color) = match state.state {
-            VoiceState::Muted => (
-                MIC_MUTED,
-                "muted",
-                ThermalPalette::ACCENT_COLD,
-            ),
-            VoiceState::Listening => (
-                MIC_LISTENING,
-                "listening",
-                ThermalPalette::WARM,
-            ),
-            VoiceState::Processing => (
-                MIC_PROCESSING,
-                "processing",
-                ThermalPalette::ACCENT_WARM,
-            ),
+            VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
+            VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
+            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
 
         // Use the daemon's label if provided, otherwise the default.
@@ -242,21 +230,34 @@ mod tests {
 
     #[test]
     fn muted_output_contains_muted_label() {
-        let f = VoiceStateFile { state: VoiceState::Muted, label: None };
+        let f = VoiceStateFile {
+            state: VoiceState::Muted,
+            label: None,
+        };
         let m = render_from_state(f);
-        assert!(m.text.contains("muted"), "text='{}' should contain 'muted'", m.text);
+        assert!(
+            m.text.contains("muted"),
+            "text='{}' should contain 'muted'",
+            m.text
+        );
     }
 
     #[test]
     fn listening_output_contains_listening_label() {
-        let f = VoiceStateFile { state: VoiceState::Listening, label: None };
+        let f = VoiceStateFile {
+            state: VoiceState::Listening,
+            label: None,
+        };
         let m = render_from_state(f);
         assert!(m.text.contains("listening"), "text='{}'", m.text);
     }
 
     #[test]
     fn processing_output_contains_processing_label() {
-        let f = VoiceStateFile { state: VoiceState::Processing, label: None };
+        let f = VoiceStateFile {
+            state: VoiceState::Processing,
+            label: None,
+        };
         let m = render_from_state(f);
         assert!(m.text.contains("processing"), "text='{}'", m.text);
     }
@@ -268,8 +269,15 @@ mod tests {
             label: Some("dictating".to_owned()),
         };
         let m = render_from_state(f);
-        assert!(m.text.contains("dictating"), "text='{}' should use custom label", m.text);
-        assert!(!m.text.contains("listening"), "default label should be replaced");
+        assert!(
+            m.text.contains("dictating"),
+            "text='{}' should use custom label",
+            m.text
+        );
+        assert!(
+            !m.text.contains("listening"),
+            "default label should be replaced"
+        );
     }
 
     #[test]
@@ -281,7 +289,11 @@ mod tests {
 
     #[test]
     fn output_color_is_valid_rgba() {
-        for state in [VoiceState::Muted, VoiceState::Listening, VoiceState::Processing] {
+        for state in [
+            VoiceState::Muted,
+            VoiceState::Listening,
+            VoiceState::Processing,
+        ] {
             let f = VoiceStateFile { state, label: None };
             let m = render_from_state(f);
             for &ch in &m.color {
@@ -292,10 +304,18 @@ mod tests {
 
     #[test]
     fn muted_and_listening_have_different_colors() {
-        let muted_m = render_from_state(VoiceStateFile { state: VoiceState::Muted, label: None });
-        let listening_m = render_from_state(VoiceStateFile { state: VoiceState::Listening, label: None });
-        assert_ne!(muted_m.color, listening_m.color,
-            "muted and listening should have distinct colors");
+        let muted_m = render_from_state(VoiceStateFile {
+            state: VoiceState::Muted,
+            label: None,
+        });
+        let listening_m = render_from_state(VoiceStateFile {
+            state: VoiceState::Listening,
+            label: None,
+        });
+        assert_ne!(
+            muted_m.color, listening_m.color,
+            "muted and listening should have distinct colors"
+        );
     }
 
     // -----------------------------------------------------------------------

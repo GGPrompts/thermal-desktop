@@ -6,6 +6,10 @@ use tokio::process::Command;
 
 use crate::mcp::{ContentBlock, ToolResult};
 
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
 /// Launch an arbitrary application, optionally on a specific workspace.
 ///
 /// Arguments:
@@ -66,7 +70,7 @@ pub async fn open_browser(args: Value) -> Result<ToolResult> {
     let mut exec_cmd = "firefox".to_string();
 
     if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-        exec_cmd = format!("firefox {url}");
+        exec_cmd = format!("firefox -- {}", shell_quote(url));
     }
 
     let output = Command::new("hyprctl")
@@ -99,7 +103,7 @@ pub async fn open_files(args: Value) -> Result<ToolResult> {
     let mut exec_cmd = "thunar".to_string();
 
     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-        exec_cmd = format!("thunar {path}");
+        exec_cmd = format!("thunar {}", shell_quote(path));
     }
 
     let output = Command::new("hyprctl")
@@ -132,7 +136,7 @@ pub async fn open_terminal(args: Value) -> Result<ToolResult> {
     let mut exec_cmd = "kitty".to_string();
 
     if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
-        exec_cmd = format!("kitty --directory {cwd}");
+        exec_cmd = format!("kitty --directory {}", shell_quote(cwd));
     }
 
     let output = Command::new("hyprctl")
@@ -155,4 +159,24 @@ pub async fn open_terminal(args: Value) -> Result<ToolResult> {
     };
 
     Ok(ToolResult::success(vec![ContentBlock::text(msg)]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn shell_quote_wraps_plain_text() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn shell_quote_preserves_shell_metacharacters_as_data() {
+        assert_eq!(shell_quote("x; rm -rf /"), "'x; rm -rf /'");
+    }
 }

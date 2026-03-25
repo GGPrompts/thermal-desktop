@@ -56,10 +56,7 @@ pub fn user_config_path() -> String {
 /// 1. ./config/profiles.toml (dev)
 /// 2. ~/.config/thermal/profiles.toml (user)
 pub fn load_profiles() -> (Option<String>, Vec<Profile>) {
-    let candidates = [
-        "config/profiles.toml".to_string(),
-        user_config_path(),
-    ];
+    let candidates = ["config/profiles.toml".to_string(), user_config_path()];
 
     for path in &candidates {
         if let Ok(content) = std::fs::read_to_string(path) {
@@ -104,8 +101,7 @@ pub fn save_profiles(default_cwd: Option<&str>, profiles: &[Profile]) -> Result<
             .map_err(|e| format!("Failed to create config directory: {}", e))?;
     }
 
-    std::fs::write(&path, toml_str)
-        .map_err(|e| format!("Failed to write {}: {}", path, e))?;
+    std::fs::write(&path, toml_str).map_err(|e| format!("Failed to write {}: {}", path, e))?;
 
     Ok(())
 }
@@ -118,14 +114,18 @@ mod tests {
 
     #[test]
     fn expand_tilde_leaves_absolute_path_unchanged() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let result = expand_tilde("/absolute/path");
         assert_eq!(result, "/absolute/path");
     }
 
     #[test]
     fn expand_tilde_expands_home_prefix() {
-        unsafe { std::env::set_var("HOME", "/home/testuser"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/testuser");
+        }
         let result = expand_tilde("~/projects/foo");
         assert_eq!(result, "/home/testuser/projects/foo");
     }
@@ -150,7 +150,9 @@ mod tests {
 
     #[test]
     fn expand_tilde_deep_path() {
-        unsafe { std::env::set_var("HOME", "/home/builder"); }
+        unsafe {
+            std::env::set_var("HOME", "/home/builder");
+        }
         let result = expand_tilde("~/a/b/c/d.toml");
         assert_eq!(result, "/home/builder/a/b/c/d.toml");
     }
@@ -256,16 +258,14 @@ cwd = "~/code"
 
     #[test]
     fn round_trip_serialize_deserialize() {
-        let profiles = vec![
-            Profile {
-                name: "Test".into(),
-                command: Some("claude".into()),
-                cwd: Some("~/projects".into()),
-                icon: Some("\u{1f525}".into()),
-                count: 2,
-                git_worktree: true,
-            },
-        ];
+        let profiles = vec![Profile {
+            name: "Test".into(),
+            command: Some("claude".into()),
+            cwd: Some("~/projects".into()),
+            icon: Some("\u{1f525}".into()),
+            count: 2,
+            git_worktree: true,
+        }];
         let config = ProfileConfig {
             default_cwd: Some("/home/user".into()),
             profiles,

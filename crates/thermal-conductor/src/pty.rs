@@ -7,14 +7,14 @@
 
 use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use nix::libc;
 use nix::pty::openpty;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{self, ForkResult, Pid};
-use nix::libc;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
@@ -59,8 +59,7 @@ impl PtySession {
         let slave_fd = pty.slave;
 
         // Prepare the shell command for execvp.
-        let shell_cstr =
-            CString::new(shell).context("Invalid shell path (contains null byte)")?;
+        let shell_cstr = CString::new(shell).context("Invalid shell path (contains null byte)")?;
 
         // Fork the child process.
         //
@@ -184,8 +183,7 @@ impl PtySession {
                 }
                 Err(e) => {
                     // EIO is expected when the child exits (slave side closes).
-                    if e.kind() == std::io::ErrorKind::Other
-                        || e.raw_os_error() == Some(libc::EIO)
+                    if e.kind() == std::io::ErrorKind::Other || e.raw_os_error() == Some(libc::EIO)
                     {
                         info!("PTY reader: child exited (EIO)");
                     } else {
@@ -230,8 +228,7 @@ impl PtySession {
         unsafe {
             let ret = libc::ioctl(self.master_fd.as_raw_fd(), libc::TIOCSWINSZ, &ws);
             if ret == -1 {
-                return Err(std::io::Error::last_os_error())
-                    .context("TIOCSWINSZ ioctl failed");
+                return Err(std::io::Error::last_os_error()).context("TIOCSWINSZ ioctl failed");
             }
         }
 
@@ -267,6 +264,9 @@ impl Drop for PtySession {
         // The child may already be dead, so ignore errors.
         let _ = signal::kill(self.child_pid, Signal::SIGHUP);
 
-        info!(pid = self.child_pid.as_raw(), "PTY session dropped, sent SIGHUP to child");
+        info!(
+            pid = self.child_pid.as_raw(),
+            "PTY session dropped, sent SIGHUP to child"
+        );
     }
 }

@@ -99,11 +99,7 @@ pub async fn call_haiku(
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,10 +165,7 @@ mod tests {
     #[test]
     fn api_body_contains_max_tokens() {
         let body = build_api_body(&[], &[]);
-        assert_eq!(
-            body.get("max_tokens").and_then(|v| v.as_u64()),
-            Some(1024)
-        );
+        assert_eq!(body.get("max_tokens").and_then(|v| v.as_u64()), Some(1024));
     }
 
     #[test]
@@ -215,16 +208,11 @@ mod tests {
 
     #[test]
     fn api_body_includes_provided_messages() {
-        let messages = vec![
-            json!({"role": "user", "content": "open firefox"}),
-        ];
+        let messages = vec![json!({"role": "user", "content": "open firefox"})];
         let body = build_api_body(&[], &messages);
         let msgs = body.get("messages").and_then(|v| v.as_array()).unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(
-            msgs[0].get("role").and_then(|v| v.as_str()),
-            Some("user")
-        );
+        assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("user"));
         assert_eq!(
             msgs[0].get("content").and_then(|v| v.as_str()),
             Some("open firefox")

@@ -8,17 +8,14 @@ use std::process::Command;
 use std::time::Instant;
 
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
-    Frame,
 };
 
-use thermal_core::{
-    palette::ThermalPalette,
-    ClaudeSessionState, ClaudeStatePoller, ClaudeStatus,
-};
+use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
 
 use crate::agent_timeline::{AgentTimeline, ToolCategory};
 
@@ -120,7 +117,10 @@ fn query_hyprland_workspaces() -> HashMap<u32, i64> {
         Err(_) => return HashMap::new(),
     };
 
-    clients.into_iter().map(|c| (c.pid, c.workspace.id)).collect()
+    clients
+        .into_iter()
+        .map(|c| (c.pid, c.workspace.id))
+        .collect()
 }
 
 /// Walk up the process tree from `pid` until we find a PID in `window_pids`.
@@ -398,8 +398,7 @@ impl SessionsPage {
         // Cache context_percent
         for s in &mut self.sessions {
             if let Some(pct) = s.context_percent {
-                self.cached_context_pct
-                    .insert(s.session_id.clone(), pct);
+                self.cached_context_pct.insert(s.session_id.clone(), pct);
             } else if let Some(&cached) = self.cached_context_pct.get(&s.session_id) {
                 s.context_percent = Some(cached);
             }
@@ -474,8 +473,7 @@ impl SessionsPage {
             self.table_state.select(None);
         } else if let Some(i) = self.table_state.selected() {
             if i >= self.display_rows.len() {
-                self.table_state
-                    .select(Some(self.display_rows.len() - 1));
+                self.table_state.select(Some(self.display_rows.len() - 1));
             }
         }
     }
@@ -611,10 +609,7 @@ impl SessionsPage {
                 None => ("\u{2500}", pal(ThermalPalette::FREEZING)),
             };
 
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(color),
-            ));
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
 
         Line::from(spans)
@@ -657,17 +652,14 @@ impl TuiPage for SessionsPage {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),   // table
+                Constraint::Min(5),    // table
                 Constraint::Length(1), // timeline bar for selected session
                 Constraint::Length(1), // footer
             ])
             .split(area);
 
         // Background
-        f.render_widget(
-            Block::default().style(Style::default().bg(BG)),
-            area,
-        );
+        f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
         // -- Session table header info --
         let parent_count = self.display_rows.iter().filter(|r| !r.is_subagent).count();
@@ -686,16 +678,17 @@ impl TuiPage for SessionsPage {
             format!(" Sessions [{} active / {}] ", active, parent_count)
         };
 
-        let header_cells =
-            ["Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated"]
-                .iter()
-                .map(|h| {
-                    Cell::from(*h).style(
-                        Style::default()
-                            .fg(ACCENT_COLD)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                });
+        let header_cells = [
+            "Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
+        ]
+        .iter()
+        .map(|h| {
+            Cell::from(*h).style(
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
         let header_row = Row::new(header_cells).height(1);
 
         let rows: Vec<Row> = self
@@ -713,16 +706,20 @@ impl TuiPage for SessionsPage {
                     None => ("-".into(), TEXT_MUTED),
                 };
 
-                let project = s.working_dir.as_deref()
+                let project = s
+                    .working_dir
+                    .as_deref()
                     .and_then(|d| std::path::Path::new(d).file_name())
                     .and_then(|n| n.to_str())
                     .unwrap_or("-")
                     .to_string();
 
-                let ws_str = s.workspace
+                let ws_str = s
+                    .workspace
                     .map(|ws| ws.to_string())
                     .or_else(|| {
-                        s.working_dir.as_deref()
+                        s.working_dir
+                            .as_deref()
                             .and_then(|wd| self.workspace_map.get(wd))
                             .map(|ws| ws.to_string())
                     })
@@ -765,8 +762,7 @@ impl TuiPage for SessionsPage {
                     };
 
                     Row::new(vec![
-                        Cell::from(short_id.to_string())
-                            .style(Style::default().fg(TEXT)),
+                        Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
                         Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
@@ -783,7 +779,7 @@ impl TuiPage for SessionsPage {
             rows,
             [
                 Constraint::Length(14),
-                Constraint::Length(5),  // Agent (CLU/COX)
+                Constraint::Length(5), // Agent (CLU/COX)
                 Constraint::Length(10),
                 Constraint::Length(28),
                 Constraint::Length(6),
@@ -800,11 +796,7 @@ impl TuiPage for SessionsPage {
                 .border_style(Style::default().fg(COLD))
                 .style(Style::default().bg(BG)),
         )
-        .row_highlight_style(
-            Style::default()
-                .bg(BG_SURFACE)
-                .add_modifier(Modifier::BOLD),
-        );
+        .row_highlight_style(Style::default().bg(BG_SURFACE).add_modifier(Modifier::BOLD));
 
         f.render_stateful_widget(table, chunks[0], &mut self.table_state);
 
@@ -815,10 +807,8 @@ impl TuiPage for SessionsPage {
             let timeline_line = if let Some(idx) = self.table_state.selected() {
                 if let Some(row) = self.display_rows.get(idx) {
                     let sid = &row.session.session_id;
-                    let label_span = Span::styled(
-                        " \u{2502} ",
-                        Style::default().fg(pal(ThermalPalette::COLD)),
-                    );
+                    let label_span =
+                        Span::styled(" \u{2502} ", Style::default().fg(pal(ThermalPalette::COLD)));
                     let bar = self.build_timeline_line(sid, bar_width.saturating_sub(3));
                     let mut spans = vec![label_span];
                     spans.extend(bar.spans);
@@ -835,8 +825,7 @@ impl TuiPage for SessionsPage {
                     Style::default().fg(TEXT_MUTED),
                 ))
             };
-            let tl_widget = Paragraph::new(timeline_line)
-                .style(Style::default().bg(BG));
+            let tl_widget = Paragraph::new(timeline_line).style(Style::default().bg(BG));
             f.render_widget(tl_widget, tl_area);
         }
 
@@ -880,7 +869,11 @@ impl TuiPage for SessionsPage {
         }
     }
 
-    fn handle_key(&mut self, key: crossterm::event::KeyEvent, poller: &mut ClaudeStatePoller) -> bool {
+    fn handle_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        poller: &mut ClaudeStatePoller,
+    ) -> bool {
         use crossterm::event::KeyCode;
 
         if self.history_popup.is_some() {
@@ -1044,10 +1037,16 @@ mod tests {
         ];
         let rows = build_display_order(&sessions);
         // child-a is NOT the last child
-        let child_a = rows.iter().find(|r| r.session.session_id == "child-a").unwrap();
+        let child_a = rows
+            .iter()
+            .find(|r| r.session.session_id == "child-a")
+            .unwrap();
         assert!(!child_a.is_last_child);
         // child-b IS the last child (alphabetically last)
-        let child_b = rows.iter().find(|r| r.session.session_id == "child-b").unwrap();
+        let child_b = rows
+            .iter()
+            .find(|r| r.session.session_id == "child-b")
+            .unwrap();
         assert!(child_b.is_last_child);
     }
 
@@ -1058,7 +1057,10 @@ mod tests {
             make_session("child-only", Some("parent")),
         ];
         let rows = build_display_order(&sessions);
-        let child = rows.iter().find(|r| r.session.session_id == "child-only").unwrap();
+        let child = rows
+            .iter()
+            .find(|r| r.session.session_id == "child-only")
+            .unwrap();
         assert!(child.is_last_child);
     }
 
@@ -1073,9 +1075,7 @@ mod tests {
     fn display_order_orphan_subagent_appended_as_subagent() {
         // A session with a parent_session_id that doesn't correspond to any
         // known parent goes to the orphan section.
-        let sessions = vec![
-            make_session("orphan", Some("missing-parent")),
-        ];
+        let sessions = vec![make_session("orphan", Some("missing-parent"))];
         let rows = build_display_order(&sessions);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session.session_id, "orphan");
@@ -1284,8 +1284,14 @@ mod tests {
         // command > 20 chars → truncated with "..."
         assert!(result.starts_with("🔺 Bash: "));
         let detail = result.trim_start_matches("🔺 Bash: ");
-        assert!(detail.ends_with("..."), "long command should be truncated: {detail}");
-        assert!(detail.chars().count() <= 23, "truncated detail should be at most 23 chars: {detail}");
+        assert!(
+            detail.ends_with("..."),
+            "long command should be truncated: {detail}"
+        );
+        assert!(
+            detail.chars().count() <= 23,
+            "truncated detail should be at most 23 chars: {detail}"
+        );
     }
 
     #[test]
@@ -1315,7 +1321,10 @@ mod tests {
             ..ClaudeSessionState::default()
         };
         let result = format_activity(&s);
-        assert!(result.contains("🤖×3"), "should contain subagent indicator: {result}");
+        assert!(
+            result.contains("🤖×3"),
+            "should contain subagent indicator: {result}"
+        );
     }
 
     #[test]
@@ -1327,7 +1336,10 @@ mod tests {
             ..ClaudeSessionState::default()
         };
         let result = format_activity(&s);
-        assert!(!result.contains('×'), "zero subagents should not add indicator: {result}");
+        assert!(
+            !result.contains('×'),
+            "zero subagents should not add indicator: {result}"
+        );
     }
 
     #[test]
@@ -1339,7 +1351,10 @@ mod tests {
             ..ClaudeSessionState::default()
         };
         let result = format_activity(&s);
-        assert!(!result.contains('×'), "None subagent_count should not add indicator: {result}");
+        assert!(
+            !result.contains('×'),
+            "None subagent_count should not add indicator: {result}"
+        );
     }
 
     #[test]
@@ -1367,7 +1382,9 @@ mod tests {
             current_tool: Some("MyTool".into()),
             details: Some(thermal_core::ToolDetails {
                 args: Some(thermal_core::ToolArgs {
-                    description: Some("A very long description that exceeds the twenty char limit".into()),
+                    description: Some(
+                        "A very long description that exceeds the twenty char limit".into(),
+                    ),
                     ..thermal_core::ToolArgs::default()
                 }),
                 ..thermal_core::ToolDetails::default()
@@ -1376,7 +1393,10 @@ mod tests {
         };
         let result = format_activity(&s);
         // unknown tool: no emoji, so format is "label: detail" but label == tool name
-        assert!(result.contains("MyTool"), "should contain tool name: {result}");
+        assert!(
+            result.contains("MyTool"),
+            "should contain tool name: {result}"
+        );
     }
 
     // ── relative_time / parse_secs_ago ────────────────────────────────────────
@@ -1458,8 +1478,10 @@ mod tests {
         // Append fractional seconds to simulate real Claude timestamps.
         let with_ms = iso.replace('Z', ".999Z");
         let result = relative_time(&with_ms);
-        assert!(result.ends_with('m') || result.ends_with('s'),
-            "should parse ms-bearing timestamp: {result}");
+        assert!(
+            result.ends_with('m') || result.ends_with('s'),
+            "should parse ms-bearing timestamp: {result}"
+        );
     }
 
     #[test]
@@ -1468,7 +1490,10 @@ mod tests {
         let iso = iso_ago(45);
         let with_offset = iso.replace('Z', "+00:00");
         let result = relative_time(&with_offset);
-        assert!(result.ends_with('s'), "should handle +offset timestamps: {result}");
+        assert!(
+            result.ends_with('s'),
+            "should handle +offset timestamps: {result}"
+        );
     }
 
     // ── SessionsPage: navigation ──────────────────────────────────────────────
@@ -1491,10 +1516,7 @@ mod tests {
 
     #[test]
     fn nav_down_wraps_to_zero_at_end() {
-        let mut page = page_with_sessions(vec![
-            make_session("a", None),
-            make_session("b", None),
-        ]);
+        let mut page = page_with_sessions(vec![make_session("a", None), make_session("b", None)]);
         page.table_state.select(Some(1)); // last row
         page.nav_down();
         assert_eq!(page.table_state.selected(), Some(0));
@@ -1502,10 +1524,7 @@ mod tests {
 
     #[test]
     fn nav_up_wraps_to_last_at_start() {
-        let mut page = page_with_sessions(vec![
-            make_session("a", None),
-            make_session("b", None),
-        ]);
+        let mut page = page_with_sessions(vec![make_session("a", None), make_session("b", None)]);
         page.table_state.select(Some(0)); // first row
         page.nav_up();
         assert_eq!(page.table_state.selected(), Some(1));
@@ -1645,10 +1664,7 @@ impl SessionsPage {
                             format!("{}h ago", ago / 3600)
                         };
                         Line::from(vec![
-                            Span::styled(
-                                format!("{:>7}  ", rel),
-                                Style::default().fg(TEXT_MUTED),
-                            ),
+                            Span::styled(format!("{:>7}  ", rel), Style::default().fg(TEXT_MUTED)),
                             Span::styled(&e.text, Style::default().fg(TEXT_BRIGHT)),
                         ])
                     })
@@ -1657,8 +1673,7 @@ impl SessionsPage {
             .unwrap_or_default();
 
         let content = if lines.is_empty() {
-            Paragraph::new("  No history yet.")
-                .style(Style::default().fg(TEXT_MUTED).bg(BG))
+            Paragraph::new("  No history yet.").style(Style::default().fg(TEXT_MUTED).bg(BG))
         } else {
             Paragraph::new(lines)
                 .style(Style::default().bg(BG))

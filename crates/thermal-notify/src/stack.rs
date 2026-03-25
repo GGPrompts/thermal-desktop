@@ -10,10 +10,7 @@ pub struct ActiveNotif {
 
 impl ActiveNotif {
     pub fn alpha(&self) -> f32 {
-        self.timer
-            .as_ref()
-            .map(|t| t.alpha())
-            .unwrap_or(1.0)
+        self.timer.as_ref().map(|t| t.alpha()).unwrap_or(1.0)
     }
 }
 
@@ -87,9 +84,8 @@ impl NotificationStack {
 
         // Remove expired entries and compact targets
         let step = self.card_height + self.gap;
-        self.slots.retain(|e| {
-            e.timer.as_ref().map(|t| !t.is_expired()).unwrap_or(true)
-        });
+        self.slots
+            .retain(|e| e.timer.as_ref().map(|t| !t.is_expired()).unwrap_or(true));
         for (i, entry) in self.slots.iter_mut().enumerate() {
             entry.target_y = i as f32 * step;
         }
@@ -224,7 +220,10 @@ mod tests {
         // timeout 0 → DismissTimer::new returns None → persistent notification
         let mut stack = NotificationStack::new();
         stack.push(make_notif(1, Urgency::Critical, 0));
-        assert!(stack.slots[0].timer.is_none(), "critical/persistent should have no timer");
+        assert!(
+            stack.slots[0].timer.is_none(),
+            "critical/persistent should have no timer"
+        );
     }
 
     // ── NotificationStack::remove_id ─────────────────────────────────────────
@@ -315,7 +314,9 @@ mod tests {
         let limit = std::time::Instant::now() + std::time::Duration::from_millis(500);
         loop {
             stack.tick(0.016); // simulate ~60 fps tick
-            if stack.is_empty() { break; }
+            if stack.is_empty() {
+                break;
+            }
             if std::time::Instant::now() > limit {
                 panic!("notification never expired from stack");
             }
@@ -351,7 +352,11 @@ mod tests {
         for _ in 0..10 {
             stack.tick(0.016);
         }
-        assert_eq!(stack.len(), 1, "persistent notification should not be removed by tick");
+        assert_eq!(
+            stack.len(),
+            1,
+            "persistent notification should not be removed by tick"
+        );
     }
 
     // ── NotificationStack::dismiss_front ─────────────────────────────────────
@@ -378,7 +383,10 @@ mod tests {
         // timeout 0 → None timer → force-remove on dismiss
         stack.push(make_notif(1, Urgency::Critical, 0));
         stack.dismiss_front();
-        assert!(stack.is_empty(), "persistent notification should be removed immediately on dismiss");
+        assert!(
+            stack.is_empty(),
+            "persistent notification should be removed immediately on dismiss"
+        );
     }
 
     #[test]

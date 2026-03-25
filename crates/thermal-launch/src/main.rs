@@ -13,22 +13,22 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
+        Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
-        Capability, SeatHandler, SeatState,
     },
     shell::{
+        WaylandSurface,
         wlr_layer::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
 };
 use wayland_client::{
+    Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
-    Connection, Proxy, QueueHandle,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -81,8 +81,7 @@ fn main() {
     let qh = event_queue.handle();
 
     // Bind the compositor
-    let compositor =
-        CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
+    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
 
     // Bind the wlr-layer-shell
     let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr-layer-shell is not available");
@@ -115,8 +114,7 @@ fn main() {
     });
 
     let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-        NonNull::new(conn.backend().display_ptr() as *mut _)
-            .expect("Wayland display ptr is null"),
+        NonNull::new(conn.backend().display_ptr() as *mut _).expect("Wayland display ptr is null"),
     ));
     let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
         NonNull::new(layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>())
@@ -162,7 +160,13 @@ fn main() {
     let swash_cache = SwashCache::new();
     let glyphon_cache = Cache::new(&device);
     let mut viewport = Viewport::new(&device, &glyphon_cache);
-    viewport.update(&queue, Resolution { width: WIDTH, height: HEIGHT });
+    viewport.update(
+        &queue,
+        Resolution {
+            width: WIDTH,
+            height: HEIGHT,
+        },
+    );
     let mut atlas = TextAtlas::new(&device, &queue, &glyphon_cache, surface_format);
     let text_renderer =
         TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
@@ -300,12 +304,11 @@ impl ReticlePipeline {
             source: wgpu::ShaderSource::Wgsl(RETICLE_SHADER.into()),
         });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("reticle layout"),
-                bind_group_layouts: &[],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("reticle layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("reticle pipeline"),
@@ -344,7 +347,10 @@ impl ReticlePipeline {
             mapped_at_creation: false,
         });
 
-        Self { pipeline, vertex_buffer }
+        Self {
+            pipeline,
+            vertex_buffer,
+        }
     }
 
     /// Build vertices for 4 L-bracket corners around a row bounding box.
@@ -392,25 +398,45 @@ impl ReticlePipeline {
 
 /// Convert a pixel-space rect to 6 NDC vertices (2 triangles = 1 quad).
 fn quad_verts(
-    px0: f32, py0: f32, px1: f32, py1: f32,
-    w: f32, h: f32,
+    px0: f32,
+    py0: f32,
+    px1: f32,
+    py1: f32,
+    w: f32,
+    h: f32,
     color: [f32; 4],
 ) -> [ReticleVertex; 6] {
-    let to_ndc = |px: f32, py: f32| -> [f32; 2] {
-        [px / w * 2.0 - 1.0, -(py / h * 2.0 - 1.0)]
-    };
+    let to_ndc = |px: f32, py: f32| -> [f32; 2] { [px / w * 2.0 - 1.0, -(py / h * 2.0 - 1.0)] };
     let tl = to_ndc(px0, py0);
     let tr = to_ndc(px1, py0);
     let bl = to_ndc(px0, py1);
     let br = to_ndc(px1, py1);
 
     [
-        ReticleVertex { position: tl, color },
-        ReticleVertex { position: tr, color },
-        ReticleVertex { position: bl, color },
-        ReticleVertex { position: tr, color },
-        ReticleVertex { position: br, color },
-        ReticleVertex { position: bl, color },
+        ReticleVertex {
+            position: tl,
+            color,
+        },
+        ReticleVertex {
+            position: tr,
+            color,
+        },
+        ReticleVertex {
+            position: bl,
+            color,
+        },
+        ReticleVertex {
+            position: tr,
+            color,
+        },
+        ReticleVertex {
+            position: br,
+            color,
+        },
+        ReticleVertex {
+            position: bl,
+            color,
+        },
     ]
 }
 
@@ -466,7 +492,9 @@ impl LauncherState {
         self.results = matches
             .iter()
             .filter_map(|(_, entry)| {
-                self.all_entries.iter().position(|e| std::ptr::eq(*entry, e))
+                self.all_entries
+                    .iter()
+                    .position(|e| std::ptr::eq(*entry, e))
             })
             .collect();
         if self.selected >= self.results.len() {
@@ -483,7 +511,6 @@ impl LauncherState {
             self.scroll_offset = self.selected + 1 - MAX_VISIBLE;
         }
     }
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,11 +563,15 @@ impl LauncherSurface {
             }
         };
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
-            self.wgpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("thermal-launch frame"),
-            });
+            self.wgpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("thermal-launch frame"),
+                });
 
         // Layout constants
         const PADDING_X: f32 = 30.0;
@@ -702,7 +733,10 @@ impl LauncherSurface {
 
         self.text.viewport.update(
             &self.wgpu.queue,
-            Resolution { width: WIDTH, height: HEIGHT },
+            Resolution {
+                width: WIDTH,
+                height: HEIGHT,
+            },
         );
 
         if let Err(e) = self.text.renderer.prepare(
@@ -735,17 +769,25 @@ impl LauncherSurface {
         // ── Search bar background panel ──────────────────────────────────
         let bar_color: [f32; 4] = [0.06, 0.06, 0.08, 1.0]; // neutral dark panel
         verts.extend_from_slice(&quad_verts(
-            PADDING_X - 12.0, QUERY_BAR_TOP,
-            WIDTH as f32 - PADDING_X + 12.0, QUERY_BAR_TOP + QUERY_BAR_HEIGHT,
-            WIDTH as f32, HEIGHT as f32, bar_color,
+            PADDING_X - 12.0,
+            QUERY_BAR_TOP,
+            WIDTH as f32 - PADDING_X + 12.0,
+            QUERY_BAR_TOP + QUERY_BAR_HEIGHT,
+            WIDTH as f32,
+            HEIGHT as f32,
+            bar_color,
         ));
 
         // ── Separator line (teal instead of purple) ──────────────────────
         let sep_color = ThermalPalette::MILD;
         verts.extend_from_slice(&quad_verts(
-            PADDING_X - 12.0, SEPARATOR_Y,
-            WIDTH as f32 - PADDING_X + 12.0, SEPARATOR_Y + 1.0,
-            WIDTH as f32, HEIGHT as f32, sep_color,
+            PADDING_X - 12.0,
+            SEPARATOR_Y,
+            WIDTH as f32 - PADDING_X + 12.0,
+            SEPARATOR_Y + 1.0,
+            WIDTH as f32,
+            HEIGHT as f32,
+            sep_color,
         ));
 
         // ── Scroll indicator ─────────────────────────────────────────────
@@ -756,15 +798,25 @@ impl LauncherSurface {
             let thumb_height = (MAX_VISIBLE as f32 / total * track_height).max(12.0);
             let max_offset = self.state.results.len().saturating_sub(MAX_VISIBLE) as f32;
             let thumb_y = if max_offset > 0.0 {
-                track_top + (self.state.scroll_offset as f32 / max_offset) * (track_height - thumb_height)
+                track_top
+                    + (self.state.scroll_offset as f32 / max_offset) * (track_height - thumb_height)
             } else {
                 track_top
             };
-            let scrollbar_color = [ThermalPalette::MILD[0], ThermalPalette::MILD[1], ThermalPalette::MILD[2], 0.4];
+            let scrollbar_color = [
+                ThermalPalette::MILD[0],
+                ThermalPalette::MILD[1],
+                ThermalPalette::MILD[2],
+                0.4,
+            ];
             verts.extend_from_slice(&quad_verts(
-                WIDTH as f32 - PADDING_X + 14.0, thumb_y,
-                WIDTH as f32 - PADDING_X + 18.0, thumb_y + thumb_height,
-                WIDTH as f32, HEIGHT as f32, scrollbar_color,
+                WIDTH as f32 - PADDING_X + 14.0,
+                thumb_y,
+                WIDTH as f32 - PADDING_X + 18.0,
+                thumb_y + thumb_height,
+                WIDTH as f32,
+                HEIGHT as f32,
+                scrollbar_color,
             ));
         }
 
@@ -774,17 +826,25 @@ impl LauncherSurface {
         if !self.state.results.is_empty() && selected_in_view {
             let highlight_color: [f32; 4] = [0.08, 0.08, 0.10, 0.6]; // neutral dark highlight
             verts.extend_from_slice(&quad_verts(
-                PADDING_X - 12.0, selected_row_y - 2.0,
-                WIDTH as f32 - PADDING_X + 12.0, selected_row_y + LINE_HEIGHT + 8.0,
-                WIDTH as f32, HEIGHT as f32, highlight_color,
+                PADDING_X - 12.0,
+                selected_row_y - 2.0,
+                WIDTH as f32 - PADDING_X + 12.0,
+                selected_row_y + LINE_HEIGHT + 8.0,
+                WIDTH as f32,
+                HEIGHT as f32,
+                highlight_color,
             ));
         }
 
         // ── Reticle brackets ─────────────────────────────────────────────
         if !self.state.results.is_empty() && selected_in_view {
             verts.extend(ReticlePipeline::build_reticle_verts(
-                rx0, ry0, rx1, ry1,
-                WIDTH as f32, HEIGHT as f32,
+                rx0,
+                ry0,
+                rx1,
+                ry1,
+                WIDTH as f32,
+                HEIGHT as f32,
                 hot,
             ));
         }
@@ -831,11 +891,11 @@ impl LauncherSurface {
             }
 
             // Draw text
-            if let Err(e) = self.text.renderer.render(
-                &self.text.atlas,
-                &self.text.viewport,
-                &mut pass,
-            ) {
+            if let Err(e) =
+                self.text
+                    .renderer
+                    .render(&self.text.atlas, &self.text.viewport, &mut pass)
+            {
                 tracing::warn!("glyphon render failed: {}", e);
             }
         }
@@ -1058,7 +1118,11 @@ impl KeyboardHandler for LauncherSurface {
             return;
         }
 
-        if raw == 28 || raw == 96 || event.keysym == Keysym::Return || event.keysym == Keysym::KP_Enter {
+        if raw == 28
+            || raw == 96
+            || event.keysym == Keysym::Return
+            || event.keysym == Keysym::KP_Enter
+        {
             if !self.state.results.is_empty() {
                 let idx = self.state.results[self.state.selected];
                 let exec = self.state.all_entries[idx].exec.clone();
@@ -1119,7 +1183,9 @@ impl KeyboardHandler for LauncherSurface {
 
 fn launch_app(exec: &str) {
     let mut cleaned = exec.to_string();
-    for code in &["%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k"] {
+    for code in &[
+        "%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c", "%k",
+    ] {
         cleaned = cleaned.replace(code, "");
     }
     let cleaned = cleaned.trim().to_string();
@@ -1139,7 +1205,11 @@ fn launch_app(exec: &str) {
 
 fn keysym_to_char(keysym: Keysym) -> Option<char> {
     let raw: u32 = keysym.into();
-    if (0x0020..=0x007e).contains(&raw) { char::from_u32(raw) } else { None }
+    if (0x0020..=0x007e).contains(&raw) {
+        char::from_u32(raw)
+    } else {
+        None
+    }
 }
 
 // ── Pointer handler ───────────────────────────────────────────────────────────
@@ -1153,10 +1223,7 @@ impl PointerHandler for LauncherSurface {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if let PointerEventKind::Axis {
-                vertical, ..
-            } = event.kind
-            {
+            if let PointerEventKind::Axis { vertical, .. } = event.kind {
                 let delta = if vertical.discrete != 0 {
                     vertical.discrete as isize
                 } else if vertical.absolute != 0.0 {

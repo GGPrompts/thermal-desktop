@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use smithay_client_toolkit as sctk;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
@@ -26,6 +25,7 @@ use sctk::{
         },
     },
 };
+use smithay_client_toolkit as sctk;
 use thermal_core::palette::thermal_gradient_lut;
 use tracing::{debug, info, warn};
 use wayland_client::{
@@ -68,7 +68,15 @@ fn parse_cpu_times(line: &str) -> Option<CpuTimes> {
     let iowait = parts.next()?.parse().ok()?;
     let irq = parts.next()?.parse().ok()?;
     let softirq = parts.next()?.parse().ok()?;
-    Some(CpuTimes { user, nice, system, idle, iowait, irq, softirq })
+    Some(CpuTimes {
+        user,
+        nice,
+        system,
+        idle,
+        iowait,
+        irq,
+        softirq,
+    })
 }
 
 /// Read CPU usage as a fraction 0.0 - 1.0.
@@ -123,21 +131,22 @@ fn read_mem_load() -> f32 {
 /// Read GPU usage as a fraction 0.0 - 1.0.
 fn read_gpu_load() -> f32 {
     // AMD: /sys/class/drm/card0/device/gpu_busy_percent
-    if let Ok(raw) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent") {
-        if let Ok(pct) = raw.trim().parse::<f32>() {
-            return (pct / 100.0).clamp(0.0, 1.0);
-        }
+    if let Ok(raw) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
+        && let Ok(pct) = raw.trim().parse::<f32>()
+    {
+        return (pct / 100.0).clamp(0.0, 1.0);
     }
     // NVIDIA: nvidia-smi
     if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
+        && let Ok(text) = String::from_utf8(output.stdout)
+        && let Ok(pct) = text.trim().parse::<f32>()
     {
-        if let Ok(text) = String::from_utf8(output.stdout) {
-            if let Ok(pct) = text.trim().parse::<f32>() {
-                return (pct / 100.0).clamp(0.0, 1.0);
-            }
-        }
+        return (pct / 100.0).clamp(0.0, 1.0);
     }
     0.0
 }
@@ -167,10 +176,7 @@ fn build_shader_source() -> String {
     let mut lut_entries = String::new();
     for (i, color) in lut.iter().enumerate() {
         let [r, g, b, _a] = color.to_f32_array();
-        lut_entries.push_str(&format!(
-            "    vec3<f32>({:.6}, {:.6}, {:.6})",
-            r, g, b
-        ));
+        lut_entries.push_str(&format!("    vec3<f32>({:.6}, {:.6}, {:.6})", r, g, b));
         if i < lut.len() - 1 {
             lut_entries.push_str(",\n");
         } else {
@@ -417,13 +423,7 @@ impl WallpaperPipeline {
         }
     }
 
-    fn update_uniforms(
-        &self,
-        queue: &wgpu::Queue,
-        width: u32,
-        height: u32,
-        load: &SystemLoad,
-    ) {
+    fn update_uniforms(&self, queue: &wgpu::Queue, width: u32, height: u32, load: &SystemLoad) {
         let uniforms = Uniforms {
             // Wrap time to avoid float precision loss and ensure smooth looping.
             // 600s period (~10 min) keeps fractional precision high.
@@ -504,8 +504,7 @@ impl OutputHandler for WallpaperState {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 impl LayerShellHandler for WallpaperState {
@@ -647,7 +646,7 @@ fn main() -> anyhow::Result<()> {
         .wl_surface()
         .id()
         .as_ptr()
-        .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
+        .cast::<std::ffi::c_void>();
 
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -710,7 +709,11 @@ fn main() -> anyhow::Result<()> {
     let frame_duration = Duration::from_millis(33); // ~30fps
     let metrics_interval = Duration::from_secs(1);
     let mut last_metrics_poll = Instant::now() - metrics_interval; // force immediate first poll
-    let mut load = SystemLoad { cpu: 0.0, gpu: 0.0, mem: 0.0 };
+    let mut load = SystemLoad {
+        cpu: 0.0,
+        gpu: 0.0,
+        mem: 0.0,
+    };
 
     // Seed CPU delta computation.
     let _ = read_cpu_load();

@@ -61,11 +61,7 @@ pub enum Request {
     Detach { id: String },
 
     /// Notify the daemon of a window resize.
-    Resize {
-        id: String,
-        cols: u16,
-        rows: u16,
-    },
+    Resize { id: String, cols: u16, rows: u16 },
 
     /// Connection health check — daemon responds with `Pong`.
     Ping,
@@ -107,10 +103,7 @@ pub enum Response {
     TitleChanged { id: String, title: String },
 
     /// Session's child process exited.
-    SessionExited {
-        id: String,
-        exit_code: Option<i32>,
-    },
+    SessionExited { id: String, exit_code: Option<i32> },
 
     /// Generic success acknowledgment.
     Ok,
@@ -260,7 +253,9 @@ mod tests {
 
     #[test]
     fn encode_frame_payload_round_trips() {
-        let req = Request::KillSession { id: "sess-42".into() };
+        let req = Request::KillSession {
+            id: "sess-42".into(),
+        };
         let frame = encode_frame(&req).expect("encode_frame should succeed");
         let payload = &frame[4..];
         let decoded: Request = decode_payload(payload).expect("decode_payload should succeed");
@@ -278,7 +273,10 @@ mod tests {
     fn encode_frame_empty_response() {
         let resp = Response::Ok;
         let frame = encode_frame(&resp).expect("should encode Ok");
-        assert!(frame.len() >= 4, "frame must contain at least the length prefix");
+        assert!(
+            frame.len() >= 4,
+            "frame must contain at least the length prefix"
+        );
         let len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
         assert_eq!(len + 4, frame.len());
     }
@@ -306,7 +304,11 @@ mod tests {
         };
         let decoded = rt_request(&req);
         match decoded {
-            Request::SpawnSession { shell, cwd, worktree } => {
+            Request::SpawnSession {
+                shell,
+                cwd,
+                worktree,
+            } => {
                 assert_eq!(shell.as_deref(), Some("/bin/zsh"));
                 assert_eq!(cwd.as_deref(), Some("/home/builder"));
                 assert!(!worktree);
@@ -317,10 +319,18 @@ mod tests {
 
     #[test]
     fn request_spawn_session_none_fields_round_trip() {
-        let req = Request::SpawnSession { shell: None, cwd: None, worktree: false };
+        let req = Request::SpawnSession {
+            shell: None,
+            cwd: None,
+            worktree: false,
+        };
         let decoded = rt_request(&req);
         match decoded {
-            Request::SpawnSession { shell, cwd, worktree } => {
+            Request::SpawnSession {
+                shell,
+                cwd,
+                worktree,
+            } => {
                 assert!(shell.is_none());
                 assert!(cwd.is_none());
                 assert!(!worktree);
@@ -331,7 +341,9 @@ mod tests {
 
     #[test]
     fn request_kill_session_round_trip() {
-        let req = Request::KillSession { id: "abc-123".into() };
+        let req = Request::KillSession {
+            id: "abc-123".into(),
+        };
         let decoded = rt_request(&req);
         assert!(matches!(decoded, Request::KillSession { id } if id == "abc-123"));
     }
@@ -339,7 +351,10 @@ mod tests {
     #[test]
     fn request_send_input_round_trip() {
         let data = vec![0x1b, 0x5b, 0x41]; // ESC [ A
-        let req = Request::SendInput { id: "s1".into(), data: data.clone() };
+        let req = Request::SendInput {
+            id: "s1".into(),
+            data: data.clone(),
+        };
         let decoded = rt_request(&req);
         match decoded {
             Request::SendInput { id, data: d } => {
@@ -352,7 +367,10 @@ mod tests {
 
     #[test]
     fn request_send_input_empty_data_round_trip() {
-        let req = Request::SendInput { id: "s2".into(), data: vec![] };
+        let req = Request::SendInput {
+            id: "s2".into(),
+            data: vec![],
+        };
         let decoded = rt_request(&req);
         match decoded {
             Request::SendInput { id, data } => {
@@ -365,7 +383,9 @@ mod tests {
 
     #[test]
     fn request_get_session_state_round_trip() {
-        let req = Request::GetSessionState { id: "my-session".into() };
+        let req = Request::GetSessionState {
+            id: "my-session".into(),
+        };
         let decoded = rt_request(&req);
         assert!(matches!(decoded, Request::GetSessionState { id } if id == "my-session"));
     }
@@ -388,7 +408,10 @@ mod tests {
 
     #[test]
     fn request_attach_no_size_round_trip() {
-        let req = Request::Attach { id: "x".into(), initial_size: None };
+        let req = Request::Attach {
+            id: "x".into(),
+            initial_size: None,
+        };
         let decoded = rt_request(&req);
         match decoded {
             Request::Attach { id, initial_size } => {
@@ -408,7 +431,11 @@ mod tests {
 
     #[test]
     fn request_resize_round_trip() {
-        let req = Request::Resize { id: "r1".into(), cols: 120, rows: 40 };
+        let req = Request::Resize {
+            id: "r1".into(),
+            cols: 120,
+            rows: 40,
+        };
         let decoded = rt_request(&req);
         match decoded {
             Request::Resize { id, cols, rows } => {
@@ -436,14 +463,18 @@ mod tests {
 
     #[test]
     fn response_error_round_trip() {
-        let resp = Response::Error { message: "something broke".into() };
+        let resp = Response::Error {
+            message: "something broke".into(),
+        };
         let decoded = rt_response(&resp);
         assert!(matches!(decoded, Response::Error { message } if message == "something broke"));
     }
 
     #[test]
     fn response_session_spawned_round_trip() {
-        let resp = Response::SessionSpawned { id: "new-sess".into() };
+        let resp = Response::SessionSpawned {
+            id: "new-sess".into(),
+        };
         let decoded = rt_response(&resp);
         assert!(matches!(decoded, Response::SessionSpawned { id } if id == "new-sess"));
     }
@@ -466,7 +497,10 @@ mod tests {
 
     #[test]
     fn response_session_exited_with_code_round_trip() {
-        let resp = Response::SessionExited { id: "ex1".into(), exit_code: Some(0) };
+        let resp = Response::SessionExited {
+            id: "ex1".into(),
+            exit_code: Some(0),
+        };
         let decoded = rt_response(&resp);
         match decoded {
             Response::SessionExited { id, exit_code } => {
@@ -479,7 +513,10 @@ mod tests {
 
     #[test]
     fn response_session_exited_no_code_round_trip() {
-        let resp = Response::SessionExited { id: "ex2".into(), exit_code: None };
+        let resp = Response::SessionExited {
+            id: "ex2".into(),
+            exit_code: None,
+        };
         let decoded = rt_response(&resp);
         match decoded {
             Response::SessionExited { id, exit_code } => {
@@ -515,7 +552,9 @@ mod tests {
             is_alive: true,
             worktree_path: None,
         };
-        let resp = Response::SessionList { sessions: vec![info] };
+        let resp = Response::SessionList {
+            sessions: vec![info],
+        };
         let decoded = rt_response(&resp);
         match decoded {
             Response::SessionList { sessions } => {
@@ -538,10 +577,18 @@ mod tests {
 
     #[test]
     fn response_session_state_round_trip() {
-        let cursor = CursorData { col: 5, row: 3, visible: true };
+        let cursor = CursorData {
+            col: 5,
+            row: 3,
+            visible: true,
+        };
         let cell = CellData {
             ch: 'A',
-            fg: ColorData { r: 255, g: 128, b: 0 },
+            fg: ColorData {
+                r: 255,
+                g: 128,
+                b: 0,
+            },
             bg: ColorData { r: 0, g: 0, b: 0 },
             flags: 0,
         };
@@ -555,7 +602,14 @@ mod tests {
         };
         let decoded = rt_response(&resp);
         match decoded {
-            Response::SessionState { id, cols, rows, cells, cursor: c, title } => {
+            Response::SessionState {
+                id,
+                cols,
+                rows,
+                cells,
+                cursor: c,
+                title,
+            } => {
                 assert_eq!(id, "ss1");
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
@@ -589,11 +643,20 @@ mod tests {
             id: "su1".into(),
             seq: 42,
             dirty_cells: vec![dirty],
-            cursor: CursorData { col: 11, row: 2, visible: false },
+            cursor: CursorData {
+                col: 11,
+                row: 2,
+                visible: false,
+            },
         };
         let decoded = rt_response(&resp);
         match decoded {
-            Response::ScreenUpdate { id, seq, dirty_cells, cursor } => {
+            Response::ScreenUpdate {
+                id,
+                seq,
+                dirty_cells,
+                cursor,
+            } => {
                 assert_eq!(id, "su1");
                 assert_eq!(seq, 42);
                 assert_eq!(dirty_cells.len(), 1);
@@ -611,7 +674,11 @@ mod tests {
 
     #[test]
     fn color_data_boundary_values_round_trip() {
-        let color = ColorData { r: 0, g: 128, b: 255 };
+        let color = ColorData {
+            r: 0,
+            g: 128,
+            b: 255,
+        };
         let bytes = rmp_serde::to_vec(&color).unwrap();
         let decoded: ColorData = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(decoded.r, 0);
@@ -621,7 +688,11 @@ mod tests {
 
     #[test]
     fn cursor_data_invisible_round_trip() {
-        let cursor = CursorData { col: 0, row: 0, visible: false };
+        let cursor = CursorData {
+            col: 0,
+            row: 0,
+            visible: false,
+        };
         let bytes = rmp_serde::to_vec(&cursor).unwrap();
         let decoded: CursorData = rmp_serde::from_slice(&bytes).unwrap();
         assert!(!decoded.visible);
@@ -633,8 +704,16 @@ mod tests {
     fn cell_data_unicode_char_round_trip() {
         let cell = CellData {
             ch: '🔥',
-            fg: ColorData { r: 255, g: 80, b: 0 },
-            bg: ColorData { r: 20, g: 20, b: 20 },
+            fg: ColorData {
+                r: 255,
+                g: 80,
+                b: 0,
+            },
+            bg: ColorData {
+                r: 20,
+                g: 20,
+                b: 20,
+            },
             flags: 0b0000_0011,
         };
         let bytes = rmp_serde::to_vec(&cell).unwrap();

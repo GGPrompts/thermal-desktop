@@ -4,14 +4,14 @@
 //! Right panel: edit form with name, cwd, command, count, worktree toggle, icon picker.
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
-    Frame,
 };
 
-use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
+use thermal_core::{ClaudeStatePoller, palette::ThermalPalette};
 
 use super::TuiPage;
 use crate::profiles_config::{Profile, load_profiles, save_profiles};
@@ -53,23 +53,23 @@ const ICON_GRID: &[&str] = &[
     "\u{1f4a5}", // collision
     "\u{1f300}", // cyclone
     // Row 2: tech/tools
-    "\u{1f916}", // robot
-    "\u{1f527}", // wrench
+    "\u{1f916}",         // robot
+    "\u{1f527}",         // wrench
     "\u{2699}\u{fe0f}",  // gear
     "\u{1f6e0}\u{fe0f}", // hammer+wrench
-    "\u{1f4bb}", // laptop
+    "\u{1f4bb}",         // laptop
     "\u{1f5a5}\u{fe0f}", // desktop
     "\u{2328}\u{fe0f}",  // keyboard
-    "\u{1f50c}", // plug
+    "\u{1f50c}",         // plug
     // Row 3: science/nature
-    "\u{1f9ea}", // test tube
-    "\u{1f52c}", // microscope
-    "\u{1f9ec}", // dna
-    "\u{1f30d}", // earth
-    "\u{1f30a}", // wave
+    "\u{1f9ea}",         // test tube
+    "\u{1f52c}",         // microscope
+    "\u{1f9ec}",         // dna
+    "\u{1f30d}",         // earth
+    "\u{1f30a}",         // wave
     "\u{2744}\u{fe0f}",  // snowflake
     "\u{1f321}\u{fe0f}", // thermometer
-    "\u{1f308}", // rainbow
+    "\u{1f308}",         // rainbow
     // Row 4: symbols/misc
     "\u{1f4e6}", // package
     "\u{1f4cb}", // clipboard
@@ -177,7 +177,14 @@ impl ProfilesPage {
                 p.icon.clone().unwrap_or_default(),
             )
         } else {
-            (String::new(), String::new(), String::new(), "1".into(), false, String::new())
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                "1".into(),
+                false,
+                String::new(),
+            )
         };
 
         Self {
@@ -204,11 +211,23 @@ impl ProfilesPage {
         if let Some(i) = self.list_state.selected() {
             if let Some(p) = self.profiles.get_mut(i) {
                 p.name = self.name_input.clone();
-                p.cwd = if self.cwd_input.is_empty() { None } else { Some(self.cwd_input.clone()) };
-                p.command = if self.command_input.is_empty() { None } else { Some(self.command_input.clone()) };
+                p.cwd = if self.cwd_input.is_empty() {
+                    None
+                } else {
+                    Some(self.cwd_input.clone())
+                };
+                p.command = if self.command_input.is_empty() {
+                    None
+                } else {
+                    Some(self.command_input.clone())
+                };
                 p.count = self.count_input.parse().unwrap_or(1).max(1).min(16);
                 p.git_worktree = self.worktree_enabled;
-                p.icon = if self.icon_input.is_empty() { None } else { Some(self.icon_input.clone()) };
+                p.icon = if self.icon_input.is_empty() {
+                    None
+                } else {
+                    Some(self.icon_input.clone())
+                };
                 self.dirty = true;
             }
         }
@@ -290,7 +309,11 @@ impl ProfilesPage {
                 return;
             }
             self.profiles.remove(i);
-            let new_idx = if i >= self.profiles.len() { self.profiles.len() - 1 } else { i };
+            let new_idx = if i >= self.profiles.len() {
+                self.profiles.len() - 1
+            } else {
+                i
+            };
             self.list_state.select(Some(new_idx));
             self.load_form_from_profile();
             self.dirty = true;
@@ -299,21 +322,33 @@ impl ProfilesPage {
     }
 
     fn nav_up(&mut self) {
-        if self.profiles.is_empty() { return; }
+        if self.profiles.is_empty() {
+            return;
+        }
         // Save current form before navigating
         self.apply_form_to_profile();
         let i = self.list_state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.profiles.len() - 1 } else { i - 1 };
+        let prev = if i == 0 {
+            self.profiles.len() - 1
+        } else {
+            i - 1
+        };
         self.list_state.select(Some(prev));
         self.load_form_from_profile();
     }
 
     fn nav_down(&mut self) {
-        if self.profiles.is_empty() { return; }
+        if self.profiles.is_empty() {
+            return;
+        }
         // Save current form before navigating
         self.apply_form_to_profile();
         let i = self.list_state.selected().unwrap_or(0);
-        let next = if i >= self.profiles.len() - 1 { 0 } else { i + 1 };
+        let next = if i >= self.profiles.len() - 1 {
+            0
+        } else {
+            i + 1
+        };
         self.list_state.select(Some(next));
         self.load_form_from_profile();
     }
@@ -341,7 +376,12 @@ impl ProfilesPage {
         f.render_widget(block, popup_area);
 
         // Render grid rows
-        let grid_area = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+        let grid_area = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
         for (idx, icon) in ICON_GRID.iter().enumerate() {
             let row = idx / ICON_GRID_COLS;
             let col = idx % ICON_GRID_COLS;
@@ -350,10 +390,18 @@ impl ProfilesPage {
             if cell_y >= grid_area.y + grid_area.height || cell_x >= grid_area.x + grid_area.width {
                 continue;
             }
-            let cell_area = Rect::new(cell_x, cell_y, 3.min(grid_area.x + grid_area.width - cell_x), 1);
+            let cell_area = Rect::new(
+                cell_x,
+                cell_y,
+                3.min(grid_area.x + grid_area.width - cell_x),
+                1,
+            );
 
             let style = if idx == self.icon_picker_index {
-                Style::default().bg(ACCENT_COLD).fg(TEXT_BRIGHT).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .bg(ACCENT_COLD)
+                    .fg(TEXT_BRIGHT)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(TEXT)
             };
@@ -365,13 +413,25 @@ impl ProfilesPage {
         if hint_y < inner.y + inner.height {
             let hint_area = Rect::new(inner.x, hint_y, inner.width, 1);
             let hint = Paragraph::new(Line::from(vec![
-                Span::styled("Arrows", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Arrows",
+                    Style::default()
+                        .fg(ACCENT_COLD)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": navigate  ", Style::default().fg(TEXT_MUTED)),
-                Span::styled("Enter", Style::default().fg(WARM).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Enter",
+                    Style::default().fg(WARM).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": select  ", Style::default().fg(TEXT_MUTED)),
-                Span::styled("Esc", Style::default().fg(TEXT_MUTED).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Esc",
+                    Style::default().fg(TEXT_MUTED).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(": cancel", Style::default().fg(TEXT_MUTED)),
-            ])).alignment(Alignment::Center);
+            ]))
+            .alignment(Alignment::Center);
             f.render_widget(hint, hint_area);
         }
     }
@@ -385,29 +445,39 @@ impl TuiPage for ProfilesPage {
     fn tick(&mut self, _poller: &mut ClaudeStatePoller) {}
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        f.render_widget(
-            Block::default().style(Style::default().bg(BG)),
-            area,
-        );
+        f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(30), // profile list
-                Constraint::Min(35),   // edit form
+                Constraint::Min(35),    // edit form
             ])
             .margin(1)
             .split(area);
 
         // -- Left panel: profile list --
-        let profile_items: Vec<ListItem> = self.profiles.iter().enumerate().map(|(i, p)| {
-            let icon = p.icon.as_deref().unwrap_or(" ");
-            let dirty_mark = if self.dirty && self.list_state.selected() == Some(i) { "*" } else { "" };
-            let text = format!("{} {}{}", icon, p.name, dirty_mark);
-            ListItem::new(text)
-        }).collect();
+        let profile_items: Vec<ListItem> = self
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let icon = p.icon.as_deref().unwrap_or(" ");
+                let dirty_mark = if self.dirty && self.list_state.selected() == Some(i) {
+                    "*"
+                } else {
+                    ""
+                };
+                let text = format!("{} {}{}", icon, p.name, dirty_mark);
+                ListItem::new(text)
+            })
+            .collect();
 
-        let list_border = if self.focus == Focus::ProfileList { ACCENT_COLD } else { COLD };
+        let list_border = if self.focus == Focus::ProfileList {
+            ACCENT_COLD
+        } else {
+            COLD
+        };
         let profile_list = List::new(profile_items)
             .block(
                 Block::default()
@@ -440,12 +510,17 @@ impl TuiPage for ProfilesPage {
                 Constraint::Length(1), // spacer
                 Constraint::Length(2), // hints
                 Constraint::Length(2), // status
-                Constraint::Min(0),   // rest
+                Constraint::Min(0),    // rest
             ])
             .split(main_chunks[1]);
 
         // Helper to render a text input field
-        let render_field = |f: &mut Frame, area: Rect, title: &str, value: &str, focused: bool, placeholder: &str| {
+        let render_field = |f: &mut Frame,
+                            area: Rect,
+                            title: &str,
+                            value: &str,
+                            focused: bool,
+                            placeholder: &str| {
             let border_color = if focused { ACCENT_COLD } else { COLD };
             let text_style = if focused {
                 Style::default().fg(TEXT_BRIGHT)
@@ -463,19 +538,24 @@ impl TuiPage for ProfilesPage {
                 value.to_string()
             };
 
-            let widget = Paragraph::new(display)
-                .style(text_style)
-                .block(
-                    Block::default()
-                        .title(format!(" {} ", title))
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(border_color))
-                        .style(Style::default().bg(BG_SURFACE)),
-                );
+            let widget = Paragraph::new(display).style(text_style).block(
+                Block::default()
+                    .title(format!(" {} ", title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .style(Style::default().bg(BG_SURFACE)),
+            );
             f.render_widget(widget, area);
         };
 
-        render_field(f, form_chunks[0], "Name", &self.name_input, self.focus == Focus::NameField, "(required)");
+        render_field(
+            f,
+            form_chunks[0],
+            "Name",
+            &self.name_input,
+            self.focus == Focus::NameField,
+            "(required)",
+        );
 
         // Icon field — show current icon + hint
         {
@@ -495,21 +575,40 @@ impl TuiPage for ProfilesPage {
             } else {
                 Style::default().fg(TEXT)
             };
-            let widget = Paragraph::new(icon_display)
-                .style(text_style)
-                .block(
-                    Block::default()
-                        .title(" Icon ")
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(border_color))
-                        .style(Style::default().bg(BG_SURFACE)),
-                );
+            let widget = Paragraph::new(icon_display).style(text_style).block(
+                Block::default()
+                    .title(" Icon ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color))
+                    .style(Style::default().bg(BG_SURFACE)),
+            );
             f.render_widget(widget, form_chunks[1]);
         }
 
-        render_field(f, form_chunks[2], "Working Directory", &self.cwd_input, self.focus == Focus::CwdField, "(optional)");
-        render_field(f, form_chunks[3], "Command", &self.command_input, self.focus == Focus::CommandField, "(default: claude)");
-        render_field(f, form_chunks[4], "Count (1-16)", &self.count_input, self.focus == Focus::CountField, "1");
+        render_field(
+            f,
+            form_chunks[2],
+            "Working Directory",
+            &self.cwd_input,
+            self.focus == Focus::CwdField,
+            "(optional)",
+        );
+        render_field(
+            f,
+            form_chunks[3],
+            "Command",
+            &self.command_input,
+            self.focus == Focus::CommandField,
+            "(default: claude)",
+        );
+        render_field(
+            f,
+            form_chunks[4],
+            "Count (1-16)",
+            &self.count_input,
+            self.focus == Focus::CountField,
+            "1",
+        );
 
         // Worktree toggle
         {
@@ -532,15 +631,36 @@ impl TuiPage for ProfilesPage {
 
         // Hints
         let hint = Paragraph::new(Line::from(vec![
-            Span::styled("Ctrl+S", Style::default().fg(WARM).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Ctrl+S",
+                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": save  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("n", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": new  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("c", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "c",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": clone  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("d", Style::default().fg(SEARING).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "d",
+                Style::default().fg(SEARING).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": delete  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled("Tab", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": next field", Style::default().fg(TEXT_MUTED)),
         ]))
         .alignment(Alignment::Center);
@@ -650,7 +770,8 @@ impl TuiPage for ProfilesPage {
                 KeyCode::Enter => {
                     self.icon_picker_open = true;
                     // Try to find current icon in grid to pre-select
-                    self.icon_picker_index = ICON_GRID.iter()
+                    self.icon_picker_index = ICON_GRID
+                        .iter()
                         .position(|&i| i == self.icon_input)
                         .unwrap_or(0);
                 }
@@ -690,10 +811,18 @@ impl TuiPage for ProfilesPage {
                 }
                 KeyCode::Backspace => {
                     match self.focus {
-                        Focus::NameField => { self.name_input.pop(); }
-                        Focus::CwdField => { self.cwd_input.pop(); }
-                        Focus::CommandField => { self.command_input.pop(); }
-                        Focus::CountField => { self.count_input.pop(); }
+                        Focus::NameField => {
+                            self.name_input.pop();
+                        }
+                        Focus::CwdField => {
+                            self.cwd_input.pop();
+                        }
+                        Focus::CommandField => {
+                            self.command_input.pop();
+                        }
+                        Focus::CountField => {
+                            self.count_input.pop();
+                        }
                         _ => {}
                     }
                     self.dirty = true;
@@ -805,7 +934,10 @@ impl TuiPage for ProfilesPage {
     }
 
     fn has_text_focus(&self) -> bool {
-        matches!(self.focus, Focus::NameField | Focus::CwdField | Focus::CommandField | Focus::CountField)
+        matches!(
+            self.focus,
+            Focus::NameField | Focus::CwdField | Focus::CommandField | Focus::CountField
+        )
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

@@ -176,28 +176,30 @@ impl ImageStore {
 
         // Multi-chunk handling: if `m=1`, accumulate and wait for more.
         if cmd.more == 1 {
-            let entry = self.pending_chunks.entry(image_id).or_insert_with(|| {
-                PendingTransmission {
-                    command: cmd.clone(),
-                    payload_accum: Vec::new(),
-                }
-            });
+            let entry =
+                self.pending_chunks
+                    .entry(image_id)
+                    .or_insert_with(|| PendingTransmission {
+                        command: cmd.clone(),
+                        payload_accum: Vec::new(),
+                    });
             entry.payload_accum.extend_from_slice(&cmd.payload);
             return None;
         }
 
         // Final chunk (m=0 or not set). Combine with any pending chunks.
-        let (final_cmd, full_payload) = if let Some(mut pending) = self.pending_chunks.remove(&image_id) {
-            pending.payload_accum.extend_from_slice(&cmd.payload);
-            // Use the original command's parameters but with the full payload.
-            pending.command.payload = pending.payload_accum;
-            pending.command.more = 0;
-            let full_payload = pending.command.payload.clone();
-            (pending.command, full_payload)
-        } else {
-            let payload = cmd.payload.clone();
-            (cmd, payload)
-        };
+        let (final_cmd, full_payload) =
+            if let Some(mut pending) = self.pending_chunks.remove(&image_id) {
+                pending.payload_accum.extend_from_slice(&cmd.payload);
+                // Use the original command's parameters but with the full payload.
+                pending.command.payload = pending.payload_accum;
+                pending.command.more = 0;
+                let full_payload = pending.command.payload.clone();
+                (pending.command, full_payload)
+            } else {
+                let payload = cmd.payload.clone();
+                (cmd, payload)
+            };
 
         // Decode base64 payload.
         let raw_data = match BASE64_STANDARD.decode(&full_payload) {
@@ -270,7 +272,10 @@ impl ImageStore {
                 (rgba, w, h)
             }
             _ => {
-                warn!(format = final_cmd.format, "Kitty graphics: unsupported format");
+                warn!(
+                    format = final_cmd.format,
+                    "Kitty graphics: unsupported format"
+                );
                 return None;
             }
         };
@@ -350,7 +355,10 @@ impl ImageStore {
     /// Handle put/display command (`a=p`) — place an already-transmitted image.
     fn handle_put(&mut self, cmd: &GraphicsCommand, cursor_row: usize, cursor_col: usize) {
         if !self.images.contains_key(&cmd.image_id) {
-            warn!(id = cmd.image_id, "Kitty graphics: put for unknown image ID");
+            warn!(
+                id = cmd.image_id,
+                "Kitty graphics: put for unknown image ID"
+            );
             return;
         }
 
@@ -369,9 +377,7 @@ impl ImageStore {
     pub fn visible_placements(&self) -> Vec<(&PlacedImage, &StoredImage)> {
         self.placements
             .iter()
-            .filter_map(|p| {
-                self.images.get(&p.image_id).map(|img| (p, img))
-            })
+            .filter_map(|p| self.images.get(&p.image_id).map(|img| (p, img)))
             .collect()
     }
 

@@ -18,11 +18,13 @@ pub async fn list_windows(_args: Value) -> Result<ToolResult> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(ToolResult::error(format!("hyprctl clients failed: {stderr}")));
+        return Ok(ToolResult::error(format!(
+            "hyprctl clients failed: {stderr}"
+        )));
     }
 
-    let json: Value = serde_json::from_slice(&output.stdout)
-        .context("failed to parse hyprctl clients JSON")?;
+    let json: Value =
+        serde_json::from_slice(&output.stdout).context("failed to parse hyprctl clients JSON")?;
 
     // Extract useful fields for a cleaner summary
     let summary = if let Some(clients) = json.as_array() {

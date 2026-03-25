@@ -87,7 +87,10 @@ impl NotificationServer {
             "New notification"
         );
 
-        self.queue.lock().unwrap_or_else(|e| e.into_inner()).push_back(notif);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(notif);
 
         // Play audio cue (fire-and-forget via channel)
         if let Some(audio) = &self.audio {
@@ -230,10 +233,7 @@ mod tests {
         let queue: NotificationQueue = Arc::new(Mutex::new(VecDeque::new()));
         let server = NotificationServer::new(Arc::clone(&queue), None);
         // The atomic counter starts at 1 (as initialised in new())
-        assert_eq!(
-            server.counter.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(server.counter.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     // ── get_capabilities / get_server_information (sync helpers) ─────────────

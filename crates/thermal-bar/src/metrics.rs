@@ -66,7 +66,7 @@ impl SystemMetrics {
             cpu_temp_c: read_cpu_temp(),
             mem_used_mb: read_mem_used(),
             mem_total_mb: read_mem_total(),
-            net_rx_kbps: 0.0,   // populated by read_net() below
+            net_rx_kbps: 0.0, // populated by read_net() below
             net_tx_kbps: 0.0,
             gpu_temp_c: read_gpu_temp(),
             gpu_usage_pct: read_gpu_usage(),
@@ -91,14 +91,22 @@ fn parse_cpu_times(line: &str) -> Option<CpuTimes> {
     // Format: "cpu  user nice system idle iowait irq softirq ..."
     let mut parts = line.split_ascii_whitespace();
     parts.next(); // skip "cpu"
-    let user    = parts.next()?.parse().ok()?;
-    let nice    = parts.next()?.parse().ok()?;
-    let system  = parts.next()?.parse().ok()?;
-    let idle    = parts.next()?.parse().ok()?;
-    let iowait  = parts.next()?.parse().ok()?;
-    let irq     = parts.next()?.parse().ok()?;
+    let user = parts.next()?.parse().ok()?;
+    let nice = parts.next()?.parse().ok()?;
+    let system = parts.next()?.parse().ok()?;
+    let idle = parts.next()?.parse().ok()?;
+    let iowait = parts.next()?.parse().ok()?;
+    let irq = parts.next()?.parse().ok()?;
     let softirq = parts.next()?.parse().ok()?;
-    Some(CpuTimes { user, nice, system, idle, iowait, irq, softirq })
+    Some(CpuTimes {
+        user,
+        nice,
+        system,
+        idle,
+        iowait,
+        irq,
+        softirq,
+    })
 }
 
 fn read_cpu_usage() -> f32 {
@@ -115,7 +123,7 @@ fn read_cpu_usage() -> f32 {
         None => 0.0,
         Some(prev) => {
             let delta_total = current.total().saturating_sub(prev.total());
-            let delta_idle  = current.idle_total().saturating_sub(prev.idle_total());
+            let delta_idle = current.idle_total().saturating_sub(prev.idle_total());
             if delta_total == 0 {
                 0.0
             } else {
@@ -159,11 +167,7 @@ fn read_cpu_temp() -> Option<f32> {
 fn parse_meminfo_kb(contents: &str, key: &str) -> Option<u64> {
     for line in contents.lines() {
         if line.starts_with(key) {
-            let val: u64 = line
-                .split_ascii_whitespace()
-                .nth(1)?
-                .parse()
-                .ok()?;
+            let val: u64 = line.split_ascii_whitespace().nth(1)?.parse().ok()?;
             return Some(val);
         }
     }
@@ -172,7 +176,7 @@ fn parse_meminfo_kb(contents: &str, key: &str) -> Option<u64> {
 
 fn read_meminfo() -> Option<(u64, u64)> {
     let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let total     = parse_meminfo_kb(&contents, "MemTotal:")?;
+    let total = parse_meminfo_kb(&contents, "MemTotal:")?;
     let available = parse_meminfo_kb(&contents, "MemAvailable:")?;
     Some((total, available))
 }
@@ -182,7 +186,9 @@ fn read_mem_total() -> u64 {
 }
 
 fn read_mem_used() -> u64 {
-    read_meminfo().map(|(t, a)| (t.saturating_sub(a)) / 1024).unwrap_or(0)
+    read_meminfo()
+        .map(|(t, a)| (t.saturating_sub(a)) / 1024)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +200,11 @@ fn monotonic_secs() -> u64 {
     // wall-clock seconds, so read /proc/uptime instead.
     std::fs::read_to_string("/proc/uptime")
         .ok()
-        .and_then(|s| s.split_ascii_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
+        .and_then(|s| {
+            s.split_ascii_whitespace()
+                .next()
+                .and_then(|v| v.parse::<f64>().ok())
+        })
         .map(|secs| secs as u64)
         .unwrap_or(0)
 }
@@ -208,7 +218,9 @@ fn parse_net_totals() -> (u64, u64) {
     for line in contents.lines().skip(2) {
         // Each line: "  eth0:  rx_bytes packets ... tx_bytes ..."
         let line = line.trim();
-        let Some(colon) = line.find(':') else { continue };
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
         let iface = &line[..colon];
         // skip loopback
         if iface.trim() == "lo" {
@@ -242,7 +254,11 @@ fn read_net() -> (f32, f32) {
             }
         }
     };
-    *guard = Some(NetSample { rx_bytes: rx, tx_bytes: tx, when_secs: now });
+    *guard = Some(NetSample {
+        rx_bytes: rx,
+        tx_bytes: tx,
+        when_secs: now,
+    });
     (rx_kbps, tx_kbps)
 }
 
@@ -286,7 +302,10 @@ fn try_amd_usage() -> Option<f32> {
 
 fn try_nvidia() -> Option<(f32, f32)> {
     let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=temperature.gpu,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
@@ -321,12 +340,12 @@ mod tests {
         // Realistic /proc/stat first line
         let line = "cpu  123456 2048 45678 9876543 12345 678 901 0 0 0";
         let t = parse_cpu_times(line).expect("should parse");
-        assert_eq!(t.user,    123456);
-        assert_eq!(t.nice,    2048);
-        assert_eq!(t.system,  45678);
-        assert_eq!(t.idle,    9876543);
-        assert_eq!(t.iowait,  12345);
-        assert_eq!(t.irq,     678);
+        assert_eq!(t.user, 123456);
+        assert_eq!(t.nice, 2048);
+        assert_eq!(t.system, 45678);
+        assert_eq!(t.idle, 9876543);
+        assert_eq!(t.iowait, 12345);
+        assert_eq!(t.irq, 678);
         assert_eq!(t.softirq, 901);
     }
 
@@ -357,13 +376,29 @@ mod tests {
 
     #[test]
     fn cpu_times_total_sums_all_fields() {
-        let t = CpuTimes { user: 10, nice: 2, system: 3, idle: 80, iowait: 4, irq: 1, softirq: 0 };
+        let t = CpuTimes {
+            user: 10,
+            nice: 2,
+            system: 3,
+            idle: 80,
+            iowait: 4,
+            irq: 1,
+            softirq: 0,
+        };
         assert_eq!(t.total(), 100);
     }
 
     #[test]
     fn cpu_times_idle_total_includes_iowait() {
-        let t = CpuTimes { user: 10, nice: 0, system: 5, idle: 70, iowait: 15, irq: 0, softirq: 0 };
+        let t = CpuTimes {
+            user: 10,
+            nice: 0,
+            system: 5,
+            idle: 70,
+            iowait: 15,
+            irq: 0,
+            softirq: 0,
+        };
         assert_eq!(t.idle_total(), 85);
     }
 
@@ -446,7 +481,9 @@ SwapFree:        8000000 kB
         let mut total_tx = 0u64;
         for line in contents.lines().skip(2) {
             let line = line.trim();
-            let Some(colon) = line.find(':') else { continue };
+            let Some(colon) = line.find(':') else {
+                continue;
+            };
             let iface = &line[..colon];
             if iface.trim() == "lo" {
                 continue;

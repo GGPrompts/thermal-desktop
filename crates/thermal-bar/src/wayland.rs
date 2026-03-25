@@ -30,9 +30,9 @@ use wayland_client::{
 use crate::layout::BarLayout;
 use crate::modules::claude_module::ClaudeModule;
 use crate::modules::clock::ClockModule;
-use crate::modules::workspace_map::WorkspaceMapModule;
 use crate::modules::metrics_module::MetricsModule;
 use crate::modules::voice::VoiceModule;
+use crate::modules::workspace_map::WorkspaceMapModule;
 use crate::renderer::Renderer;
 use crate::sparkline::SparklineSet;
 
@@ -286,8 +286,12 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Phase 2: Initialize the wgpu renderer now that we know the surface size.
     let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
-    let surface_ptr = bar.layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>()
-        as *mut std::ffi::c_void;
+    let surface_ptr = bar
+        .layer
+        .wl_surface()
+        .id()
+        .as_ptr()
+        .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
 
     let mut renderer =
         Renderer::new_from_wayland(display_ptr, surface_ptr, bar.width, BAR_HEIGHT).await?;

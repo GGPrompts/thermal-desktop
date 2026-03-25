@@ -2,7 +2,7 @@
 ///
 /// Reads CPU, memory, network, and GPU data from `SystemMetrics` and
 /// returns styled `ModuleOutput` items for the left zone.
-use thermal_core::{thermal_gradient_f32, ThermalPalette};
+use thermal_core::{ThermalPalette, thermal_gradient_f32};
 
 use crate::layout::{ModuleOutput, Zone};
 use crate::metrics::SystemMetrics;
@@ -55,10 +55,7 @@ impl MetricsModule {
 
         // Network.
         if m.net_rx_kbps > 0.1 || m.net_tx_kbps > 0.1 {
-            let net_str = format!(
-                "↓{:.0}K ↑{:.0}K",
-                m.net_rx_kbps, m.net_tx_kbps
-            );
+            let net_str = format!("↓{:.0}K ↑{:.0}K", m.net_rx_kbps, m.net_tx_kbps);
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 net_str,

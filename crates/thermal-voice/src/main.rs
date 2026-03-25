@@ -82,8 +82,7 @@ fn dirs_config() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
-                .join(".config")
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".config")
         })
 }
 
@@ -97,7 +96,9 @@ fn dirs_data() -> PathBuf {
 }
 
 fn default_model_path() -> PathBuf {
-    dirs_data().join("thermal/models").join(DEFAULT_MODEL_FILENAME)
+    dirs_data()
+        .join("thermal/models")
+        .join(DEFAULT_MODEL_FILENAME)
 }
 
 fn resolve_model_path(config: &Config) -> PathBuf {
@@ -113,10 +114,8 @@ fn resolve_model_path(config: &Config) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 fn runtime_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()),
-    )
-    .join("thermal")
+    PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("thermal")
 }
 
 fn pidfile_path() -> PathBuf {
@@ -300,7 +299,10 @@ impl Recorder {
         self.stream.take();
         let samples = self.samples.lock().unwrap().clone();
         let duration_secs = samples.len() as f64 / SAMPLE_RATE as f64;
-        info!("recording stopped: {duration_secs:.1}s captured ({} samples)", samples.len());
+        info!(
+            "recording stopped: {duration_secs:.1}s captured ({} samples)",
+            samples.len()
+        );
         samples
     }
 
@@ -327,7 +329,7 @@ fn write_wav(samples: &[i16], path: &Path) -> Result<()> {
     file.write_all(b"fmt ")?;
     file.write_all(&16u32.to_le_bytes())?; // chunk size
     file.write_all(&1u16.to_le_bytes())?; // PCM format
-    file.write_all(&(CHANNELS as u16).to_le_bytes())?;
+    file.write_all(&CHANNELS.to_le_bytes())?;
     file.write_all(&SAMPLE_RATE.to_le_bytes())?;
     let byte_rate = SAMPLE_RATE * CHANNELS as u32 * 2;
     file.write_all(&byte_rate.to_le_bytes())?;
@@ -544,12 +546,11 @@ fn copy_to_clipboard(text: &str) {
 fn check_daemon_running() -> Option<u32> {
     let pidfile = pidfile_path();
     if pidfile.exists() {
-        if let Ok(contents) = fs::read_to_string(&pidfile) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                if Path::new(&format!("/proc/{pid}")).exists() {
-                    return Some(pid);
-                }
-            }
+        if let Ok(contents) = fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && Path::new(&format!("/proc/{pid}")).exists()
+        {
+            return Some(pid);
         }
         // Stale pidfile
         let _ = fs::remove_file(&pidfile);
@@ -559,8 +560,7 @@ fn check_daemon_running() -> Option<u32> {
 
 fn write_pidfile() -> Result<()> {
     let run_dir = runtime_dir();
-    fs::create_dir_all(&run_dir)
-        .with_context(|| format!("creating runtime dir {:?}", run_dir))?;
+    fs::create_dir_all(&run_dir).with_context(|| format!("creating runtime dir {:?}", run_dir))?;
     let pidfile = pidfile_path();
     fs::write(&pidfile, std::process::id().to_string())
         .with_context(|| format!("writing pidfile {:?}", pidfile))?;
@@ -615,17 +615,19 @@ async fn run_daemon() -> Result<()> {
     // Check model availability
     let model_path = resolve_model_path(&config);
     if !model_path.exists() {
-        warn!(
-            "Whisper model not found at {}",
-            model_path.display()
-        );
+        warn!("Whisper model not found at {}", model_path.display());
         warn!(
             "Download it: curl -L -o {} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
             model_path.display(),
             DEFAULT_MODEL_FILENAME
         );
-        warn!("Or set model_path in {}", config_dir().join("voice.toml").display());
-        warn!("The daemon will start but transcription will fail until a model or CLI is available.");
+        warn!(
+            "Or set model_path in {}",
+            config_dir().join("voice.toml").display()
+        );
+        warn!(
+            "The daemon will start but transcription will fail until a model or CLI is available."
+        );
     }
 
     // Single-instance guard
@@ -650,8 +652,7 @@ async fn run_daemon() -> Result<()> {
     info!("thermal-voice daemon listening on {}", sock_path.display());
 
     // Channel: socket tasks send commands here, main loop owns the Recorder.
-    let (cmd_tx, mut cmd_rx) =
-        tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
 
     // Socket acceptor task
     tokio::spawn(async move {
@@ -732,9 +733,9 @@ async fn handle_connection(
         reply: reply_tx,
     })?;
 
-    let response = reply_rx.await.unwrap_or_else(|_| {
-        SocketResponse::error("daemon dropped the request")
-    });
+    let response = reply_rx
+        .await
+        .unwrap_or_else(|_| SocketResponse::error("daemon dropped the request"));
 
     let mut resp_json = serde_json::to_string(&response)?;
     resp_json.push('\n');
@@ -762,10 +763,7 @@ fn handle_start(recorder: &mut Recorder) -> SocketResponse {
     }
 }
 
-async fn handle_stop(
-    recorder: &mut Recorder,
-    config: &Config,
-) -> SocketResponse {
+async fn handle_stop(recorder: &mut Recorder, config: &Config) -> SocketResponse {
     if !recorder.is_recording() {
         return SocketResponse::ok("not_recording");
     }
@@ -967,7 +965,11 @@ mod tests {
 
     #[test]
     fn state_deserialization_roundtrip() {
-        for s in [VoiceState::Muted, VoiceState::Listening, VoiceState::Processing] {
+        for s in [
+            VoiceState::Muted,
+            VoiceState::Listening,
+            VoiceState::Processing,
+        ] {
             let original = VoiceStateFile {
                 state: s,
                 label: Some("test".to_string()),
@@ -1060,7 +1062,10 @@ mod tests {
             whisper_command = "my-whisper"
         "#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.model_path.as_deref(), Some("/opt/models/ggml-large.bin"));
+        assert_eq!(
+            cfg.model_path.as_deref(),
+            Some("/opt/models/ggml-large.bin")
+        );
         assert_eq!(cfg.whisper_command, "my-whisper");
     }
 

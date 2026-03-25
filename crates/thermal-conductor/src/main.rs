@@ -22,7 +22,7 @@ mod window;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, Context, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
@@ -33,7 +33,12 @@ use backend::{Backend, BackendPreference, detect_backend};
 /// Run with no arguments to launch the interactive TUI dashboard.
 /// Use `thc tui` explicitly, or just `thc` to start the dashboard.
 #[derive(Parser)]
-#[command(name = "thermal-conductor", version, about, after_help = "Run `thc` or `thc tui` to launch the interactive dashboard.")]
+#[command(
+    name = "thermal-conductor",
+    version,
+    about,
+    after_help = "Run `thc` or `thc tui` to launch the interactive dashboard."
+)]
 struct Cli {
     /// Session backend: auto (try kitty then daemon), kitty, or daemon
     #[arg(long, default_value = "auto", global = true)]
@@ -167,7 +172,9 @@ fn main() -> Result<()> {
                     worktree,
                 } => cmd_spawn(count, project, command, worktree, backend_pref).await,
                 Commands::Status => cmd_status().await,
-                Commands::Send { session_id, prompt } => cmd_send(session_id, prompt, backend_pref).await,
+                Commands::Send { session_id, prompt } => {
+                    cmd_send(session_id, prompt, backend_pref).await
+                }
                 Commands::List { json } => cmd_list(json, backend_pref).await,
                 Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
@@ -179,12 +186,17 @@ fn main() -> Result<()> {
 }
 
 /// Spawn N therminal sessions via the detected backend.
-async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>, worktree: bool, pref: BackendPreference) -> Result<()> {
+async fn cmd_spawn(
+    count: u32,
+    project: Option<String>,
+    command: Option<String>,
+    worktree: bool,
+    pref: BackendPreference,
+) -> Result<()> {
     let mut backend = detect_backend(pref).await?;
 
-    let cmd = command.unwrap_or_else(|| {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-    });
+    let cmd =
+        command.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
 
     let cwd = project.unwrap_or_else(|| {
         std::env::current_dir()
@@ -194,7 +206,11 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
     });
 
     let wt_label = if worktree { " (with worktrees)" } else { "" };
-    println!("Spawning {count} therminal{}{wt_label} via {}...", if count == 1 { "" } else { "s" }, backend.name());
+    println!(
+        "Spawning {count} therminal{}{wt_label} via {}...",
+        if count == 1 { "" } else { "s" },
+        backend.name()
+    );
 
     for i in 0..count {
         let ts = SystemTime::now()
@@ -210,7 +226,9 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
                     match cmd_create_worktree(&cwd, &id) {
                         Ok(wt) => (wt.clone(), Some(wt)),
                         Err(e) => {
-                            eprintln!("  Warning: worktree creation failed ({e}), using original cwd");
+                            eprintln!(
+                                "  Warning: worktree creation failed ({e}), using original cwd"
+                            );
                             (cwd.clone(), None)
                         }
                     }
@@ -219,22 +237,12 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
                 };
 
                 controller
-                    .spawn(
-                        &id,
-                        &cmd,
-                        &effective_cwd,
-                        None,
-                        wt_path.as_deref(),
-                    )
+                    .spawn(&id, &cmd, &effective_cwd, None, wt_path.as_deref())
                     .await?;
             }
             Backend::Daemon(client) => {
                 let spawned_id = client
-                    .spawn_session(
-                        Some(cmd.clone()),
-                        Some(cwd.clone()),
-                        worktree,
-                    )
+                    .spawn_session(Some(cmd.clone()), Some(cwd.clone()), worktree)
                     .await?;
                 println!("  Therminal spawned (session: {spawned_id})");
                 continue; // daemon prints its own ID
@@ -311,7 +319,9 @@ async fn cmd_status() -> Result<()> {
     }
 
     for session in &sessions {
-        let label = session.working_dir.as_deref()
+        let label = session
+            .working_dir
+            .as_deref()
             .and_then(|d| std::path::Path::new(d).file_name())
             .and_then(|n| n.to_str())
             .unwrap_or(&session.session_id);
@@ -320,17 +330,26 @@ async fn cmd_status() -> Result<()> {
 
         let tool = session.current_tool.as_deref().unwrap_or("-");
 
-        let context = session.context_percent
+        let context = session
+            .context_percent
             .map(|p| format!("{:.0}%", p))
             .unwrap_or_else(|| "-".to_string());
 
         let agents = session.subagent_count.unwrap_or(0);
-        let agent_str = if agents > 0 { format!("  agents: {agents}") } else { String::new() };
+        let agent_str = if agents > 0 {
+            format!("  agents: {agents}")
+        } else {
+            String::new()
+        };
 
         println!("  {label}  |  {status}  |  tool: {tool}  |  ctx: {context}{agent_str}");
     }
 
-    println!("\n{} session{}.", sessions.len(), if sessions.len() == 1 { "" } else { "s" });
+    println!(
+        "\n{} session{}.",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
     Ok(())
 }
 
@@ -395,14 +414,14 @@ async fn cmd_list(json: bool, pref: BackendPreference) -> Result<()> {
             for w in &windows {
                 let cmd = w.foreground_command.as_deref().unwrap_or("-");
                 let focused = if w.is_focused { " *" } else { "" };
-                let profile = w.profile_name.as_deref().map(|p| format!("  profile: {p}")).unwrap_or_default();
+                let profile = w
+                    .profile_name
+                    .as_deref()
+                    .map(|p| format!("  profile: {p}"))
+                    .unwrap_or_default();
                 println!(
                     "  [{}]  cmd: {}  cwd: {}{}{}",
-                    w.session_id,
-                    cmd,
-                    w.cwd,
-                    focused,
-                    profile,
+                    w.session_id, cmd, w.cwd, focused, profile,
                 );
             }
             println!(
@@ -446,15 +465,14 @@ async fn cmd_list(json: bool, pref: BackendPreference) -> Result<()> {
 
             for s in &sessions {
                 let alive = if s.is_alive { "" } else { " (dead)" };
-                let wt = s.worktree_path.as_deref().map(|p| format!("  wt: {p}")).unwrap_or_default();
+                let wt = s
+                    .worktree_path
+                    .as_deref()
+                    .map(|p| format!("  wt: {p}"))
+                    .unwrap_or_default();
                 println!(
                     "  [{}]  shell: {}  cwd: {}  pid: {}{}{}",
-                    s.id,
-                    s.shell_command,
-                    s.cwd,
-                    s.shell_pid,
-                    alive,
-                    wt,
+                    s.id, s.shell_command, s.cwd, s.shell_pid, alive, wt,
                 );
             }
             println!(

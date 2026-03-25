@@ -19,6 +19,8 @@ const SERVER_NAME: &str = "thermal-commander";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+type HandlerResult = std::result::Result<Value, Box<Response>>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Log to stderr so it doesn't interfere with JSON-RPC on stdout
@@ -71,11 +73,7 @@ async fn handle_message(raw: &str, registry: &ToolRegistry) -> Option<Response> 
     let request: mcp::Request = match serde_json::from_str(raw) {
         Ok(r) => r,
         Err(e) => {
-            return Some(Response::error(
-                None,
-                -32700,
-                format!("parse error: {e}"),
-            ));
+            return Some(Response::error(None, -32700, format!("parse error: {e}")));
         }
     };
 
@@ -103,20 +101,20 @@ async fn handle_message(raw: &str, registry: &ToolRegistry) -> Option<Response> 
         "tools/list" => handle_tools_list(registry),
         "tools/call" => handle_tools_call(request.params.unwrap_or(Value::Null), registry).await,
         "ping" => Ok(json!({})),
-        other => Err(Response::error(
+        other => Err(Box::new(Response::error(
             id.clone(),
             -32601,
             format!("method not found: {other}"),
-        )),
+        ))),
     };
 
     Some(match result {
         Ok(value) => Response::success(id, value),
-        Err(resp) => resp,
+        Err(resp) => *resp,
     })
 }
 
-fn handle_initialize() -> Result<Value, Response> {
+fn handle_initialize() -> HandlerResult {
     Ok(json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {
@@ -129,7 +127,7 @@ fn handle_initialize() -> Result<Value, Response> {
     }))
 }
 
-fn handle_tools_list(registry: &ToolRegistry) -> Result<Value, Response> {
+fn handle_tools_list(registry: &ToolRegistry) -> HandlerResult {
     let defs = registry.definitions();
     let tools: Vec<Value> = defs
         .into_iter()
@@ -145,13 +143,14 @@ fn handle_tools_list(registry: &ToolRegistry) -> Result<Value, Response> {
     Ok(json!({ "tools": tools }))
 }
 
-async fn handle_tools_call(params: Value, registry: &ToolRegistry) -> Result<Value, Response> {
-    let name = params
-        .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            Response::error(None, -32602, "missing tool name in params".into())
-        })?;
+async fn handle_tools_call(params: Value, registry: &ToolRegistry) -> HandlerResult {
+    let name = params.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+        Box::new(Response::error(
+            None,
+            -32602,
+            "missing tool name in params".into(),
+        ))
+    })?;
 
     let arguments = params
         .get("arguments")
@@ -164,10 +163,10 @@ async fn handle_tools_call(params: Value, registry: &ToolRegistry) -> Result<Val
         Ok(result) => Ok(serde_json::to_value(result).unwrap()),
         Err(e) => {
             tracing::error!(tool = %name, error = %e, "tool execution error");
-            Ok(serde_json::to_value(mcp::ToolResult::error(format!(
-                "internal error: {e}"
-            )))
-            .unwrap())
+            Ok(
+                serde_json::to_value(mcp::ToolResult::error(format!("internal error: {e}")))
+                    .unwrap(),
+            )
         }
     }
 }

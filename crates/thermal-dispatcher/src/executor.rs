@@ -109,8 +109,8 @@ async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String
     let _ = child.wait().await;
 
     // Parse the response
-    let resp: Value = serde_json::from_str(response_line.trim())
-        .context("parsing thermal-commander response")?;
+    let resp: Value =
+        serde_json::from_str(response_line.trim()).context("parsing thermal-commander response")?;
 
     // Extract text content from the MCP result
     if let Some(error) = resp.get("error") {
@@ -124,7 +124,10 @@ async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String
     let result = resp.get("result");
 
     // MCP tool results have content array with text blocks
-    if let Some(content) = result.and_then(|r| r.get("content")).and_then(|c| c.as_array()) {
+    if let Some(content) = result
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+    {
         let texts: Vec<&str> = content
             .iter()
             .filter_map(|block| {
@@ -213,9 +216,7 @@ pub fn beads_args_for(tool_name: &str, input: &Value) -> Vec<String> {
 
 /// Execute a beads tool via the beads CLI.
 async fn execute_beads_tool(tool_name: &str, input: &Value) -> Result<String> {
-    let subcommand = tool_name
-        .strip_prefix("beads:")
-        .unwrap_or(tool_name);
+    let subcommand = tool_name.strip_prefix("beads:").unwrap_or(tool_name);
 
     info!(tool = %tool_name, subcommand = %subcommand, "executing via beads CLI");
 
@@ -351,7 +352,10 @@ mod tests {
 
     #[test]
     fn beads_list_with_both_filters() {
-        let args = beads_args_for("beads:list", &json!({"project": "therm", "status": "ready"}));
+        let args = beads_args_for(
+            "beads:list",
+            &json!({"project": "therm", "status": "ready"}),
+        );
         // project comes before status in the match arm
         assert!(args.contains(&"--project".to_string()));
         assert!(args.contains(&"therm".to_string()));
@@ -484,8 +488,7 @@ mod tests {
 
     /// Replicate the response-parsing logic from execute_commander_tool.
     fn parse_mcp_response(response_line: &str) -> Result<String> {
-        let resp: Value =
-            serde_json::from_str(response_line.trim()).context("parsing response")?;
+        let resp: Value = serde_json::from_str(response_line.trim()).context("parsing response")?;
         if let Some(error) = resp.get("error") {
             let msg = error
                 .get("message")
@@ -519,7 +522,8 @@ mod tests {
 
     #[test]
     fn mcp_error_response_returns_error_message() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#;
         let result = parse_mcp_response(json).unwrap();
         assert_eq!(result, "Error: method not found");
     }

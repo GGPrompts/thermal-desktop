@@ -12,12 +12,16 @@ pub mod state;
 pub mod text;
 pub mod wgpu_ctx;
 
-pub use claude_state::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ToolArgs, ToolDetails};
+pub use claude_state::{
+    ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ToolArgs, ToolDetails,
+};
 // Generalized aliases — prefer these in new code.
 pub use claude_state::{AgentSessionState, AgentStatePoller, AgentStatus};
 pub use config::{ConductorConfig, Layout};
 pub use geometry::{Point, Rect, Size};
-pub use palette::{heat_label, thermal_gradient, thermal_gradient_f32, thermal_gradient_lut, Color, ThermalPalette};
+pub use palette::{
+    Color, ThermalPalette, heat_label, thermal_gradient, thermal_gradient_f32, thermal_gradient_lut,
+};
 pub use pane::PaneInfo;
 pub use session::{TerminalManager, TerminalSession};
 pub use state::AgentState;

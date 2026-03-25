@@ -16,7 +16,9 @@
 //! When a daemon is available, the injection is sent directly via the daemon
 //! client's `send_input` instead of the file-based approach.
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
+use notify::{
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};

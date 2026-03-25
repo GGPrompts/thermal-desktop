@@ -7,8 +7,8 @@
 //! Socket path: `/run/user/<uid>/thermal/conductor.sock`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -81,9 +81,7 @@ impl Daemon {
     ) -> Result<String> {
         let shell_path =
             shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
-        let cwd_path = cwd.unwrap_or_else(|| {
-            std::env::var("HOME").unwrap_or_else(|_| "/".into())
-        });
+        let cwd_path = cwd.unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
 
         let id_num = self.next_id.fetch_add(1, Ordering::Relaxed);
         let id = format!("session-{id_num}");
@@ -119,7 +117,7 @@ impl Daemon {
 
         // Set read end to non-blocking.
         {
-            use nix::fcntl::{fcntl, FcntlArg, OFlag};
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
             use std::os::fd::AsRawFd;
             let flags = fcntl(wakeup_read.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0);
             let _ = fcntl(
@@ -154,7 +152,9 @@ impl Daemon {
         };
 
         let session_arc = Arc::new(Mutex::new(session));
-        self.sessions.lock().insert(id.clone(), Arc::clone(&session_arc));
+        self.sessions
+            .lock()
+            .insert(id.clone(), Arc::clone(&session_arc));
 
         // Spawn a task to handle terminal events (PtyWrite, title changes, etc.)
         {
@@ -253,10 +253,8 @@ impl Daemon {
                         }
                         TermDamage::Partial(iter) => {
                             full_redraw = false;
-                            let damaged_rows: std::collections::HashSet<usize> = iter
-                                .filter(|b| b.is_damaged())
-                                .map(|b| b.line)
-                                .collect();
+                            let damaged_rows: std::collections::HashSet<usize> =
+                                iter.filter(|b| b.is_damaged()).map(|b| b.line).collect();
 
                             if damaged_rows.is_empty() {
                                 term.reset_damage();
@@ -294,7 +292,8 @@ impl Daemon {
                     let cursor = CursorData {
                         col: content.cursor.point.column.0 as u16,
                         row: content.cursor.point.line.0.max(0) as u16,
-                        visible: content.cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden,
+                        visible: content.cursor.shape
+                            != alacritty_terminal::vte::ansi::CursorShape::Hidden,
                     };
 
                     term.reset_damage();
@@ -487,14 +486,16 @@ impl Daemon {
     /// Handle a single client request and return the response.
     fn handle_request(&self, request: &Request) -> Response {
         match request {
-            Request::SpawnSession { shell, cwd, worktree } => {
-                match self.spawn_session(shell.clone(), cwd.clone(), *worktree) {
-                    Ok(id) => Response::SessionSpawned { id },
-                    Err(e) => Response::Error {
-                        message: format!("Failed to spawn session: {e}"),
-                    },
-                }
-            }
+            Request::SpawnSession {
+                shell,
+                cwd,
+                worktree,
+            } => match self.spawn_session(shell.clone(), cwd.clone(), *worktree) {
+                Ok(id) => Response::SessionSpawned { id },
+                Err(e) => Response::Error {
+                    message: format!("Failed to spawn session: {e}"),
+                },
+            },
 
             Request::KillSession { id } => {
                 let mut sessions = self.sessions.lock();
@@ -551,12 +552,9 @@ impl Daemon {
                         // Apply initial size if provided and no other clients attached.
                         if let Some((cols, rows)) = initial_size {
                             if session.attached_count.load(Ordering::Relaxed) == 0 {
-                                session.terminal.resize(
-                                    *cols as usize,
-                                    *rows as usize,
-                                    8,
-                                    16,
-                                );
+                                session
+                                    .terminal
+                                    .resize(*cols as usize, *rows as usize, 8, 16);
                                 let _ = session.pty.resize(*cols, *rows);
                             }
                         }
@@ -748,7 +746,11 @@ fn snapshot_cells(terminal: &Terminal, screen_lines: usize, cols: usize) -> Vec<
     let mut grid = vec![
         CellData {
             ch: ' ',
-            fg: ColorData { r: 211, g: 215, b: 207 },
+            fg: ColorData {
+                r: 211,
+                g: 215,
+                b: 207
+            },
             bg: ColorData { r: 0, g: 0, b: 0 },
             flags: 0,
         };
@@ -1001,8 +1003,7 @@ mod tests {
     async fn daemon_spawn_and_list() {
         let sock_path = test_socket_path();
 
-        let listener =
-            UnixListener::bind(&sock_path).expect("Failed to bind test socket");
+        let listener = UnixListener::bind(&sock_path).expect("Failed to bind test socket");
 
         // Shutdown channel.
         let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -1029,7 +1030,10 @@ mod tests {
             .spawn_session(Some("/bin/sh".to_string()), None, false)
             .await
             .expect("spawn_session failed");
-        assert!(session_id.starts_with("session-"), "Unexpected session id: {session_id}");
+        assert!(
+            session_id.starts_with("session-"),
+            "Unexpected session id: {session_id}"
+        );
 
         // List sessions and verify our session is there.
         let sessions = client.list_sessions().await.expect("list_sessions failed");
@@ -1039,10 +1043,16 @@ mod tests {
         assert!(sessions[0].is_alive, "Session should be alive");
 
         // Kill the session.
-        client.kill_session(&session_id).await.expect("kill_session failed");
+        client
+            .kill_session(&session_id)
+            .await
+            .expect("kill_session failed");
 
         // Verify the session is gone.
-        let sessions = client.list_sessions().await.expect("list_sessions after kill failed");
+        let sessions = client
+            .list_sessions()
+            .await
+            .expect("list_sessions after kill failed");
         assert!(sessions.is_empty(), "Expected no sessions after kill");
 
         // Shut down the daemon.

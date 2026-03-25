@@ -92,9 +92,7 @@ impl DaemonClient {
 
     /// Spawn reader and writer tasks for a connected stream.
     /// Returns the (request_sender, response_receiver) pair.
-    fn spawn_io_tasks(
-        stream: UnixStream,
-    ) -> (mpsc::Sender<Request>, mpsc::Receiver<Response>) {
+    fn spawn_io_tasks(stream: UnixStream) -> (mpsc::Sender<Request>, mpsc::Receiver<Response>) {
         let (reader, mut writer) = stream.into_split();
 
         // Channel for outgoing requests.
@@ -125,18 +123,16 @@ impl DaemonClient {
             let mut reader = reader;
             loop {
                 match protocol::read_frame(&mut reader).await {
-                    Ok(Some(payload)) => {
-                        match protocol::decode_payload::<Response>(&payload) {
-                            Ok(response) => {
-                                if response_tx.send(response).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to decode daemon response: {e}");
+                    Ok(Some(payload)) => match protocol::decode_payload::<Response>(&payload) {
+                        Ok(response) => {
+                            if response_tx.send(response).await.is_err() {
+                                break;
                             }
                         }
-                    }
+                        Err(e) => {
+                            warn!("Failed to decode daemon response: {e}");
+                        }
+                    },
                     Ok(None) => {
                         info!("Daemon connection closed");
                         break;
@@ -196,9 +192,7 @@ impl DaemonClient {
             }
         }
 
-        anyhow::bail!(
-            "Failed to reconnect to daemon after {MAX_RECONNECT_ATTEMPTS} attempts"
-        )
+        anyhow::bail!("Failed to reconnect to daemon after {MAX_RECONNECT_ATTEMPTS} attempts")
     }
 
     /// Check whether the daemon connection is healthy via a Ping/Pong exchange.
@@ -258,7 +252,13 @@ impl DaemonClient {
         cwd: Option<String>,
         worktree: bool,
     ) -> Result<String> {
-        let response = self.request(Request::SpawnSession { shell, cwd, worktree }).await?;
+        let response = self
+            .request(Request::SpawnSession {
+                shell,
+                cwd,
+                worktree,
+            })
+            .await?;
         match response {
             Response::SessionSpawned { id } => Ok(id),
             Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
@@ -269,9 +269,7 @@ impl DaemonClient {
     /// Kill a session.
     pub async fn kill_session(&mut self, id: &str) -> Result<()> {
         let response = self
-            .request(Request::KillSession {
-                id: id.to_string(),
-            })
+            .request(Request::KillSession { id: id.to_string() })
             .await?;
         match response {
             Response::Ok => Ok(()),
@@ -293,9 +291,7 @@ impl DaemonClient {
     /// Get a full grid snapshot for a session.
     pub async fn get_session_state(&mut self, id: &str) -> Result<Response> {
         let response = self
-            .request(Request::GetSessionState {
-                id: id.to_string(),
-            })
+            .request(Request::GetSessionState { id: id.to_string() })
             .await?;
         match response {
             state @ Response::SessionState { .. } => Ok(state),
@@ -305,11 +301,7 @@ impl DaemonClient {
     }
 
     /// Attach to a session and begin receiving updates.
-    pub async fn attach(
-        &mut self,
-        id: &str,
-        initial_size: Option<(u16, u16)>,
-    ) -> Result<Response> {
+    pub async fn attach(&mut self, id: &str, initial_size: Option<(u16, u16)>) -> Result<Response> {
         self.request(Request::Attach {
             id: id.to_string(),
             initial_size,
@@ -319,11 +311,7 @@ impl DaemonClient {
 
     /// Detach from a session.
     pub async fn detach(&mut self, id: &str) -> Result<()> {
-        let response = self
-            .request(Request::Detach {
-                id: id.to_string(),
-            })
-            .await?;
+        let response = self.request(Request::Detach { id: id.to_string() }).await?;
         match response {
             Response::Ok => Ok(()),
             Response::Error { message } => anyhow::bail!("Daemon error: {message}"),

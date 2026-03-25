@@ -76,8 +76,7 @@ unsafe extern "C" fn pam_conv_callback(
 
         // Allocate response array (zeroed)
         let n = num_msg as usize;
-        let responses =
-            calloc(n, std::mem::size_of::<PamResponse>()) as *mut PamResponse;
+        let responses = calloc(n, std::mem::size_of::<PamResponse>()) as *mut PamResponse;
         if responses.is_null() {
             return -1; // PAM_BUF_ERR
         }
@@ -180,7 +179,7 @@ pub fn authenticate(username: &str, password: &Zeroizing<String>) -> bool {
 /// Uses `nix::unistd::User::from_uid(getuid())` to read the passwd entry,
 /// falling back to the `USER` env var, then "user".
 pub fn current_username() -> String {
-    use nix::unistd::{getuid, User};
+    use nix::unistd::{User, getuid};
     match User::from_uid(getuid()) {
         Ok(Some(user)) => user.name,
         Ok(None) => {

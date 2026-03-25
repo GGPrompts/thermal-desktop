@@ -23,11 +23,11 @@ impl AgentState {
     /// Returns the thermal-palette `Color` that represents this state.
     pub fn color(self) -> Color {
         match self {
-            AgentState::Idle => Color::ACCENT_COOL,   // #3b82f6 — cool blue
-            AgentState::Running => Color::WARM,       // #22c55e — warm green
-            AgentState::Thinking => Color::HOT,       // #eab308 — yellow
-            AgentState::Warning => Color::HOTTER,     // #f97316 — orange
-            AgentState::Error => Color::SEARING,      // #ef4444 — red
+            AgentState::Idle => Color::ACCENT_COOL, // #3b82f6 — cool blue
+            AgentState::Running => Color::WARM,     // #22c55e — warm green
+            AgentState::Thinking => Color::HOT,     // #eab308 — yellow
+            AgentState::Warning => Color::HOTTER,   // #f97316 — orange
+            AgentState::Error => Color::SEARING,    // #ef4444 — red
             AgentState::Complete => Color::WHITE_HOT, // #fef3c7 — white-hot
         }
     }

@@ -12,27 +12,27 @@ use crate::layout::{ModuleOutput, Zone};
 fn class_to_icon(class: &str) -> &'static str {
     let lower = class.to_lowercase();
     match lower.as_str() {
-        "kitty" | "alacritty" | "foot" | "wezterm" | "ghostty" => "\u{f120}",  // terminal
-        "firefox" | "firefox-esr" | "librewolf" | "zen" | "zen-browser" => "\u{f269}",  // firefox/browser
-        "chromium" | "google-chrome" | "brave-browser" => "\u{f268}",  // chrome
-        "thunar" | "nautilus" | "dolphin" | "pcmanfm" | "nemo" => "\u{f07b}",  // folder
-        "code" | "code-oss" | "vscodium" => "\u{e70c}",  // vscode
-        "discord" => "\u{f392}",  // discord
-        "slack" => "\u{f198}",  // slack
-        "spotify" => "\u{f1bc}",  // spotify
-        "steam" => "\u{f1b6}",  // steam
-        "obs" | "obs-studio" => "\u{f03d}",  // video camera
-        "gimp" | "krita" | "inkscape" => "\u{f1fc}",  // paint brush
-        "vlc" | "mpv" | "celluloid" => "\u{f144}",  // play circle
-        "telegram-desktop" | "telegramdesktop" => "\u{f2c6}",  // telegram
-        "signal" => "\u{f4ad}",  // comment dots (messaging)
-        "thunderbird" | "evolution" => "\u{f0e0}",  // envelope
-        "libreoffice" | "soffice" => "\u{f15c}",  // file text
-        "zathura" | "evince" | "okular" => "\u{f1c1}",  // file pdf
-        "pavucontrol" | "pwvucontrol" => "\u{f028}",  // volume
-        "btop" | "htop" => "\u{f080}",  // bar chart
-        "eog" | "loupe" | "feh" | "imv" => "\u{f03e}",  // image
-        _ => "\u{f2d0}",  // window (generic)
+        "kitty" | "alacritty" | "foot" | "wezterm" | "ghostty" => "\u{f120}", // terminal
+        "firefox" | "firefox-esr" | "librewolf" | "zen" | "zen-browser" => "\u{f269}", // firefox/browser
+        "chromium" | "google-chrome" | "brave-browser" => "\u{f268}",                  // chrome
+        "thunar" | "nautilus" | "dolphin" | "pcmanfm" | "nemo" => "\u{f07b}",          // folder
+        "code" | "code-oss" | "vscodium" => "\u{e70c}",                                // vscode
+        "discord" => "\u{f392}",                                                       // discord
+        "slack" => "\u{f198}",                                                         // slack
+        "spotify" => "\u{f1bc}",                                                       // spotify
+        "steam" => "\u{f1b6}",                                                         // steam
+        "obs" | "obs-studio" => "\u{f03d}", // video camera
+        "gimp" | "krita" | "inkscape" => "\u{f1fc}", // paint brush
+        "vlc" | "mpv" | "celluloid" => "\u{f144}", // play circle
+        "telegram-desktop" | "telegramdesktop" => "\u{f2c6}", // telegram
+        "signal" => "\u{f4ad}",             // comment dots (messaging)
+        "thunderbird" | "evolution" => "\u{f0e0}", // envelope
+        "libreoffice" | "soffice" => "\u{f15c}", // file text
+        "zathura" | "evince" | "okular" => "\u{f1c1}", // file pdf
+        "pavucontrol" | "pwvucontrol" => "\u{f028}", // volume
+        "btop" | "htop" => "\u{f080}",      // bar chart
+        "eog" | "loupe" | "feh" | "imv" => "\u{f03e}", // image
+        _ => "\u{f2d0}",                    // window (generic)
     }
 }
 
@@ -57,10 +57,7 @@ fn get_active_workspace_id() -> Option<i64> {
 
 /// Query Hyprland for all clients, grouped by workspace.
 fn get_workspaces() -> Vec<WorkspaceInfo> {
-    let output = match Command::new("hyprctl")
-        .args(["clients", "-j"])
-        .output()
-    {
+    let output = match Command::new("hyprctl").args(["clients", "-j"]).output() {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
@@ -86,10 +83,7 @@ fn get_workspaces() -> Vec<WorkspaceInfo> {
             continue;
         }
 
-        let class = client
-            .get("class")
-            .and_then(|c| c.as_str())
-            .unwrap_or("");
+        let class = client.get("class").and_then(|c| c.as_str()).unwrap_or("");
 
         // Skip clients with empty class (e.g. layer surfaces).
         if class.is_empty() {
@@ -202,7 +196,10 @@ mod tests {
         let outputs = module.render();
         for m in &outputs {
             for &ch in &m.color {
-                assert!((0.0..=1.0).contains(&ch), "color channel out of range: {ch}");
+                assert!(
+                    (0.0..=1.0).contains(&ch),
+                    "color channel out of range: {ch}"
+                );
             }
         }
     }

@@ -94,10 +94,10 @@ impl ConductorClient {
 
 fn parse_agent_state(s: &str) -> AgentState {
     match s.trim().to_ascii_lowercase().as_str() {
-        "running"  => AgentState::Running,
+        "running" => AgentState::Running,
         "thinking" => AgentState::Thinking,
-        "warning"  => AgentState::Warning,
-        "error"    => AgentState::Error,
+        "warning" => AgentState::Warning,
+        "error" => AgentState::Error,
         "complete" => AgentState::Complete,
         _ => AgentState::Idle,
     }

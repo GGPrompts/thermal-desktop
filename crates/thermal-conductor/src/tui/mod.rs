@@ -15,26 +15,28 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
+    },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Tabs},
-    Frame, Terminal,
 };
 
 use thermal_core::ClaudeStatePoller;
 
-use crate::backend::BackendPreference;
 use self::profiles::ProfilesPage;
 use self::services::ServicesPage;
 use self::sessions::SessionsPage;
 use self::spawn::SpawnPage;
+use crate::backend::BackendPreference;
 
 // ---------------------------------------------------------------------------
 // Palette helpers
@@ -83,15 +85,14 @@ pub trait TuiPage: Any {
     fn render(&mut self, f: &mut Frame, area: Rect);
 
     /// Handle a key event. Return `true` if the app should quit.
-    fn handle_key(&mut self, key: crossterm::event::KeyEvent, poller: &mut ClaudeStatePoller)
-        -> bool;
+    fn handle_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        poller: &mut ClaudeStatePoller,
+    ) -> bool;
 
     /// Handle a mouse event.
-    fn handle_mouse(
-        &mut self,
-        event: crossterm::event::MouseEvent,
-        poller: &mut ClaudeStatePoller,
-    );
+    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, poller: &mut ClaudeStatePoller);
 
     /// Whether focus is currently on a text input field (suppresses global hotkeys).
     fn has_text_focus(&self) -> bool {
@@ -153,7 +154,9 @@ impl App {
     fn tick(&mut self) {
         // Check if the profiles page signaled a change.
         // If so, tell the spawn page to reload on its next tick.
-        let profiles_changed = self.pages.get_mut(2)
+        let profiles_changed = self
+            .pages
+            .get_mut(2)
             .and_then(|p| p.as_any_mut().downcast_mut::<ProfilesPage>())
             .map(|pp| {
                 let changed = pp.profiles_changed;
@@ -163,7 +166,9 @@ impl App {
             .unwrap_or(false);
 
         if profiles_changed {
-            if let Some(spawn) = self.pages.get_mut(1)
+            if let Some(spawn) = self
+                .pages
+                .get_mut(1)
                 .and_then(|p| p.as_any_mut().downcast_mut::<SpawnPage>())
             {
                 spawn.needs_reload = true;
@@ -186,15 +191,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // tab bar
-            Constraint::Min(5),   // page content
+            Constraint::Min(5),    // page content
         ])
         .split(f.area());
 
     // Background
-    f.render_widget(
-        Block::default().style(Style::default().bg(BG)),
-        f.area(),
-    );
+    f.render_widget(Block::default().style(Style::default().bg(BG)), f.area());
 
     // -- Tab bar --
     let titles: Vec<Line> = app
@@ -211,10 +213,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(":", Style::default().fg(TEXT_MUTED)),
-                Span::styled(
-                    page.title(),
-                    Style::default().fg(TEXT_BRIGHT),
-                ),
+                Span::styled(page.title(), Style::default().fg(TEXT_BRIGHT)),
             ])
         })
         .collect();

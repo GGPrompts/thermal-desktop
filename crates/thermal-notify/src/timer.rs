@@ -209,9 +209,14 @@ mod tests {
         // Spin-wait up to 400 ms for expiry; test environment should be fast enough.
         let deadline = std::time::Instant::now() + Duration::from_millis(400);
         loop {
-            if timer.is_expired() { break; }
+            if timer.is_expired() {
+                break;
+            }
             if std::time::Instant::now() > deadline {
-                panic!("timer did not expire within 400 ms; alpha={}", timer.alpha());
+                panic!(
+                    "timer did not expire within 400 ms; alpha={}",
+                    timer.alpha()
+                );
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -239,7 +244,9 @@ mod tests {
         let timer = DismissTimer::new(1, 1).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_millis(500);
         loop {
-            if timer.is_expired() { break; }
+            if timer.is_expired() {
+                break;
+            }
             if std::time::Instant::now() > deadline {
                 panic!("timer never expired; alpha={}", timer.alpha());
             }

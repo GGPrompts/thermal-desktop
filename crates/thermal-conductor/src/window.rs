@@ -25,22 +25,22 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT, BTN_MIDDLE},
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        pointer::{BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
-        xdg::{
-            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
-            XdgShell,
-        },
         WaylandSurface,
+        xdg::{
+            XdgShell,
+            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
+        },
     },
 };
 use wayland_client::{
+    Connection, Dispatch, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
-    Connection, Dispatch, Proxy, QueueHandle,
 };
 use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
     zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
@@ -57,11 +57,10 @@ use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
-
 
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
@@ -92,9 +91,7 @@ enum SessionMode {
         session_id: String,
     },
     /// Direct PTY ownership (no daemon running).
-    Standalone {
-        pty: PtySession,
-    },
+    Standalone { pty: PtySession },
 }
 
 /// Launch the SCTK + wgpu window with a live terminal.
@@ -107,8 +104,7 @@ pub fn run() -> anyhow::Result<()> {
     let qh = event_queue.handle();
 
     // ── Bind globals ──────────────────────────────────────────────────────────
-    let compositor =
-        CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
+    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg_wm_base is not available");
 
     // ── Keyboard shortcuts inhibit (optional) ──────────────────────────────────
@@ -146,8 +142,7 @@ pub fn run() -> anyhow::Result<()> {
     });
 
     let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-        NonNull::new(conn.backend().display_ptr() as *mut _)
-            .expect("Wayland display ptr is null"),
+        NonNull::new(conn.backend().display_ptr() as *mut _).expect("Wayland display ptr is null"),
     ));
     let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
         NonNull::new(window.wl_surface().id().as_ptr().cast::<std::ffi::c_void>())
@@ -224,7 +219,7 @@ pub fn run() -> anyhow::Result<()> {
     let (wakeup_read, wakeup_write) = nix::unistd::pipe().expect("Failed to create wakeup pipe");
     // Set read end to non-blocking so we can drain it without blocking.
     {
-        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
         let flags = fcntl(wakeup_read.as_raw_fd(), FcntlArg::F_GETFL).unwrap_or(0);
         let _ = fcntl(
             wakeup_read.as_raw_fd(),
@@ -688,10 +683,7 @@ fn apply_session_state_to_term(terminal: &Terminal, response: &Response) {
             let row = i / (*cols as usize);
             let col = i % (*cols as usize);
             if row < *rows as usize {
-                let point = Point::new(
-                    alacritty_terminal::index::Line(row as i32),
-                    Column(col),
-                );
+                let point = Point::new(alacritty_terminal::index::Line(row as i32), Column(col));
                 let grid_cell = &mut term.grid_mut()[point];
                 grid_cell.c = cell_data.ch;
                 grid_cell.flags = Flags::from_bits_truncate(cell_data.flags);
@@ -824,10 +816,7 @@ impl ConductorWindow {
                     tracing::warn!("Failed to write to PTY: {e}");
                 }
             }
-            SessionMode::Client {
-                client,
-                session_id,
-            } => {
+            SessionMode::Client { client, session_id } => {
                 let data = bytes.to_vec();
                 let id = session_id.clone();
                 // Fire-and-forget async send — input is latency-sensitive so
@@ -851,10 +840,7 @@ impl ConductorWindow {
             SessionMode::Standalone { pty } => {
                 let _ = pty.resize(cols, rows);
             }
-            SessionMode::Client {
-                client,
-                session_id,
-            } => {
+            SessionMode::Client { client, session_id } => {
                 let id = session_id.clone();
                 let client_tx = client.request_tx_clone();
                 tokio::spawn(async move {
@@ -885,7 +871,9 @@ impl ConductorWindow {
         let output = match self.wgpu.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Outdated) => {
-                self.wgpu.surface.configure(&self.wgpu.device, &self.wgpu.config);
+                self.wgpu
+                    .surface
+                    .configure(&self.wgpu.device, &self.wgpu.config);
                 return;
             }
             Err(e) => {
@@ -1596,8 +1584,7 @@ impl ConductorWindow {
         match &self.session_mode {
             SessionMode::Client { client, .. } => {
                 let client_tx = client.request_tx_clone();
-                let shell =
-                    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 tokio::spawn(async move {
                     // Spawn a new session on the daemon.
                     if let Err(e) = client_tx
@@ -1614,14 +1601,17 @@ impl ConductorWindow {
                     tracing::info!("Continuation session spawn request sent to daemon");
 
                     // Launch a new window process to attach to the new session.
-                    match std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| {
-                        std::path::PathBuf::from("thermal-conductor")
-                    }))
+                    match std::process::Command::new(
+                        std::env::current_exe()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("thermal-conductor")),
+                    )
                     .arg("window")
                     .spawn()
                     {
                         Ok(_) => {
-                            tracing::info!("Launched new thermal-conductor window for continuation");
+                            tracing::info!(
+                                "Launched new thermal-conductor window for continuation"
+                            );
                         }
                         Err(e) => {
                             tracing::warn!("Failed to launch continuation window: {e}");
@@ -1631,9 +1621,10 @@ impl ConductorWindow {
             }
             SessionMode::Standalone { .. } => {
                 // Spawn a new thermal-conductor window process directly.
-                match std::process::Command::new(std::env::current_exe().unwrap_or_else(|_| {
-                    std::path::PathBuf::from("thermal-conductor")
-                }))
+                match std::process::Command::new(
+                    std::env::current_exe()
+                        .unwrap_or_else(|_| std::path::PathBuf::from("thermal-conductor")),
+                )
                 .arg("window")
                 .spawn()
                 {
@@ -1793,12 +1784,7 @@ impl OutputHandler for ConductorWindow {
 // ── XDG window handler ───────────────────────────────────────────────────────
 
 impl WindowHandler for ConductorWindow {
-    fn request_close(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _window: &Window,
-    ) {
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &Window) {
         tracing::info!("Window close requested");
         self.exit = true;
     }
@@ -1820,10 +1806,13 @@ impl WindowHandler for ConductorWindow {
             self.height = h;
             self.wgpu.config.width = w;
             self.wgpu.config.height = h;
-            self.wgpu.surface.configure(&self.wgpu.device, &self.wgpu.config);
+            self.wgpu
+                .surface
+                .configure(&self.wgpu.device, &self.wgpu.config);
 
             // Resize the grid renderer viewport.
-            self.grid_renderer.resize(&self.wgpu.device, &self.wgpu.queue, w, h);
+            self.grid_renderer
+                .resize(&self.wgpu.device, &self.wgpu.queue, w, h);
 
             // Recalculate terminal grid dimensions and resize.
             // Account for the timeline bar when it is visible.
@@ -1920,9 +1909,7 @@ impl KeyboardHandler for ConductorWindow {
         // Create a keyboard shortcuts inhibitor so the compositor forwards
         // all key combos (Ctrl+Alt, Super, etc.) to us while focused.
         if self.shortcuts_inhibitor.is_none() {
-            if let (Some(manager), Some(seat)) =
-                (&self.shortcuts_inhibit_manager, &self.seat)
-            {
+            if let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit_manager, &self.seat) {
                 let inhibitor = manager.inhibit_shortcuts(surface, seat, qh, ());
                 tracing::debug!("Keyboard shortcuts inhibitor created");
                 self.shortcuts_inhibitor = Some(inhibitor);
@@ -2146,10 +2133,7 @@ impl PointerHandler for ConductorWindow {
                             }
                         }
                     }
-                    PointerEventKind::Axis {
-                        vertical,
-                        ..
-                    } => {
+                    PointerEventKind::Axis { vertical, .. } => {
                         // Scroll: button 64 (up) / 65 (down) in SGR mode.
                         let btn = if vertical.discrete > 0 { 65 } else { 64 };
                         let steps = vertical.discrete.unsigned_abs().max(1);
@@ -2203,10 +2187,7 @@ impl PointerHandler for ConductorWindow {
                             self.dirty = true;
                         }
                     }
-                    PointerEventKind::Axis {
-                        vertical,
-                        ..
-                    } => {
+                    PointerEventKind::Axis { vertical, .. } => {
                         // Scroll the terminal scrollback when not in mouse mode.
                         let th = self.terminal.term_handle();
                         let mut t = th.lock();
@@ -2271,7 +2252,9 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for ConductorWindow {
                 tracing::debug!("Keyboard shortcuts inhibitor: active");
             }
             zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => {
-                tracing::debug!("Keyboard shortcuts inhibitor: inactive (compositor reclaimed shortcuts)");
+                tracing::debug!(
+                    "Keyboard shortcuts inhibitor: inactive (compositor reclaimed shortcuts)"
+                );
             }
             _ => {}
         }

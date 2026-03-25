@@ -99,9 +99,7 @@ impl BarLayout {
         let margin: f32 = 8.0;
 
         // Estimate text pixel width (char count, not byte length, for unicode).
-        let text_px = |m: &ModuleOutput| -> f32 {
-            m.text.chars().count() as f32 * char_width
-        };
+        let text_px = |m: &ModuleOutput| -> f32 { m.text.chars().count() as f32 * char_width };
 
         let mut result = Vec::new();
 
@@ -131,12 +129,17 @@ impl BarLayout {
             right_modules.push(m);
         }
         right_modules.reverse();
-        let right_start = right_modules.first().map(|m| m.x).unwrap_or(self.bar_width as f32 - margin);
+        let right_start = right_modules
+            .first()
+            .map(|m| m.x)
+            .unwrap_or(self.bar_width as f32 - margin);
 
         // --- Center zone ---
         let total_center_w: f32 = self.center.iter().map(|m| text_px(m) + padding).sum();
         let center_start = (self.bar_width as f32 / 2.0) - (total_center_w / 2.0);
-        let center_start = center_start.max(left_end + padding).min(right_start - total_center_w - padding);
+        let center_start = center_start
+            .max(left_end + padding)
+            .min(right_start - total_center_w - padding);
         let mut cx = center_start;
         for module in &self.center {
             let w = text_px(module) + padding;
@@ -193,8 +196,8 @@ mod tests {
     #[test]
     fn zone_copy_clone_works() {
         let z = Zone::Left;
-        let z2 = z;          // Copy
-        let z3 = z.clone();  // Clone
+        let z2 = z; // Copy
+        let z3 = z.clone(); // Clone
         assert_eq!(z2, z3);
     }
 
@@ -283,8 +286,8 @@ mod tests {
     #[test]
     fn compute_positions_left_modules_advance_x() {
         let mut layout = BarLayout::new(1920);
-        layout.left.push(dummy_left("A"));   // 1 char
-        layout.left.push(dummy_left("BB"));  // 2 chars
+        layout.left.push(dummy_left("A")); // 1 char
+        layout.left.push(dummy_left("BB")); // 2 chars
         let positioned = layout.compute_positions();
         let lefts: Vec<_> = positioned.iter().filter(|m| m.zone == Zone::Left).collect();
         assert_eq!(lefts.len(), 2);
@@ -310,7 +313,10 @@ mod tests {
 
         let w1 = layout1.compute_positions()[0].width;
         let w2 = layout2.compute_positions()[0].width;
-        assert!(w2 > w1, "longer text should produce wider module: w1={w1} w2={w2}");
+        assert!(
+            w2 > w1,
+            "longer text should produce wider module: w1={w1} w2={w2}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -323,11 +329,18 @@ mod tests {
         let mut layout = BarLayout::new(bar_width);
         layout.right.push(dummy_right("12:34:56"));
         let positioned = layout.compute_positions();
-        let right_mod = positioned.iter().filter(|m| m.zone == Zone::Right && !m.text.is_empty()).next().unwrap();
+        let right_mod = positioned
+            .iter()
+            .filter(|m| m.zone == Zone::Right && !m.text.is_empty())
+            .next()
+            .unwrap();
         // The right module should start before bar_width and well into the right half.
         assert!(right_mod.x < bar_width as f32);
-        assert!(right_mod.x > bar_width as f32 / 2.0,
-            "right module x={} should be in the right half", right_mod.x);
+        assert!(
+            right_mod.x > bar_width as f32 / 2.0,
+            "right module x={} should be in the right half",
+            right_mod.x
+        );
     }
 
     #[test]
@@ -337,13 +350,17 @@ mod tests {
         layout.right.push(dummy_right("12:34:56"));
         let positioned = layout.compute_positions();
         // The rightmost module's x + width should equal bar_width - margin (8.0).
-        let right_mods: Vec<_> = positioned.iter()
+        let right_mods: Vec<_> = positioned
+            .iter()
             .filter(|m| m.zone == Zone::Right && !m.text.is_empty())
             .collect();
         let last = right_mods.last().unwrap();
         let right_edge = last.x + last.width;
-        assert!((right_edge - (bar_width as f32 - 8.0)).abs() < 1e-3,
-            "right edge={right_edge} expected={}", bar_width as f32 - 8.0);
+        assert!(
+            (right_edge - (bar_width as f32 - 8.0)).abs() < 1e-3,
+            "right edge={right_edge} expected={}",
+            bar_width as f32 - 8.0
+        );
     }
 
     #[test]
@@ -352,7 +369,9 @@ mod tests {
         layout.right.push(dummy_right("CLU 1 tool"));
         let positioned = layout.compute_positions();
         // The separator is a zero-text 1px-wide module at Zone::Right.
-        let sep = positioned.iter().find(|m| m.zone == Zone::Right && m.text.is_empty());
+        let sep = positioned
+            .iter()
+            .find(|m| m.zone == Zone::Right && m.text.is_empty());
         assert!(sep.is_some(), "separator module should be present");
         assert!((sep.unwrap().width - 1.0).abs() < 1e-3);
     }
@@ -370,8 +389,11 @@ mod tests {
         let center_mod = positioned.iter().find(|m| m.zone == Zone::Center).unwrap();
         // Should be within the middle 50% of the bar.
         let mid = bar_width as f32 / 2.0;
-        assert!(center_mod.x > mid * 0.25 && center_mod.x < mid * 1.75,
-            "center x={} not near middle", center_mod.x);
+        assert!(
+            center_mod.x > mid * 0.25 && center_mod.x < mid * 1.75,
+            "center x={} not near middle",
+            center_mod.x
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -403,6 +425,9 @@ mod tests {
         layout.center.push(dummy_center("▸ ⌘⏎ term"));
         layout.center.push(dummy_center("✕ ⌘Q close"));
         let positioned = layout.compute_positions();
-        assert_eq!(positioned.iter().filter(|m| m.zone == Zone::Center).count(), 2);
+        assert_eq!(
+            positioned.iter().filter(|m| m.zone == Zone::Center).count(),
+            2
+        );
     }
 }

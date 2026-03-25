@@ -391,13 +391,7 @@ impl ToolRegistry {
         );
     }
 
-    fn register(
-        &mut self,
-        name: &str,
-        description: &str,
-        input_schema: Value,
-        handler: ToolFn,
-    ) {
+    fn register(&mut self, name: &str, description: &str, input_schema: Value, handler: ToolFn) {
         self.tools.push(RegisteredTool {
             definition: ToolDefinition {
                 name: name.into(),

@@ -7,6 +7,7 @@
 ///       This module can only be fully tested on bare-metal with a Wayland session.
 use std::ptr::NonNull;
 
+use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -24,7 +25,6 @@ use wgpu::{
     SurfaceTargetUnsafe, TextureFormat, TextureUsages, TextureViewDescriptor, VertexAttribute,
     VertexBufferLayout, VertexState, VertexStepMode,
 };
-use bytemuck::{Pod, Zeroable};
 
 use crate::layout::ModuleOutput;
 
@@ -134,12 +134,10 @@ impl Renderer {
 
         // Build raw window handles for Wayland.
         let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            NonNull::new(wl_display)
-                .ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
+            NonNull::new(wl_display).ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
         ));
         let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-            NonNull::new(wl_surface)
-                .ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
+            NonNull::new(wl_surface).ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
         ));
 
         // Safety: the caller guarantees the pointers remain valid.
@@ -269,18 +267,26 @@ impl Renderer {
     /// Render all modules to the bar surface.
     ///
     /// Clears to ThermalPalette::BG, draws module backgrounds and text.
-    pub fn render(&mut self, modules: &[ModuleOutput], spark_rects: &[crate::sparkline::SparkRect]) -> anyhow::Result<()> {
+    pub fn render(
+        &mut self,
+        modules: &[ModuleOutput],
+        spark_rects: &[crate::sparkline::SparkRect],
+    ) -> anyhow::Result<()> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
         // Update viewport resolution for glyphon.
         self.viewport.update(
             &self.queue,
-            Resolution { width: self.width, height: self.height },
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
         );
 
-        let mut encoder =
-            self.device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
 
         // Collect text buffers and their placement info.
         let mut text_buffers: Vec<Buffer> = Vec::new();
@@ -325,8 +331,12 @@ impl Renderer {
         }
         for r in spark_rects {
             let verts = pixel_rect_to_ndc(
-                r.x, r.y, r.w, r.h,
-                self.width as f32, self.height as f32,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                self.width as f32,
+                self.height as f32,
                 r.color,
             );
             rect_vertices.extend_from_slice(&verts);
@@ -417,7 +427,8 @@ impl Renderer {
 
             // Render text.
             if has_text {
-                self.text_renderer.render(&self.atlas, &self.viewport, &mut pass)?;
+                self.text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)?;
             }
         }
 
@@ -443,21 +454,29 @@ impl Renderer {
     /// This is called after the main `render()` pass to overlay sparkline bars
     /// on top of the already-rendered bar. In production use, sparkline rects
     /// would be merged into the main render call for efficiency.
-    pub fn draw_spark_rects(&mut self, rects: &[crate::sparkline::SparkRect]) -> anyhow::Result<()> {
+    pub fn draw_spark_rects(
+        &mut self,
+        rects: &[crate::sparkline::SparkRect],
+    ) -> anyhow::Result<()> {
         if rects.is_empty() {
             return Ok(());
         }
 
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
-        let mut encoder =
-            self.device.create_command_encoder(&CommandEncoderDescriptor { label: None });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: None });
 
         let mut vertices: Vec<ColorVertex> = Vec::with_capacity(rects.len() * 6);
         for r in rects {
             let verts = pixel_rect_to_ndc(
-                r.x, r.y, r.w, r.h,
-                self.width as f32, self.height as f32,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                self.width as f32,
+                self.height as f32,
                 r.color,
             );
             vertices.extend_from_slice(&verts);
@@ -518,11 +537,29 @@ fn pixel_rect_to_ndc(
     let y1 = 1.0 - ((py + ph) / screen_h) * 2.0;
 
     [
-        ColorVertex { position: [x0, y0], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x0, y1], color },
-        ColorVertex { position: [x1, y0], color },
-        ColorVertex { position: [x1, y1], color },
-        ColorVertex { position: [x0, y1], color },
+        ColorVertex {
+            position: [x0, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y0],
+            color,
+        },
+        ColorVertex {
+            position: [x1, y1],
+            color,
+        },
+        ColorVertex {
+            position: [x0, y1],
+            color,
+        },
     ]
 }

@@ -80,13 +80,8 @@ async fn main() -> anyhow::Result<()> {
         let gpu_queue = Arc::clone(&notify_surface.queue);
         let format = notify_surface.surface_config.format;
 
-        let mut renderer = NotificationRenderer::new(
-            device,
-            gpu_queue,
-            format,
-            NOTIF_WIDTH,
-            NOTIF_HEIGHT,
-        );
+        let mut renderer =
+            NotificationRenderer::new(device, gpu_queue, format, NOTIF_WIDTH, NOTIF_HEIGHT);
 
         let mut stack = NotificationStack::new();
         let mut last_tick = std::time::Instant::now();
@@ -105,11 +100,13 @@ async fn main() -> anyhow::Result<()> {
 
             // Drain the incoming notification queue into the stack
             {
-                let mut q = queue_clone
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut q = queue_clone.lock().unwrap_or_else(|e| e.into_inner());
                 while let Some(notif) = q.pop_front() {
-                    tracing::debug!(id = notif.id, "Pushing notification to stack: {}", notif.summary);
+                    tracing::debug!(
+                        id = notif.id,
+                        "Pushing notification to stack: {}",
+                        notif.summary
+                    );
                     stack.push(notif);
                     notify_surface.visible = true;
                 }

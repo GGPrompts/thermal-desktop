@@ -32,8 +32,8 @@ impl Urgency {
     /// Returns a `[f32; 4]` RGBA color from ThermalPalette for this urgency level.
     pub fn to_color(self) -> [f32; 4] {
         match self {
-            Urgency::Low => ThermalPalette::COOL,      // cold blue
-            Urgency::Normal => ThermalPalette::WARM,   // warm green
+            Urgency::Low => ThermalPalette::COOL,         // cold blue
+            Urgency::Normal => ThermalPalette::WARM,      // warm green
             Urgency::Critical => ThermalPalette::SEARING, // searing red
         }
     }
@@ -142,7 +142,8 @@ mod tests {
             // Alpha must be 1.0 (fully opaque from palette constants)
             assert!(
                 (c[3] - 1.0).abs() < 1e-6,
-                "{urgency:?} color alpha was {}", c[3]
+                "{urgency:?} color alpha was {}",
+                c[3]
             );
         }
     }

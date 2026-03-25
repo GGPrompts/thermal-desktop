@@ -7,8 +7,8 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        pointer::{PointerEvent, PointerEventKind, PointerHandler, BTN_LEFT},
         Capability, SeatHandler, SeatState,
+        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::wlr_layer::{
         Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -16,9 +16,9 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
+    Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
-    Connection, Proxy, QueueHandle,
 };
 
 // ── NotifySurface ─────────────────────────────────────────────────────────────
@@ -61,7 +61,8 @@ impl NotifySurface {
     /// compositor may stop notifying us when the surface is occluded, causing
     /// the render loop to stall.
     pub fn request_frame(&self) {
-        self.wl_surface.frame(&self.queue_handle, self.wl_surface.clone());
+        self.wl_surface
+            .frame(&self.queue_handle, self.wl_surface.clone());
     }
 }
 
@@ -69,8 +70,8 @@ impl NotifySurface {
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let conn = Connection::connect_to_env().context("failed to connect to Wayland display")?;
 
-        let (globals, mut event_queue) =
-            registry_queue_init::<NotifySurfaceState>(&conn).context("registry_queue_init failed")?;
+        let (globals, mut event_queue) = registry_queue_init::<NotifySurfaceState>(&conn)
+            .context("registry_queue_init failed")?;
 
         let qh = event_queue.handle();
 
@@ -251,10 +252,14 @@ impl NotifySurface {
     /// Render a fully transparent frame to visually hide the surface.
     pub fn clear_transparent(&self) {
         if let Ok(output) = self.get_current_texture() {
-            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("clear"),
-            });
+            let view = output
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear"),
+                });
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("transparent clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -275,7 +280,8 @@ impl NotifySurface {
             // continues scheduling redraws even when the surface is occluded.
             // wgpu's present() internally calls wl_surface.attach(buffer) + commit(),
             // so this frame() request is picked up by that same commit.
-            self.wl_surface.frame(&self.queue_handle, self.wl_surface.clone());
+            self.wl_surface
+                .frame(&self.queue_handle, self.wl_surface.clone());
             output.present();
         }
     }
@@ -379,12 +385,7 @@ impl CompositorHandler for NotifySurfaceState {
 }
 
 impl LayerShellHandler for NotifySurfaceState {
-    fn closed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-    ) {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
         self.closed = true;
     }
 
@@ -435,13 +436,7 @@ impl SeatHandler for NotifySurfaceState {
         &mut self.seat_state
     }
 
-    fn new_seat(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-    ) {
-    }
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {}
 
     fn new_capability(
         &mut self,
@@ -469,12 +464,7 @@ impl SeatHandler for NotifySurfaceState {
         }
     }
 
-    fn remove_seat(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-    ) {
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: wl_seat::WlSeat) {
     }
 }
 

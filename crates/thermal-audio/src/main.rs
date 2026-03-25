@@ -172,14 +172,20 @@ fn load_audio_state() -> AudioState {
     let mut state = AudioState::default();
     for line in content.lines() {
         let line = line.trim();
-        if let Some(val) = line.strip_prefix("muted").and_then(|s| s.trim_start().strip_prefix('=')) {
+        if let Some(val) = line
+            .strip_prefix("muted")
+            .and_then(|s| s.trim_start().strip_prefix('='))
+        {
             let val = val.trim();
             if val == "true" {
                 state.muted = true;
             } else if val == "false" {
                 state.muted = false;
             }
-        } else if let Some(val) = line.strip_prefix("volume").and_then(|s| s.trim_start().strip_prefix('=')) {
+        } else if let Some(val) = line
+            .strip_prefix("volume")
+            .and_then(|s| s.trim_start().strip_prefix('='))
+        {
             if let Ok(v) = val.trim().parse::<f32>() {
                 state.volume = v.clamp(0.0, 1.0);
             }
@@ -242,7 +248,9 @@ impl AudioManager {
             warn!("edge-tts not found on PATH — TTS generation will be skipped");
         }
 
-        let volume_pct = Arc::new(AtomicU8::new((initial_volume.clamp(0.0, 1.0) * 100.0) as u8));
+        let volume_pct = Arc::new(AtomicU8::new(
+            (initial_volume.clamp(0.0, 1.0) * 100.0) as u8,
+        ));
         let current_child: CurrentChild = Arc::new(Mutex::new(None));
         let audio_tx = spawn_audio_thread(Arc::clone(&current_child), Arc::clone(&volume_pct));
 
@@ -343,7 +351,10 @@ impl AudioManager {
 /// Spawn a dedicated audio thread that plays files via mpv.
 /// The thread registers each spawned mpv process in `current_child` so that
 /// external callers (e.g. high-priority interrupt) can kill it.
-fn spawn_audio_thread(current_child: CurrentChild, volume_pct: Arc<AtomicU8>) -> mpsc::Sender<PathBuf> {
+fn spawn_audio_thread(
+    current_child: CurrentChild,
+    volume_pct: Arc<AtomicU8>,
+) -> mpsc::Sender<PathBuf> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
 
     thread::Builder::new()
@@ -439,9 +450,11 @@ fn dirs_cache() -> PathBuf {
 /// Determine the socket path. Uses $XDG_RUNTIME_DIR/thermal/audio.sock,
 /// falling back to /run/user/1000/thermal/audio.sock.
 fn socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/run/user/1000".to_string());
-    PathBuf::from(runtime_dir).join("thermal").join("audio.sock")
+    let runtime_dir =
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
+    PathBuf::from(runtime_dir)
+        .join("thermal")
+        .join("audio.sock")
 }
 
 // ---------------------------------------------------------------------------
@@ -468,13 +481,9 @@ fn transition_text(
                 Some(format!("{session_label} using {tool}"))
             }
         }
-        (_, ClaudeStatus::AwaitingInput) => {
-            Some(format!("{session_label} needs input"))
-        }
+        (_, ClaudeStatus::AwaitingInput) => Some(format!("{session_label} needs input")),
         (ClaudeStatus::Processing, ClaudeStatus::Idle)
-        | (ClaudeStatus::ToolUse, ClaudeStatus::Idle) => {
-            Some(format!("{session_label} finished"))
-        }
+        | (ClaudeStatus::ToolUse, ClaudeStatus::Idle) => Some(format!("{session_label} finished")),
         _ => None,
     }
 }
@@ -497,8 +506,11 @@ fn tool_detail(tool: &str, session: &ClaudeSessionState) -> Option<String> {
             Some(format!("editing {filename}"))
         }
         "Bash" => {
-            let desc = args.description.as_deref()
-                .or_else(|| args.command.as_deref().map(|c| if c.len() > 40 { &c[..40] } else { c }));
+            let desc = args.description.as_deref().or_else(|| {
+                args.command
+                    .as_deref()
+                    .map(|c| if c.len() > 40 { &c[..40] } else { c })
+            });
             desc.map(|d| format!("running {d}"))
         }
         "Glob" | "Grep" => {
@@ -509,9 +521,7 @@ fn tool_detail(tool: &str, session: &ClaudeSessionState) -> Option<String> {
             let desc = args.description.as_deref()?;
             Some(format!("agent: {desc}"))
         }
-        "WebFetch" | "WebSearch" => {
-            Some("web search".to_string())
-        }
+        "WebFetch" | "WebSearch" => Some("web search".to_string()),
         _ => None,
     }
 }
@@ -573,7 +583,10 @@ async fn main() -> Result<()> {
     let audio_state = Arc::new(Mutex::new(load_audio_state()));
     {
         let st = audio_state.lock().unwrap();
-        info!("loaded audio state: muted={}, volume={:.2}", st.muted, st.volume);
+        info!(
+            "loaded audio state: muted={}, volume={:.2}",
+            st.muted, st.volume
+        );
     }
 
     let initial_volume = audio_state.lock().unwrap().volume;
@@ -600,10 +613,8 @@ async fn main() -> Result<()> {
     }
 
     // Daemon mode — single-instance guard via pidfile.
-    let run_dir = PathBuf::from(
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()),
-    )
-    .join("thermal");
+    let run_dir = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("thermal");
     fs::create_dir_all(&run_dir)?;
     let pidfile = run_dir.join("audio.pid");
     if pidfile.exists() {
@@ -627,8 +638,7 @@ async fn main() -> Result<()> {
     // Set up the Unix socket listener.
     let sock_path = socket_path();
     if let Some(parent) = sock_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating socket dir {:?}", parent))?;
+        fs::create_dir_all(parent).with_context(|| format!("creating socket dir {:?}", parent))?;
     }
     // Remove stale socket if it exists.
     if sock_path.exists() {
@@ -823,7 +833,11 @@ async fn handle_socket_connection(
     };
 
     match message {
-        SocketMessage::Tts { text, voice, priority } => {
+        SocketMessage::Tts {
+            text,
+            voice,
+            priority,
+        } => {
             if text.is_empty() {
                 let resp = serde_json::to_string(&TtsResponse {
                     ok: false,
@@ -834,8 +848,12 @@ async fn handle_socket_connection(
                 return Ok(());
             }
 
-            tx.send(TtsRequest { text, voice, priority })
-                .context("forwarding TTS request to main loop")?;
+            tx.send(TtsRequest {
+                text,
+                voice,
+                priority,
+            })
+            .context("forwarding TTS request to main loop")?;
 
             let resp = serde_json::to_string(&TtsResponse {
                 ok: true,
@@ -1097,14 +1115,18 @@ mod tests {
         md5::Digest::update(&mut hasher, b"hi");
         let without_rate = format!("{:x}", md5::Digest::finalize(hasher));
 
-        assert_ne!(with_rate, without_rate, "rate separator must be part of the key");
+        assert_ne!(
+            with_rate, without_rate,
+            "rate separator must be part of the key"
+        );
     }
 
     #[test]
     fn cache_key_is_lowercase_hex() {
         let h = expected_hash("en-US-GuyNeural", "something");
         assert!(
-            h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "hash must be lowercase hex: {h}"
         );
     }
@@ -1123,7 +1145,12 @@ mod tests {
     #[test]
     fn transition_idle_to_processing() {
         let session = make_session("s1");
-        let text = transition_text("myproject", &ClaudeStatus::Idle, &ClaudeStatus::Processing, &session);
+        let text = transition_text(
+            "myproject",
+            &ClaudeStatus::Idle,
+            &ClaudeStatus::Processing,
+            &session,
+        );
         assert_eq!(text, Some("myproject started working".to_string()));
     }
 
@@ -1132,7 +1159,12 @@ mod tests {
         let mut session = make_session("s1");
         session.current_tool = Some("Read".to_string());
         // No ToolDetails / ToolArgs → falls back to "using <tool>".
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj using Read".to_string()));
     }
 
@@ -1143,7 +1175,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Read", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: reading main.rs".to_string()));
     }
 
@@ -1154,7 +1191,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Write", args);
-        let text = transition_text("proj", &ClaudeStatus::ToolUse, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::ToolUse,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: writing foo.txt".to_string()));
     }
 
@@ -1165,7 +1207,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Edit", args);
-        let text = transition_text("proj", &ClaudeStatus::ToolUse, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::ToolUse,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: editing lib.rs".to_string()));
     }
 
@@ -1177,7 +1224,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Bash", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         // description takes priority over command
         assert_eq!(text, Some("proj: running Build all crates".to_string()));
     }
@@ -1189,7 +1241,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Bash", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: running cargo test".to_string()));
     }
 
@@ -1205,12 +1262,23 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Bash", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session)
-            .unwrap();
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        )
+        .unwrap();
         // The first 40 chars must appear in the output.
-        assert!(text.contains(&long_cmd[..40]), "truncated prefix should be present");
+        assert!(
+            text.contains(&long_cmd[..40]),
+            "truncated prefix should be present"
+        );
         // The second half (which was cut off) must not appear.
-        assert!(!text.contains(&second_half), "tail beyond 40 chars must be absent");
+        assert!(
+            !text.contains(&second_half),
+            "tail beyond 40 chars must be absent"
+        );
     }
 
     #[test]
@@ -1220,7 +1288,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Glob", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: searching **/*.rs".to_string()));
     }
 
@@ -1231,7 +1304,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Grep", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: searching fn main".to_string()));
     }
 
@@ -1242,7 +1320,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Agent", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: agent: analyse logs".to_string()));
     }
 
@@ -1253,7 +1336,12 @@ mod tests {
             ..Default::default()
         };
         let session = make_tool_session("s1", "Task", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: agent: run suite".to_string()));
     }
 
@@ -1261,7 +1349,12 @@ mod tests {
     fn transition_tool_use_web_fetch() {
         let args = ToolArgs::default();
         let session = make_tool_session("s1", "WebFetch", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: web search".to_string()));
     }
 
@@ -1269,7 +1362,12 @@ mod tests {
     fn transition_tool_use_web_search() {
         let args = ToolArgs::default();
         let session = make_tool_session("s1", "WebSearch", args);
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         assert_eq!(text, Some("proj: web search".to_string()));
     }
 
@@ -1277,7 +1375,12 @@ mod tests {
     fn transition_tool_use_unknown_tool_no_detail() {
         let mut session = make_session("s1");
         session.current_tool = Some("UnknownTool".to_string());
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::ToolUse, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::ToolUse,
+            &session,
+        );
         // Unknown tool, no detail → fallback "using <tool>"
         assert_eq!(text, Some("proj using UnknownTool".to_string()));
     }
@@ -1292,21 +1395,35 @@ mod tests {
             ClaudeStatus::AwaitingInput,
         ] {
             let text = transition_text("proj", &prev, &ClaudeStatus::AwaitingInput, &session);
-            assert_eq!(text, Some("proj needs input".to_string()), "failed for prev={prev:?}");
+            assert_eq!(
+                text,
+                Some("proj needs input".to_string()),
+                "failed for prev={prev:?}"
+            );
         }
     }
 
     #[test]
     fn transition_processing_to_idle_finished() {
         let session = make_session("s1");
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::Idle, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::Idle,
+            &session,
+        );
         assert_eq!(text, Some("proj finished".to_string()));
     }
 
     #[test]
     fn transition_tool_use_to_idle_finished() {
         let session = make_session("s1");
-        let text = transition_text("proj", &ClaudeStatus::ToolUse, &ClaudeStatus::Idle, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::ToolUse,
+            &ClaudeStatus::Idle,
+            &session,
+        );
         assert_eq!(text, Some("proj finished".to_string()));
     }
 
@@ -1320,7 +1437,12 @@ mod tests {
     #[test]
     fn transition_processing_to_processing_produces_none() {
         let session = make_session("s1");
-        let text = transition_text("proj", &ClaudeStatus::Processing, &ClaudeStatus::Processing, &session);
+        let text = transition_text(
+            "proj",
+            &ClaudeStatus::Processing,
+            &ClaudeStatus::Processing,
+            &session,
+        );
         assert_eq!(text, None);
     }
 
@@ -1391,7 +1513,9 @@ mod tests {
 
     impl DebounceTracker {
         fn new() -> Self {
-            Self { last_play: HashMap::new() }
+            Self {
+                last_play: HashMap::new(),
+            }
         }
 
         /// Returns true if the announce should proceed (not debounced).
@@ -1401,7 +1525,8 @@ mod tests {
                     return false;
                 }
             }
-            self.last_play.insert(session_id.to_string(), Instant::now());
+            self.last_play
+                .insert(session_id.to_string(), Instant::now());
             true
         }
     }
@@ -1434,7 +1559,10 @@ mod tests {
         // Inject a last_play timestamp that is older than DEBOUNCE_MS.
         let old = Instant::now() - Duration::from_millis(DEBOUNCE_MS as u64 + 10);
         dt.last_play.insert("session-a".to_string(), old);
-        assert!(dt.should_announce("session-a"), "should pass after debounce window");
+        assert!(
+            dt.should_announce("session-a"),
+            "should pass after debounce window"
+        );
     }
 
     #[test]
@@ -1443,7 +1571,10 @@ mod tests {
         // Inject a timestamp just inside the debounce window (1 ms ago).
         let recent = Instant::now() - Duration::from_millis(1);
         dt.last_play.insert("session-a".to_string(), recent);
-        assert!(!dt.should_announce("session-a"), "should be debounced within window");
+        assert!(
+            !dt.should_announce("session-a"),
+            "should be debounced within window"
+        );
     }
 
     #[test]
@@ -1487,7 +1618,8 @@ mod tests {
 
     #[test]
     fn parse_tts_request_all_fields() {
-        let json = r#"{"text": "full request", "voice": "en-AU-WilliamNeural", "priority": "high"}"#;
+        let json =
+            r#"{"text": "full request", "voice": "en-AU-WilliamNeural", "priority": "high"}"#;
         let req: TtsRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.text, "full request");
         assert_eq!(req.voice.as_deref(), Some("en-AU-WilliamNeural"));
@@ -1665,7 +1797,10 @@ mod tests {
         unsafe {
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
-        assert_eq!(p, std::path::PathBuf::from("/run/user/9999/thermal/audio.sock"));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/run/user/9999/thermal/audio.sock")
+        );
     }
 
     #[test]
@@ -1675,7 +1810,10 @@ mod tests {
             std::env::remove_var("XDG_RUNTIME_DIR");
         }
         let p = socket_path();
-        assert_eq!(p, std::path::PathBuf::from("/run/user/1000/thermal/audio.sock"));
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/run/user/1000/thermal/audio.sock")
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1737,7 +1875,11 @@ mod tests {
         let json = r#"{"action": "tts", "text": "hello", "voice": "en-US-GuyNeural"}"#;
         let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
         match msg {
-            SocketMessage::Tts { text, voice, priority } => {
+            SocketMessage::Tts {
+                text,
+                voice,
+                priority,
+            } => {
                 assert_eq!(text, "hello");
                 assert_eq!(voice.as_deref(), Some("en-US-GuyNeural"));
                 assert_eq!(priority, Priority::Normal);

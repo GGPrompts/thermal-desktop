@@ -14,9 +14,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::ArcSwap;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -375,7 +375,10 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
 
         // Remove stale sessions with the same name.
         if let Some(existing) = sessions.get(name) {
@@ -399,7 +402,10 @@ impl TerminalManager {
     where
         F: FnOnce(&TerminalSession) -> R,
     {
-        let sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         let session = sessions
             .get(name)
             .ok_or_else(|| anyhow!("No session named '{name}'"))?;
@@ -411,7 +417,10 @@ impl TerminalManager {
     where
         F: FnOnce(&mut TerminalSession) -> R,
     {
-        let mut sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         let session = sessions
             .get_mut(name)
             .ok_or_else(|| anyhow!("No session named '{name}'"))?;
@@ -421,7 +430,10 @@ impl TerminalManager {
     /// Remove a session.  The tmux session is *not* killed — only the PTY
     /// attachment is dropped.
     pub fn remove(&self, name: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         sessions
             .remove(name)
             .ok_or_else(|| anyhow!("No session named '{name}'"))?;
@@ -430,7 +442,10 @@ impl TerminalManager {
 
     /// Remove a session *and* kill the underlying tmux session.
     pub fn kill(&self, name: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         let session = sessions
             .remove(name)
             .ok_or_else(|| anyhow!("No session named '{name}'"))?;
@@ -460,7 +475,10 @@ impl TerminalManager {
 
     /// List active session names.
     pub fn list(&self) -> Result<Vec<String>> {
-        let sessions = self.sessions.lock().map_err(|e| anyhow!("Lock poisoned: {e}"))?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|e| anyhow!("Lock poisoned: {e}"))?;
         Ok(sessions.keys().cloned().collect())
     }
 }

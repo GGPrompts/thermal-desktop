@@ -11,21 +11,18 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
-    Terminal,
 };
 
-use thermal_core::{
-    palette::ThermalPalette,
-    ClaudeSessionState, ClaudeStatePoller, ClaudeStatus,
-};
+use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
 
 // ---------------------------------------------------------------------------
 // Palette helpers
@@ -100,16 +97,30 @@ fn format_activity(s: &ClaudeSessionState) -> String {
     }
 
     let trunc = |s: &str, n: usize| -> String {
-        if s.chars().count() > n { format!("{}...", s.chars().take(n).collect::<String>()) }
-        else { s.to_string() }
+        if s.chars().count() > n {
+            format!("{}...", s.chars().take(n).collect::<String>())
+        } else {
+            s.to_string()
+        }
     };
-    let detail = s.details.as_ref().and_then(|d| d.args.as_ref()).map(|a| {
-        if let Some(fp) = &a.file_path { basename(fp).to_string() }
-        else if let Some(cmd) = &a.command { trunc(cmd, 20) }
-        else if let Some(pat) = &a.pattern { pat.clone() }
-        else if let Some(desc) = &a.description { trunc(desc, 20) }
-        else { String::new() }
-    }).unwrap_or_default();
+    let detail = s
+        .details
+        .as_ref()
+        .and_then(|d| d.args.as_ref())
+        .map(|a| {
+            if let Some(fp) = &a.file_path {
+                basename(fp).to_string()
+            } else if let Some(cmd) = &a.command {
+                trunc(cmd, 20)
+            } else if let Some(pat) = &a.pattern {
+                pat.clone()
+            } else if let Some(desc) = &a.description {
+                trunc(desc, 20)
+            } else {
+                String::new()
+            }
+        })
+        .unwrap_or_default();
 
     let (emoji, label) = match tool_name {
         "Read" => ("\u{1F4D6}", "Read"),
@@ -147,12 +158,18 @@ fn format_activity(s: &ClaudeSessionState) -> String {
 // ---------------------------------------------------------------------------
 
 fn relative_time(iso: &str) -> String {
-    parse_secs_ago(iso).map(|s| {
-        let s = s.max(0);
-        if s < 60 { format!("{}s", s) }
-        else if s < 3600 { format!("{}m", s / 60) }
-        else { format!("{}h", s / 3600) }
-    }).unwrap_or_else(|| "-".into())
+    parse_secs_ago(iso)
+        .map(|s| {
+            let s = s.max(0);
+            if s < 60 {
+                format!("{}s", s)
+            } else if s < 3600 {
+                format!("{}m", s / 60)
+            } else {
+                format!("{}h", s / 3600)
+            }
+        })
+        .unwrap_or_else(|| "-".into())
 }
 
 /// Minimal ISO 8601 parser (no chrono dep). Returns seconds ago or None.
@@ -160,18 +177,31 @@ fn parse_secs_ago(iso: &str) -> Option<i64> {
     let s = iso.trim().trim_end_matches('Z');
     let (date, time) = s.split_once('T')?;
     let mut d = date.split('-');
-    let (y, mo, day): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+    let (y, mo, day): (i64, i64, i64) = (
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+        d.next()?.parse().ok()?,
+    );
     let time = time.split('.').next()?; // strip fractional
     let time = time.split('+').next()?; // strip tz offset
     let mut t = time.split(':');
-    let (h, mi, sc): (i64, i64, i64) = (t.next()?.parse().ok()?, t.next()?.parse().ok()?,
-        t.next().and_then(|s| s.parse().ok()).unwrap_or(0));
+    let (h, mi, sc): (i64, i64, i64) = (
+        t.next()?.parse().ok()?,
+        t.next()?.parse().ok()?,
+        t.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+    );
     // Rata die conversion to unix timestamp
     let (mut yr, mut mn) = (y, mo);
-    if mn <= 2 { yr -= 1; mn += 12; }
+    if mn <= 2 {
+        yr -= 1;
+        mn += 12;
+    }
     let days = 365 * yr + yr / 4 - yr / 100 + yr / 400 + (153 * (mn - 3) + 2) / 5 + day - 719469;
     let ts = days * 86400 + h * 3600 + mi * 60 + sc;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
     Some(now - ts)
 }
 
@@ -236,7 +266,9 @@ fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
     // Orphan subagents (parent state file gone but subagent still running)
     for s in sessions {
         if s.parent_session_id.is_some()
-            && !parents.iter().any(|p| Some(p.session_id.as_str()) == s.parent_session_id.as_deref())
+            && !parents
+                .iter()
+                .any(|p| Some(p.session_id.as_str()) == s.parent_session_id.as_deref())
         {
             rows.push(DisplayRow {
                 session: s.clone(),
@@ -355,16 +387,28 @@ impl App {
     }
 
     fn nav_down(&mut self) {
-        if self.display_rows.is_empty() { return; }
+        if self.display_rows.is_empty() {
+            return;
+        }
         let i = self.table_state.selected().unwrap_or(0);
-        let next = if i >= self.display_rows.len() - 1 { 0 } else { i + 1 };
+        let next = if i >= self.display_rows.len() - 1 {
+            0
+        } else {
+            i + 1
+        };
         self.table_state.select(Some(next));
     }
 
     fn nav_up(&mut self) {
-        if self.display_rows.is_empty() { return; }
+        if self.display_rows.is_empty() {
+            return;
+        }
         let i = self.table_state.selected().unwrap_or(0);
-        let prev = if i == 0 { self.display_rows.len() - 1 } else { i - 1 };
+        let prev = if i == 0 {
+            self.display_rows.len() - 1
+        } else {
+            i - 1
+        };
         self.table_state.select(Some(prev));
     }
 
@@ -379,11 +423,18 @@ impl App {
                 };
                 // Try kitty remote control first, fall back to tmux
                 let _ = Command::new("kitty")
-                    .args(["@", "focus-window", "--match", &format!("pid:{}", row.session.pid.unwrap_or(0))])
+                    .args([
+                        "@",
+                        "focus-window",
+                        "--match",
+                        &format!("pid:{}", row.session.pid.unwrap_or(0)),
+                    ])
                     .status()
-                    .or_else(|_| Command::new("tmux")
-                        .args(["switch-client", "-t", target])
-                        .status());
+                    .or_else(|_| {
+                        Command::new("tmux")
+                            .args(["switch-client", "-t", target])
+                            .status()
+                    });
             }
         }
     }
@@ -394,7 +445,10 @@ impl App {
         } else if let Some(i) = self.table_state.selected() {
             if let Some(row) = self.display_rows.get(i) {
                 // Show history for parent, not subagent
-                let target = row.session.parent_session_id.as_ref()
+                let target = row
+                    .session
+                    .parent_session_id
+                    .as_ref()
                     .unwrap_or(&row.session.session_id)
                     .clone();
                 self.history_popup = Some(target);
@@ -412,7 +466,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // header
-            Constraint::Min(5),   // table
+            Constraint::Min(5),    // table
             Constraint::Length(1), // footer
         ])
         .split(f.area());
@@ -422,18 +476,31 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
     // -- Header -- (count only parent sessions)
     let parent_count = app.display_rows.iter().filter(|r| !r.is_subagent).count();
-    let active = app.display_rows.iter()
+    let active = app
+        .display_rows
+        .iter()
         .filter(|r| !r.is_subagent && r.session.status != ClaudeStatus::Idle)
         .count();
     let subagent_count = app.display_rows.iter().filter(|r| r.is_subagent).count();
     let header_text = if subagent_count > 0 {
-        format!("THERMAL MONITOR  [{} active / {} sessions, {} subagents]", active, parent_count, subagent_count)
+        format!(
+            "THERMAL MONITOR  [{} active / {} sessions, {} subagents]",
+            active, parent_count, subagent_count
+        )
     } else {
-        format!("THERMAL MONITOR  [{} active / {} sessions]", active, parent_count)
+        format!(
+            "THERMAL MONITOR  [{} active / {} sessions]",
+            active, parent_count
+        )
     };
     let header = Paragraph::new(header_text)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(TEXT_BRIGHT).bg(BG_SURFACE).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(TEXT_BRIGHT)
+                .bg(BG_SURFACE)
+                .add_modifier(Modifier::BOLD),
+        )
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)
@@ -443,75 +510,96 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(header, chunks[0]);
 
     // -- Session table --
-    let header_cells = ["Session", "Status", "Activity", "Ctx%", "Directory", "Updated"]
-        .iter()
-        .map(|h| {
-            Cell::from(*h).style(
-                Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD),
-            )
-        });
+    let header_cells = [
+        "Session",
+        "Status",
+        "Activity",
+        "Ctx%",
+        "Directory",
+        "Updated",
+    ]
+    .iter()
+    .map(|h| {
+        Cell::from(*h).style(
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        )
+    });
     let header_row = Row::new(header_cells).height(1);
 
-    let rows: Vec<Row> = app.display_rows.iter().map(|row| {
-        let s = &row.session;
-        let color = status_color(&s.status);
-        let label = status_label(&s.status);
+    let rows: Vec<Row> = app
+        .display_rows
+        .iter()
+        .map(|row| {
+            let s = &row.session;
+            let color = status_color(&s.status);
+            let label = status_label(&s.status);
 
-        // Activity column
-        let activity = format_activity(s);
+            // Activity column
+            let activity = format_activity(s);
 
-        // Context % with threshold colors
-        let (ctx_str, ctx_c) = match s.context_percent {
-            Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
-            None => ("-".into(), TEXT_MUTED),
-        };
-
-        // Directory
-        let dir = s.working_dir.as_deref().unwrap_or("-");
-        let short_dir = dir
-            .strip_prefix("/home/builder/")
-            .map(|p| format!("~/{}", p))
-            .unwrap_or_else(|| dir.to_string());
-
-        // Relative timestamp
-        let updated = s.last_updated.as_deref()
-            .map(|ts| relative_time(ts))
-            .unwrap_or_else(|| "-".into());
-
-        if row.is_subagent {
-            // Subagent: tree indicator + short agent_id, dimmer styling
-            let tree = if row.is_last_child { "\u{2514}\u{2500}" } else { "\u{251C}\u{2500}" };
-            let agent_label = s.agent_id.as_deref()
-                .map(|id| if id.len() > 8 { &id[..8] } else { id })
-                .unwrap_or("agent");
-            let id_str = format!("{} {}", tree, agent_label);
-
-            Row::new(vec![
-                Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
-                Cell::from(label).style(Style::default().fg(color)),
-                Cell::from(activity).style(Style::default().fg(TEXT)),
-                Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
-                Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
-                Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
-            ])
-        } else {
-            // Parent session
-            let short_id = if s.session_id.len() > 12 {
-                &s.session_id[..12]
-            } else {
-                &s.session_id
+            // Context % with threshold colors
+            let (ctx_str, ctx_c) = match s.context_percent {
+                Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
+                None => ("-".into(), TEXT_MUTED),
             };
 
-            Row::new(vec![
-                Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
-                Cell::from(label).style(Style::default().fg(color)),
-                Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
-                Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
-                Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
-                Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
-            ])
-        }
-    }).collect();
+            // Directory
+            let dir = s.working_dir.as_deref().unwrap_or("-");
+            let short_dir = dir
+                .strip_prefix("/home/builder/")
+                .map(|p| format!("~/{}", p))
+                .unwrap_or_else(|| dir.to_string());
+
+            // Relative timestamp
+            let updated = s
+                .last_updated
+                .as_deref()
+                .map(|ts| relative_time(ts))
+                .unwrap_or_else(|| "-".into());
+
+            if row.is_subagent {
+                // Subagent: tree indicator + short agent_id, dimmer styling
+                let tree = if row.is_last_child {
+                    "\u{2514}\u{2500}"
+                } else {
+                    "\u{251C}\u{2500}"
+                };
+                let agent_label = s
+                    .agent_id
+                    .as_deref()
+                    .map(|id| if id.len() > 8 { &id[..8] } else { id })
+                    .unwrap_or("agent");
+                let id_str = format!("{} {}", tree, agent_label);
+
+                Row::new(vec![
+                    Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
+                    Cell::from(label).style(Style::default().fg(color)),
+                    Cell::from(activity).style(Style::default().fg(TEXT)),
+                    Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
+                    Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                    Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+                ])
+            } else {
+                // Parent session
+                let short_id = if s.session_id.len() > 12 {
+                    &s.session_id[..12]
+                } else {
+                    &s.session_id
+                };
+
+                Row::new(vec![
+                    Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
+                    Cell::from(label).style(Style::default().fg(color)),
+                    Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
+                    Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
+                    Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                    Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+                ])
+            }
+        })
+        .collect();
 
     let table = Table::new(
         rows,
@@ -531,23 +619,46 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .border_style(Style::default().fg(COLD))
             .style(Style::default().bg(BG)),
     )
-    .row_highlight_style(
-        Style::default().bg(BG_SURFACE).add_modifier(Modifier::BOLD),
-    );
+    .row_highlight_style(Style::default().bg(BG_SURFACE).add_modifier(Modifier::BOLD));
 
     f.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
     // -- Footer --
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" q", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " q",
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(": quit  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("j/k", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "j/k",
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(": navigate  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("Enter", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(": attach  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("h", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "h",
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(": history  ", Style::default().fg(TEXT_MUTED)),
-        Span::styled("r", Style::default().fg(ACCENT_COLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "r",
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(": refresh", Style::default().fg(TEXT_MUTED)),
     ]))
     .style(Style::default().bg(BG));
@@ -583,29 +694,29 @@ fn render_history_popup(f: &mut ratatui::Frame, app: &App, session_id: &str) {
         .history
         .get(session_id)
         .map(|entries| {
-            entries.iter().rev().map(|e| {
-                let ago = now.duration_since(e.timestamp).as_secs();
-                let rel = if ago < 60 {
-                    format!("{}s ago", ago)
-                } else if ago < 3600 {
-                    format!("{}m ago", ago / 60)
-                } else {
-                    format!("{}h ago", ago / 3600)
-                };
-                Line::from(vec![
-                    Span::styled(
-                        format!("{:>7}  ", rel),
-                        Style::default().fg(TEXT_MUTED),
-                    ),
-                    Span::styled(&e.text, Style::default().fg(TEXT_BRIGHT)),
-                ])
-            }).collect()
+            entries
+                .iter()
+                .rev()
+                .map(|e| {
+                    let ago = now.duration_since(e.timestamp).as_secs();
+                    let rel = if ago < 60 {
+                        format!("{}s ago", ago)
+                    } else if ago < 3600 {
+                        format!("{}m ago", ago / 60)
+                    } else {
+                        format!("{}h ago", ago / 3600)
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{:>7}  ", rel), Style::default().fg(TEXT_MUTED)),
+                        Span::styled(&e.text, Style::default().fg(TEXT_BRIGHT)),
+                    ])
+                })
+                .collect()
         })
         .unwrap_or_default();
 
     let content = if lines.is_empty() {
-        Paragraph::new("  No history yet.")
-            .style(Style::default().fg(TEXT_MUTED).bg(BG))
+        Paragraph::new("  No history yet.").style(Style::default().fg(TEXT_MUTED).bg(BG))
     } else {
         Paragraph::new(lines)
             .style(Style::default().bg(BG))

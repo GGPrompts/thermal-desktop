@@ -8,24 +8,23 @@ use crate::mcp::{ContentBlock, ToolResult};
 
 /// Get recent clipboard history via cliphist.
 pub async fn clipboard_get(_args: Value) -> Result<ToolResult> {
-    let output = Command::new("bash")
-        .args(["-c", "cliphist list | head -20"])
+    let output = Command::new("cliphist")
+        .arg("list")
         .output()
         .await
         .context("failed to run cliphist — is it installed?")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(ToolResult::error(format!(
-            "cliphist list failed: {stderr}"
-        )));
+        return Ok(ToolResult::error(format!("cliphist list failed: {stderr}")));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let text = if stdout.trim().is_empty() {
+    let lines: Vec<&str> = stdout.lines().take(20).collect();
+    let text = if lines.is_empty() {
         "clipboard is empty".to_string()
     } else {
-        stdout.trim().to_string()
+        lines.join("\n")
     };
 
     Ok(ToolResult::success(vec![ContentBlock::text(text)]))
@@ -95,9 +94,7 @@ pub async fn notify(args: Value) -> Result<ToolResult> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(ToolResult::error(format!(
-            "notify-send failed: {stderr}"
-        )));
+        return Ok(ToolResult::error(format!("notify-send failed: {stderr}")));
     }
 
     Ok(ToolResult::success(vec![ContentBlock::text(format!(

@@ -147,9 +147,15 @@ pub fn thermal_gradient(t: f32) -> Color {
 
 /// Generate a Vec of `n` Colors evenly sampled across the thermal spectrum.
 pub fn thermal_gradient_lut(n: usize) -> Vec<Color> {
-    if n == 0 { return vec![]; }
-    if n == 1 { return vec![thermal_gradient(0.0)]; }
-    (0..n).map(|i| thermal_gradient(i as f32 / (n - 1) as f32)).collect()
+    if n == 0 {
+        return vec![];
+    }
+    if n == 1 {
+        return vec![thermal_gradient(0.0)];
+    }
+    (0..n)
+        .map(|i| thermal_gradient(i as f32 / (n - 1) as f32))
+        .collect()
 }
 
 /// Convert a heat value `t` in `[0.0, 1.0]` directly to a `[f32; 4]` RGBA array.
@@ -160,13 +166,21 @@ pub fn thermal_gradient_f32(t: f32) -> [f32; 4] {
 /// Map a heat level to a descriptive temperature string.
 pub fn heat_label(t: f32) -> &'static str {
     let t = t.clamp(0.0, 1.0);
-    if t < 0.15 { "CRYO" }
-    else if t < 0.30 { "COLD" }
-    else if t < 0.50 { "MILD" }
-    else if t < 0.65 { "WARM" }
-    else if t < 0.80 { "HOT" }
-    else if t < 0.92 { "SEARING" }
-    else { "WHITE-HOT" }
+    if t < 0.15 {
+        "CRYO"
+    } else if t < 0.30 {
+        "COLD"
+    } else if t < 0.50 {
+        "MILD"
+    } else if t < 0.65 {
+        "WARM"
+    } else if t < 0.80 {
+        "HOT"
+    } else if t < 0.92 {
+        "SEARING"
+    } else {
+        "WHITE-HOT"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +195,7 @@ pub struct ThermalPalette;
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -475,8 +490,12 @@ mod tests {
         let expected = Color::BG.to_f32_array();
         let palette = ThermalPalette::BG;
         for i in 0..4 {
-            assert!((palette[i] - expected[i]).abs() < 1e-6,
-                "channel {i}: palette={} expected={}", palette[i], expected[i]);
+            assert!(
+                (palette[i] - expected[i]).abs() < 1e-6,
+                "channel {i}: palette={} expected={}",
+                palette[i],
+                expected[i]
+            );
         }
     }
 
@@ -526,14 +545,9 @@ impl ThermalPalette {
     pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
     pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
     pub const ACCENT_HOT: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
-// THERMAL-PALETTE-COLORS-END
+    // THERMAL-PALETTE-COLORS-END
 
     const fn hex(r: u8, g: u8, b: u8) -> [f32; 4] {
-        [
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-            1.0,
-        ]
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
     }
 }

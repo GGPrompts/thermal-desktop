@@ -1,6 +1,7 @@
 use glyphon::{
     Attrs, Color as GlyphColor, Family, Metrics, Resolution, Shaping, TextArea, TextBounds,
 };
+use nix::libc;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -10,25 +11,31 @@ use smithay_client_toolkit::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
     },
     session_lock::{
         SessionLock, SessionLockHandler, SessionLockState, SessionLockSurface,
         SessionLockSurfaceConfigure,
     },
-    shm::{slot::{SlotPool, Buffer as ShmBuffer}, Shm, ShmHandler},
+    shm::{
+        Shm, ShmHandler,
+        slot::{Buffer as ShmBuffer, SlotPool},
+    },
 };
-use nix::libc;
-use std::{ptr::NonNull, rc::Rc, time::{Instant, SystemTime, UNIX_EPOCH}};
+use std::{
+    ptr::NonNull,
+    rc::Rc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 use thermal_core::ThermalPalette;
-use tracing::{info, warn, error};
-use zeroize::Zeroizing;
+use tracing::{error, info, warn};
 use wayland_client::{
+    Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_seat, wl_shm, wl_surface},
-    Connection, Proxy, QueueHandle,
 };
+use zeroize::Zeroizing;
 
 pub mod auth;
 
@@ -176,7 +183,12 @@ impl HeatmapPipeline {
             cache: None,
         });
 
-        Self { pipeline, time_buf, bind_group, start: Instant::now() }
+        Self {
+            pipeline,
+            time_buf,
+            bind_group,
+            start: Instant::now(),
+        }
     }
 
     fn update_time(&self, queue: &wgpu::Queue, width: u32, height: u32) {
@@ -399,7 +411,8 @@ impl WgpuSurface {
             Attrs::new().color(warm).family(Family::Monospace),
             Shaping::Basic,
         );
-        self.buf_time.shape_until_scroll(&mut self.text.font_system, false);
+        self.buf_time
+            .shape_until_scroll(&mut self.text.font_system, false);
 
         self.buf_date.set_text(
             &mut self.text.font_system,
@@ -407,7 +420,8 @@ impl WgpuSurface {
             Attrs::new().color(muted).family(Family::Monospace),
             Shaping::Basic,
         );
-        self.buf_date.shape_until_scroll(&mut self.text.font_system, false);
+        self.buf_date
+            .shape_until_scroll(&mut self.text.font_system, false);
     }
 
     fn render_frame(&mut self, auth: &AuthState) {
@@ -416,7 +430,8 @@ impl WgpuSurface {
         let delta = now.duration_since(self.last_frame).as_secs_f32();
         self.last_frame = now;
 
-        self.heatmap.update_time(&self.queue, self.width, self.height);
+        self.heatmap
+            .update_time(&self.queue, self.width, self.height);
         self.update_clock();
 
         let elapsed = self.heatmap.elapsed_secs();
@@ -442,10 +457,12 @@ impl WgpuSurface {
             }
         };
 
-        let view =
-            surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let view = surface_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("thermal-lock frame"),
             });
 
@@ -530,12 +547,16 @@ impl WgpuSurface {
             Attrs::new().color(warm).family(Family::Monospace),
             Shaping::Basic,
         );
-        self.buf_masked.shape_until_scroll(&mut self.text.font_system, false);
+        self.buf_masked
+            .shape_until_scroll(&mut self.text.font_system, false);
 
         // Update viewport
         self.text.viewport.update(
             &self.queue,
-            Resolution { width: self.width, height: self.height },
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
         );
 
         let iw = self.width as i32;
@@ -547,7 +568,12 @@ impl WgpuSurface {
                 left: label_x,
                 top: label_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::ACCENT_COLD),
                 custom_glyphs: &[],
             },
@@ -556,7 +582,12 @@ impl WgpuSurface {
                 left: time_x,
                 top: time_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::WARM),
                 custom_glyphs: &[],
             },
@@ -565,7 +596,12 @@ impl WgpuSurface {
                 left: date_x,
                 top: date_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::TEXT_MUTED),
                 custom_glyphs: &[],
             },
@@ -574,7 +610,12 @@ impl WgpuSurface {
                 left: prompt_x,
                 top: prompt_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::TEXT_MUTED),
                 custom_glyphs: &[],
             },
@@ -583,7 +624,12 @@ impl WgpuSurface {
                 left: masked_x,
                 top: masked_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::WARM),
                 custom_glyphs: &[],
             },
@@ -595,7 +641,12 @@ impl WgpuSurface {
                 left: denied_x,
                 top: denied_y,
                 scale: 1.0,
-                bounds: TextBounds { left: 0, top: 0, right: iw, bottom: ih },
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: iw,
+                    bottom: ih,
+                },
                 default_color: palette_to_glyph(ThermalPalette::CRITICAL),
                 custom_glyphs: &[],
             });
@@ -629,7 +680,9 @@ impl WgpuSurface {
                 occlusion_query_set: None,
             });
             if let Err(e) =
-                self.text.renderer.render(&self.text.atlas, &self.text.viewport, &mut rpass)
+                self.text
+                    .renderer
+                    .render(&self.text.atlas, &self.text.viewport, &mut rpass)
             {
                 warn!("glyphon render error: {:?}", e);
             }
@@ -641,14 +694,13 @@ impl WgpuSurface {
         if auth.shake_timer > 0.0 {
             let crit = ThermalPalette::CRITICAL;
             let flash_color: [f32; 4] = [crit[0], crit[1], crit[2], 0.3];
-            self.queue.write_buffer(
-                &self.flash_color_buf,
-                0,
-                bytemuck::cast_slice(&flash_color),
-            );
-            let mut enc2 = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("flash_enc"),
-            });
+            self.queue
+                .write_buffer(&self.flash_color_buf, 0, bytemuck::cast_slice(&flash_color));
+            let mut enc2 = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("flash_enc"),
+                });
             {
                 let mut rpass = enc2.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("flash_pass"),
@@ -757,11 +809,13 @@ fn run_lock() {
                 .create(true)
                 .append(true)
                 .open(&path)
-                .unwrap_or_else(|_| OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("/tmp/thermal-lock.log")
-                    .expect("cannot open any log file"))
+                .unwrap_or_else(|_| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/thermal-lock.log")
+                        .expect("cannot open any log file")
+                })
         })
         .init();
 
@@ -785,8 +839,7 @@ fn run_lock() {
     let session_lock_state = SessionLockState::new(&globals, &qh);
 
     // SHM pool for immediate fallback buffers in configure (satisfies protocol timeout)
-    let shm_pool = SlotPool::new(3840 * 2160 * 4, &shm)
-        .expect("Failed to create SHM slot pool");
+    let shm_pool = SlotPool::new(3840 * 2160 * 4, &shm).expect("Failed to create SHM slot pool");
 
     let wgpu_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -795,18 +848,16 @@ fn run_lock() {
 
     // Pre-create shared adapter+device so all surfaces use one Vulkan device.
     // NVIDIA fails with Device(Lost) if you create multiple devices.
-    let adapter = pollster::block_on(wgpu_instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        },
-    )).expect("No wgpu adapter available");
+    let adapter = pollster::block_on(wgpu_instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .expect("No wgpu adapter available");
     info!("adapter: {:?}", adapter.get_info());
 
-    let (device, queue) = pollster::block_on(
-        adapter.request_device(&Default::default(), None),
-    ).expect("Failed to create wgpu device");
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default(), None))
+        .expect("Failed to create wgpu device");
     info!("wgpu device ready (shared)");
 
     let shared_device = Rc::new(device);
@@ -836,11 +887,14 @@ fn run_lock() {
     };
 
     // Roundtrip to ensure all outputs are enumerated before we lock
-    event_queue.roundtrip(&mut app).expect("pre-lock roundtrip failed");
+    event_queue
+        .roundtrip(&mut app)
+        .expect("pre-lock roundtrip failed");
     let output_count = app.output_state.outputs().count();
     info!("pre-lock: {} outputs detected", output_count);
 
-    let session_lock = app.session_lock_state
+    let session_lock = app
+        .session_lock_state
         .lock(&qh)
         .expect("ext-session-lock-v1 not supported by compositor");
 
@@ -852,7 +906,10 @@ fn run_lock() {
         let lock_surface = session_lock.create_lock_surface(surface, &output, &qh);
         app.pending_surfaces.push(lock_surface);
     }
-    info!("lock request sent, {} surfaces created", app.pending_surfaces.len());
+    info!(
+        "lock request sent, {} surfaces created",
+        app.pending_surfaces.len()
+    );
 
     app.session_lock = Some(session_lock);
 
@@ -903,11 +960,11 @@ fn run_lock() {
         }
 
         // Reset failed_attempts counter once lockout has expired
-        if let Some(lockout_until) = app.auth.lockout_until {
-            if Instant::now() >= lockout_until {
-                app.auth.lockout_until = None;
-                app.auth.failed_attempts = 0;
-            }
+        if let Some(lockout_until) = app.auth.lockout_until
+            && Instant::now() >= lockout_until
+        {
+            app.auth.lockout_until = None;
+            app.auth.failed_attempts = 0;
         }
 
         // Snapshot auth state for rendering — use masked string, never clone the real password
@@ -972,7 +1029,10 @@ impl SessionLockHandler for LockApp {
             {
                 let stride = (width * 4) as i32;
                 match self.shm_pool.create_buffer(
-                    width as i32, height as i32, stride, wl_shm::Format::Argb8888,
+                    width as i32,
+                    height as i32,
+                    stride,
+                    wl_shm::Format::Argb8888,
                 ) {
                     Ok((buffer, canvas)) => {
                         let bg = ThermalPalette::BG;
@@ -1006,21 +1066,26 @@ impl SessionLockHandler for LockApp {
             }
 
             let lock_surface = self.pending_surfaces.remove(pos);
-            let raw_surface_ptr: *mut std::ffi::c_void = lock_surface.wl_surface().id().as_ptr().cast();
+            let raw_surface_ptr: *mut std::ffi::c_void =
+                lock_surface.wl_surface().id().as_ptr().cast();
 
             let wgpu_surface = unsafe {
-                match self.wgpu_instance
-                    .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                        raw_display_handle: RawDisplayHandle::Wayland(
-                            WaylandDisplayHandle::new(NonNull::new(self.display_ptr).unwrap()),
-                        ),
-                        raw_window_handle: RawWindowHandle::Wayland(
-                            WaylandWindowHandle::new(NonNull::new(raw_surface_ptr).unwrap()),
-                        ),
-                    }) {
+                match self.wgpu_instance.create_surface_unsafe(
+                    wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                            NonNull::new(self.display_ptr).unwrap(),
+                        )),
+                        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                            NonNull::new(raw_surface_ptr).unwrap(),
+                        )),
+                    },
+                ) {
                     Ok(s) => s,
                     Err(e) => {
-                        error!("wgpu surface creation failed for {}x{}: {:?}", width, height, e);
+                        error!(
+                            "wgpu surface creation failed for {}x{}: {:?}",
+                            width, height, e
+                        );
                         // Put it back so the protocol isn't violated
                         self.pending_surfaces.push(lock_surface);
                         return;
@@ -1039,7 +1104,8 @@ impl SessionLockHandler for LockApp {
                         compatible_surface: Some(&wgpu_surface),
                         force_fallback_adapter: false,
                     },
-                )).expect("no adapter for surface capabilities"),
+                ))
+                .expect("no adapter for surface capabilities"),
             );
             let format = caps
                 .formats
@@ -1063,7 +1129,8 @@ impl SessionLockHandler for LockApp {
             let heatmap = HeatmapPipeline::new(&device, format);
             let (flash_pipeline, flash_color_buf, flash_bind_group) =
                 make_flash_pipeline(&device, format);
-            let mut text = thermal_core::ThermalTextRenderer::new(&device, &queue, format, width, height);
+            let mut text =
+                thermal_core::ThermalTextRenderer::new(&device, &queue, format, width, height);
 
             // Pre-create text buffers
             let warm = palette_to_glyph(ThermalPalette::WARM);
@@ -1071,58 +1138,94 @@ impl SessionLockHandler for LockApp {
             let cold_accent = palette_to_glyph(ThermalPalette::ACCENT_COLD);
             let critical = palette_to_glyph(ThermalPalette::CRITICAL);
 
-            let mut buf_time = glyphon::Buffer::new(
+            let mut buf_time =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(72.0, 86.0));
+            buf_time.set_size(
                 &mut text.font_system,
-                Metrics::new(72.0, 86.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_time.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_time.set_text(&mut text.font_system, "00:00:00",
-                Attrs::new().color(warm).family(Family::Monospace), Shaping::Basic);
+            buf_time.set_text(
+                &mut text.font_system,
+                "00:00:00",
+                Attrs::new().color(warm).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_time.shape_until_scroll(&mut text.font_system, false);
 
-            let mut buf_date = glyphon::Buffer::new(
+            let mut buf_date =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(20.0, 24.0));
+            buf_date.set_size(
                 &mut text.font_system,
-                Metrics::new(20.0, 24.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_date.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_date.set_text(&mut text.font_system, "1970-01-01",
-                Attrs::new().color(muted).family(Family::Monospace), Shaping::Basic);
+            buf_date.set_text(
+                &mut text.font_system,
+                "1970-01-01",
+                Attrs::new().color(muted).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_date.shape_until_scroll(&mut text.font_system, false);
 
-            let mut buf_label = glyphon::Buffer::new(
+            let mut buf_label =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(11.0, 14.0));
+            buf_label.set_size(
                 &mut text.font_system,
-                Metrics::new(11.0, 14.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_label.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_label.set_text(&mut text.font_system, "THERMAL-LOCK",
-                Attrs::new().color(cold_accent).family(Family::Monospace), Shaping::Basic);
+            buf_label.set_text(
+                &mut text.font_system,
+                "THERMAL-LOCK",
+                Attrs::new().color(cold_accent).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_label.shape_until_scroll(&mut text.font_system, false);
 
-            let mut buf_prompt = glyphon::Buffer::new(
+            let mut buf_prompt =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(12.0, 15.0));
+            buf_prompt.set_size(
                 &mut text.font_system,
-                Metrics::new(12.0, 15.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_prompt.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_prompt.set_text(&mut text.font_system, "AUTHENTICATE",
-                Attrs::new().color(muted).family(Family::Monospace), Shaping::Basic);
+            buf_prompt.set_text(
+                &mut text.font_system,
+                "AUTHENTICATE",
+                Attrs::new().color(muted).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_prompt.shape_until_scroll(&mut text.font_system, false);
 
-            let mut buf_masked = glyphon::Buffer::new(
+            let mut buf_masked =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(24.0, 30.0));
+            buf_masked.set_size(
                 &mut text.font_system,
-                Metrics::new(24.0, 30.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_masked.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_masked.set_text(&mut text.font_system, "|",
-                Attrs::new().color(warm).family(Family::Monospace), Shaping::Basic);
+            buf_masked.set_text(
+                &mut text.font_system,
+                "|",
+                Attrs::new().color(warm).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_masked.shape_until_scroll(&mut text.font_system, false);
 
-            let mut buf_denied = glyphon::Buffer::new(
+            let mut buf_denied =
+                glyphon::Buffer::new(&mut text.font_system, Metrics::new(16.0, 20.0));
+            buf_denied.set_size(
                 &mut text.font_system,
-                Metrics::new(16.0, 20.0),
+                Some(width as f32),
+                Some(height as f32),
             );
-            buf_denied.set_size(&mut text.font_system, Some(width as f32), Some(height as f32));
-            buf_denied.set_text(&mut text.font_system, "ACCESS DENIED",
-                Attrs::new().color(critical).family(Family::Monospace), Shaping::Basic);
+            buf_denied.set_text(
+                &mut text.font_system,
+                "ACCESS DENIED",
+                Attrs::new().color(critical).family(Family::Monospace),
+                Shaping::Basic,
+            );
             buf_denied.shape_until_scroll(&mut text.font_system, false);
 
             self.wgpu_surfaces.push(WgpuSurface {
@@ -1173,22 +1276,47 @@ impl SessionLockHandler for LockApp {
 // ── CompositorHandler ────────────────────────────────────────────────────────
 
 impl CompositorHandler for LockApp {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: i32) {}
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: u32) {}
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: i32,
+    ) {
+    }
+    fn transform_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 }
 
 // ── OutputHandler ────────────────────────────────────────────────────────────
 
 impl OutputHandler for LockApp {
-    fn output_state(&mut self) -> &mut OutputState { &mut self.output_state }
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
@@ -1197,14 +1325,18 @@ impl OutputHandler for LockApp {
 // ── ProvidesRegistryState ────────────────────────────────────────────────────
 
 impl ProvidesRegistryState for LockApp {
-    fn registry(&mut self) -> &mut RegistryState { &mut self.registry_state }
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
     registry_handlers![OutputState, SeatState];
 }
 
 // ── ShmHandler ───────────────────────────────────────────────────────────────
 
 impl ShmHandler for LockApp {
-    fn shm_state(&mut self) -> &mut Shm { &mut self.shm }
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
 }
 
 // ── SeatHandler ──────────────────────────────────────────────────────────────
@@ -1315,8 +1447,12 @@ impl KeyboardHandler for LockApp {
                 self.auth.password.clear();
                 // After 3 consecutive failures, impose a 2-second lockout
                 if self.auth.failed_attempts >= 3 {
-                    warn!("Rate limiting: {} failed attempts — 2s lockout", self.auth.failed_attempts);
-                    self.auth.lockout_until = Some(Instant::now() + std::time::Duration::from_secs(2));
+                    warn!(
+                        "Rate limiting: {} failed attempts — 2s lockout",
+                        self.auth.failed_attempts
+                    );
+                    self.auth.lockout_until =
+                        Some(Instant::now() + std::time::Duration::from_secs(2));
                 }
             }
         } else if let Some(text) = event.utf8 {

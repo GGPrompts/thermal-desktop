@@ -262,10 +262,8 @@ mod tests {
     #[test]
     fn parse_comment_field_ignored_gracefully() {
         // Comment= is not stored in DesktopEntry but must not prevent parsing.
-        let e = parse(
-            "[Desktop Entry]\nName=App\nExec=app\nComment=A useful application\n",
-        )
-        .unwrap();
+        let e =
+            parse("[Desktop Entry]\nName=App\nExec=app\nComment=A useful application\n").unwrap();
         assert_eq!(e.name, "App");
         assert_eq!(e.exec, "app");
     }
@@ -323,10 +321,8 @@ mod tests {
 
     #[test]
     fn parse_categories_semicolon_separated() {
-        let e = parse(
-            "[Desktop Entry]\nName=App\nExec=app\nCategories=Utility;Network;\n",
-        )
-        .unwrap();
+        let e =
+            parse("[Desktop Entry]\nName=App\nExec=app\nCategories=Utility;Network;\n").unwrap();
         assert_eq!(e.categories, vec!["Utility", "Network"]);
     }
 
@@ -469,8 +465,8 @@ mod tests {
     fn fuzzy_shorter_name_scores_higher_among_substring_matches() {
         // Both contain "app" as substring; shorter name should score higher.
         let entries = vec![
-            make_entry("myapplication"),   // long, substring
-            make_entry("app"),             // short, prefix
+            make_entry("myapplication"), // long, substring
+            make_entry("app"),           // short, prefix
         ];
         let results = fuzzy_filter(&entries, "app");
         // "app" is shorter (and also a prefix), so it should be first.
@@ -571,7 +567,11 @@ mod tests {
     fn thermal_entries_all_have_names_and_execs() {
         for e in thermal_entries() {
             assert!(!e.name.is_empty(), "thermal entry has empty name");
-            assert!(!e.exec.is_empty(), "thermal entry has empty exec: {:?}", e.name);
+            assert!(
+                !e.exec.is_empty(),
+                "thermal entry has empty exec: {:?}",
+                e.name
+            );
         }
     }
 

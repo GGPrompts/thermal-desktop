@@ -565,7 +565,11 @@ mod tests {
         );
         for name in &beads_tools {
             let parts: Vec<&str> = name.splitn(2, ':').collect();
-            assert_eq!(parts.len(), 2, "beads tool '{name}' should split into 2 parts");
+            assert_eq!(
+                parts.len(),
+                2,
+                "beads tool '{name}' should split into 2 parts"
+            );
             assert_eq!(parts[0], "beads");
             assert!(!parts[1].is_empty(), "beads subcommand should not be empty");
         }
@@ -606,7 +610,10 @@ mod tests {
     fn type_text_requires_text() {
         let t = find_tool("type_text");
         let req = required_fields(&t);
-        assert!(req.contains(&"text".to_string()), "type_text should require text");
+        assert!(
+            req.contains(&"text".to_string()),
+            "type_text should require text"
+        );
     }
 
     #[test]

@@ -127,9 +127,7 @@ fn build_agent_summary(prefix: &str, sessions: &[&ClaudeSessionState]) -> Option
 /// slice so unit tests can drive it without touching the filesystem.
 /// Uses "CLU" prefix for backward compatibility.
 #[cfg(test)]
-pub(crate) fn build_claude_summary(
-    statuses: &[ClaudeStatus],
-) -> Option<(String, [f32; 4])> {
+pub(crate) fn build_claude_summary(statuses: &[ClaudeStatus]) -> Option<(String, [f32; 4])> {
     build_summary_for_prefix("CLU", statuses)
 }
 
@@ -169,10 +167,18 @@ pub(crate) fn build_summary_for_prefix(
     };
 
     let mut parts: Vec<String> = Vec::new();
-    if tool_use > 0   { parts.push(format!("{tool_use} tool")); }
-    if processing > 0 { parts.push(format!("{processing} run")); }
-    if awaiting > 0   { parts.push(format!("{awaiting} wait")); }
-    if idle > 0       { parts.push(format!("{idle} idle")); }
+    if tool_use > 0 {
+        parts.push(format!("{tool_use} tool"));
+    }
+    if processing > 0 {
+        parts.push(format!("{processing} run"));
+    }
+    if awaiting > 0 {
+        parts.push(format!("{awaiting} wait"));
+    }
+    if idle > 0 {
+        parts.push(format!("{idle} idle"));
+    }
 
     let summary = if parts.len() == 1 && total == 1 {
         format!("{prefix} {}", parts[0])
@@ -240,7 +246,10 @@ mod tests {
     fn summary_multiple_sessions_shows_total() {
         let statuses = [ClaudeStatus::Idle, ClaudeStatus::Idle, ClaudeStatus::Idle];
         let (text, _) = build_claude_summary(&statuses).unwrap();
-        assert!(text.starts_with("CLU 3:"), "expected 'CLU 3:' prefix, got '{text}'");
+        assert!(
+            text.starts_with("CLU 3:"),
+            "expected 'CLU 3:' prefix, got '{text}'"
+        );
     }
 
     #[test]
@@ -262,11 +271,15 @@ mod tests {
             ClaudeStatus::AwaitingInput,
         ];
         let (text, color) = build_claude_summary(&statuses).unwrap();
-        assert_eq!(color, ThermalPalette::ACCENT_HOT, "tool_use should dominate");
-        assert!(text.contains("tool"),  "text='{text}'");
-        assert!(text.contains("run"),   "text='{text}'");
-        assert!(text.contains("idle"),  "text='{text}'");
-        assert!(text.contains("wait"),  "text='{text}'");
+        assert_eq!(
+            color,
+            ThermalPalette::ACCENT_HOT,
+            "tool_use should dominate"
+        );
+        assert!(text.contains("tool"), "text='{text}'");
+        assert!(text.contains("run"), "text='{text}'");
+        assert!(text.contains("idle"), "text='{text}'");
+        assert!(text.contains("wait"), "text='{text}'");
     }
 
     // -----------------------------------------------------------------------
@@ -313,7 +326,10 @@ mod tests {
             vec![ClaudeStatus::Idle, ClaudeStatus::Idle, ClaudeStatus::Idle],
         ] {
             let (text, _) = build_claude_summary(&statuses).unwrap();
-            assert!(text.starts_with("CLU "), "text='{text}' should start with 'CLU '");
+            assert!(
+                text.starts_with("CLU "),
+                "text='{text}' should start with 'CLU '"
+            );
         }
     }
 
@@ -321,20 +337,30 @@ mod tests {
     fn summary_single_session_no_total_count_in_prefix() {
         // Single session -> "CLU <status>", not "CLU 1: <status>"
         let (text, _) = build_claude_summary(&[ClaudeStatus::Idle]).unwrap();
-        assert!(!text.contains(':'), "single session should not have ':' in '{text}'");
+        assert!(
+            !text.contains(':'),
+            "single session should not have ':' in '{text}'"
+        );
     }
 
     #[test]
     fn summary_multiple_sessions_has_colon_separator() {
         let statuses = [ClaudeStatus::Idle, ClaudeStatus::ToolUse];
         let (text, _) = build_claude_summary(&statuses).unwrap();
-        assert!(text.contains(':'), "multiple sessions should have ':' in '{text}'");
+        assert!(
+            text.contains(':'),
+            "multiple sessions should have ':' in '{text}'"
+        );
     }
 
     #[test]
     fn summary_counts_are_correct_with_duplicates() {
         // 3 tool-use sessions
-        let statuses = [ClaudeStatus::ToolUse, ClaudeStatus::ToolUse, ClaudeStatus::ToolUse];
+        let statuses = [
+            ClaudeStatus::ToolUse,
+            ClaudeStatus::ToolUse,
+            ClaudeStatus::ToolUse,
+        ];
         let (text, _) = build_claude_summary(&statuses).unwrap();
         assert!(text.contains("3 tool"), "expected '3 tool' in '{text}'");
     }

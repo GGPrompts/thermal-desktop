@@ -43,10 +43,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!(
-        "thermal-dispatcher v{} starting",
-        env!("CARGO_PKG_VERSION")
-    );
+    info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));
 
     // Load API key
     let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -251,14 +248,9 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
 
     // Loop: send to Haiku, handle tool calls, feed results back
     loop {
-        let response = api::call_haiku(
-            &http,
-            &state.api_key,
-            &state.tool_schemas,
-            &messages,
-        )
-        .await
-        .context("Haiku API call failed")?;
+        let response = api::call_haiku(&http, &state.api_key, &state.tool_schemas, &messages)
+            .await
+            .context("Haiku API call failed")?;
 
         // Check stop reason
         let stop_reason = response
@@ -311,10 +303,7 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let tool_input = block
-                .get("input")
-                .cloned()
-                .unwrap_or(serde_json::json!({}));
+            let tool_input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
 
             info!(tool = %tool_name, id = %tool_id, "Haiku wants to call tool");
 
@@ -349,11 +338,9 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
                         ConfirmResult::Denied => {
                             Ok(format!("User denied execution of {tool_name}"))
                         }
-                        ConfirmResult::Timeout => {
-                            Ok(format!(
-                                "Confirmation timed out for {tool_name} — action skipped"
-                            ))
-                        }
+                        ConfirmResult::Timeout => Ok(format!(
+                            "Confirmation timed out for {tool_name} — action skipped"
+                        )),
                     }
                 }
                 config::TrustTier::Block => {
@@ -413,10 +400,7 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
             format!("Click {btn} at ({x}, {y})")
         }
         "type_text" => {
-            let text = input
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("...");
+            let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
             let preview = if text.len() > 50 {
                 format!("{}...", &text[..50])
             } else {
@@ -425,10 +409,7 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
             format!("Type: \"{preview}\"")
         }
         "key_combo" => {
-            let combo = input
-                .get("combo")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let combo = input.get("combo").and_then(|v| v.as_str()).unwrap_or("?");
             format!("Press {combo}")
         }
         "focus_window" => {
@@ -439,10 +420,7 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
             format!("Focus window: {sel}")
         }
         "open_app" => {
-            let cmd = input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
             format!("Launch: {cmd}")
         }
         "open_browser" => {
@@ -710,11 +688,11 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("ok"));
-        assert_eq!(
-            json.get("response").and_then(|v| v.as_str()),
-            Some("Done!")
+        assert_eq!(json.get("response").and_then(|v| v.as_str()), Some("Done!"));
+        assert!(
+            json.get("error").is_none(),
+            "error should be omitted when None"
         );
-        assert!(json.get("error").is_none(), "error should be omitted when None");
     }
 
     #[test]
@@ -727,7 +705,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(json.get("status").and_then(|v| v.as_str()), Some("error"));
-        assert!(json.get("response").is_none(), "response should be omitted when None");
+        assert!(
+            json.get("response").is_none(),
+            "response should be omitted when None"
+        );
         assert_eq!(
             json.get("error").and_then(|v| v.as_str()),
             Some("something broke")
@@ -779,9 +760,15 @@ mod tests {
         let long_text = "a".repeat(100);
         let input = json!({"text": long_text});
         let desc = format_action_description("type_text", &input);
-        assert!(desc.contains("..."), "long text should be truncated with ...");
+        assert!(
+            desc.contains("..."),
+            "long text should be truncated with ..."
+        );
         // The preview is at most 50 chars + "..."
-        assert!(desc.len() < 100, "description should be shorter than full text");
+        assert!(
+            desc.len() < 100,
+            "description should be shorter than full text"
+        );
     }
 
     #[test]
@@ -859,7 +846,10 @@ mod tests {
         let big_val: String = "x".repeat(200);
         let input = json!({"key": big_val});
         let desc = format_action_description("some_tool", &input);
-        assert!(desc.contains("..."), "long args should be truncated with ...");
+        assert!(
+            desc.contains("..."),
+            "long args should be truncated with ..."
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -901,9 +891,8 @@ mod tests {
 
     #[test]
     fn extract_text_only_non_text_blocks_returns_empty() {
-        let content = vec![
-            json!({"type": "tool_use", "name": "screenshot", "id": "t2", "input": {}}),
-        ];
+        let content =
+            vec![json!({"type": "tool_use", "name": "screenshot", "id": "t2", "input": {}})];
         let result = extract_text_response(&content);
         assert!(result.is_empty());
     }
@@ -917,9 +906,8 @@ mod tests {
         let state = HudState::Thinking {
             transcript: "open the browser".into(),
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&state).unwrap(),
-        ).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("thinking"));
         assert_eq!(
             json.get("transcript").and_then(|v| v.as_str()),
@@ -933,9 +921,8 @@ mod tests {
             transcript: "show windows".into(),
             summary: "Found 5 windows".into(),
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&state).unwrap(),
-        ).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("result"));
         assert_eq!(
             json.get("summary").and_then(|v| v.as_str()),
@@ -949,9 +936,8 @@ mod tests {
             transcript: "do thing".into(),
             error: "timeout".into(),
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&state).unwrap(),
-        ).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("error"));
         assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("timeout"));
     }
@@ -963,10 +949,12 @@ mod tests {
             action: "Launch gimp".into(),
             tool_name: "open_app".into(),
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&state).unwrap(),
-        ).unwrap();
-        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("confirming"));
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            json.get("state").and_then(|v| v.as_str()),
+            Some("confirming")
+        );
         assert_eq!(
             json.get("tool_name").and_then(|v| v.as_str()),
             Some("open_app")
@@ -978,10 +966,12 @@ mod tests {
         let state = HudState::Executing {
             action: "Clicking at (100, 200)".into(),
         };
-        let json: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&state).unwrap(),
-        ).unwrap();
-        assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("executing"));
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            json.get("state").and_then(|v| v.as_str()),
+            Some("executing")
+        );
     }
 
     // -----------------------------------------------------------------------

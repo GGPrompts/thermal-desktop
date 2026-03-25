@@ -93,23 +93,23 @@ fn ctrl_keysym_byte(sym: Keysym) -> Option<u8> {
 
 fn encode_special(sym: Keysym) -> Option<Vec<u8>> {
     let bytes: &[u8] = match sym {
-        Keysym::Return    => b"\r",
+        Keysym::Return => b"\r",
         Keysym::BackSpace => b"\x7f",
-        Keysym::Tab       => b"\t",
-        Keysym::Escape    => b"\x1b",
+        Keysym::Tab => b"\t",
+        Keysym::Escape => b"\x1b",
 
         // Cursor movement
-        Keysym::Up    => b"\x1b[A",
-        Keysym::Down  => b"\x1b[B",
+        Keysym::Up => b"\x1b[A",
+        Keysym::Down => b"\x1b[B",
         Keysym::Right => b"\x1b[C",
-        Keysym::Left  => b"\x1b[D",
+        Keysym::Left => b"\x1b[D",
 
         // Editing keys
-        Keysym::Home      => b"\x1b[H",
-        Keysym::End       => b"\x1b[F",
-        Keysym::Insert    => b"\x1b[2~",
-        Keysym::Delete    => b"\x1b[3~",
-        Keysym::Page_Up   => b"\x1b[5~",
+        Keysym::Home => b"\x1b[H",
+        Keysym::End => b"\x1b[F",
+        Keysym::Insert => b"\x1b[2~",
+        Keysym::Delete => b"\x1b[3~",
+        Keysym::Page_Up => b"\x1b[5~",
         Keysym::Page_Down => b"\x1b[6~",
 
         _ => return None,
@@ -121,15 +121,15 @@ fn encode_special(sym: Keysym) -> Option<Vec<u8>> {
 
 fn encode_fkey(sym: Keysym) -> Option<Vec<u8>> {
     let seq: &[u8] = match sym {
-        Keysym::F1  => b"\x1bOP",
-        Keysym::F2  => b"\x1bOQ",
-        Keysym::F3  => b"\x1bOR",
-        Keysym::F4  => b"\x1bOS",
-        Keysym::F5  => b"\x1b[15~",
-        Keysym::F6  => b"\x1b[17~",
-        Keysym::F7  => b"\x1b[18~",
-        Keysym::F8  => b"\x1b[19~",
-        Keysym::F9  => b"\x1b[20~",
+        Keysym::F1 => b"\x1bOP",
+        Keysym::F2 => b"\x1bOQ",
+        Keysym::F3 => b"\x1bOR",
+        Keysym::F4 => b"\x1bOS",
+        Keysym::F5 => b"\x1b[15~",
+        Keysym::F6 => b"\x1b[17~",
+        Keysym::F7 => b"\x1b[18~",
+        Keysym::F8 => b"\x1b[19~",
+        Keysym::F9 => b"\x1b[20~",
         Keysym::F10 => b"\x1b[21~",
         Keysym::F11 => b"\x1b[23~",
         Keysym::F12 => b"\x1b[24~",
@@ -202,7 +202,10 @@ mod tests {
     #[test]
     fn printable_shifted() {
         let ev = key(Keysym::new(0x41), Some("A")); // 'A'
-        let mods = Modifiers { shift: true, ..no_mods() };
+        let mods = Modifiers {
+            shift: true,
+            ..no_mods()
+        };
         assert_eq!(encode_key(&ev, &mods), Some(b"A".to_vec()));
     }
 
@@ -409,7 +412,11 @@ mod tests {
     fn alt_uppercase_b() {
         // Alt+Shift+B → ESC + 'B'
         let ev = key(Keysym::new(0x42), Some("B"));
-        let mods = Modifiers { alt: true, shift: true, ..no_mods() };
+        let mods = Modifiers {
+            alt: true,
+            shift: true,
+            ..no_mods()
+        };
         assert_eq!(encode_key(&ev, &mods), Some(vec![0x1b, b'B']));
     }
 

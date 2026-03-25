@@ -276,8 +276,12 @@ pub async fn run() -> anyhow::Result<()> {
 
     // Phase 2: Initialize the wgpu renderer now that we know the surface size.
     let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
-    let surface_ptr = hud.layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>()
-        as *mut std::ffi::c_void;
+    let surface_ptr = hud
+        .layer
+        .wl_surface()
+        .id()
+        .as_ptr()
+        .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
 
     let mut renderer =
         Renderer::new_from_wayland(display_ptr, surface_ptr, hud.width, HUD_HEIGHT).await?;
@@ -331,9 +335,7 @@ pub async fn run() -> anyhow::Result<()> {
         let render_result = match &voice_mode {
             HudMode::VoiceActive { .. } => {
                 // Compute how long the result has been shown (for auto-dim).
-                let result_age = voice_poller
-                    .result_shown_at
-                    .map(|t| t.elapsed().as_secs());
+                let result_age = voice_poller.result_shown_at.map(|t| t.elapsed().as_secs());
                 tracing::debug!(?voice_mode, "rendering voice state");
                 renderer.render_voice_state(&voice_mode, result_age)
             }

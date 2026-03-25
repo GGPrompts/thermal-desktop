@@ -131,32 +131,31 @@ impl NotificationRenderer {
         });
 
         // ── Bind group layout ─────────────────────────────────────────────────
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("rect bgl"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rect bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         // ── Pipeline ─────────────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -201,8 +200,12 @@ impl NotificationRenderer {
             vp.update(&queue, Resolution { width, height });
             vp
         };
-        let text_renderer =
-            TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
 
         Self {
             device,
@@ -235,16 +238,14 @@ impl NotificationRenderer {
         let a = self.alpha;
 
         // Update viewport resolution
-        self.viewport.update(
-            &self.queue,
-            Resolution { width, height },
-        );
+        self.viewport
+            .update(&self.queue, Resolution { width, height });
 
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("notify render encoder"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("notify render encoder"),
+            });
 
         // ── Background clear (transparent so rounded corners show through) ──
         {
@@ -301,12 +302,14 @@ impl NotificationRenderer {
         summary_buf.set_text(
             &mut self.font_system,
             &notif.summary,
-            Attrs::new().family(Family::SansSerif).color(GlyphColor::rgba(
-                (text_bright[0] * 255.0) as u8,
-                (text_bright[1] * 255.0) as u8,
-                (text_bright[2] * 255.0) as u8,
-                (a * 255.0) as u8,
-            )),
+            Attrs::new()
+                .family(Family::SansSerif)
+                .color(GlyphColor::rgba(
+                    (text_bright[0] * 255.0) as u8,
+                    (text_bright[1] * 255.0) as u8,
+                    (text_bright[2] * 255.0) as u8,
+                    (a * 255.0) as u8,
+                )),
             Shaping::Advanced,
         );
         summary_buf.shape_until_scroll(&mut self.font_system, false);
@@ -316,12 +319,14 @@ impl NotificationRenderer {
         body_buf.set_text(
             &mut self.font_system,
             &notif.body,
-            Attrs::new().family(Family::SansSerif).color(GlyphColor::rgba(
-                (text_color[0] * 255.0) as u8,
-                (text_color[1] * 255.0) as u8,
-                (text_color[2] * 255.0) as u8,
-                (a * 255.0) as u8,
-            )),
+            Attrs::new()
+                .family(Family::SansSerif)
+                .color(GlyphColor::rgba(
+                    (text_color[0] * 255.0) as u8,
+                    (text_color[1] * 255.0) as u8,
+                    (text_color[2] * 255.0) as u8,
+                    (a * 255.0) as u8,
+                )),
             Shaping::Advanced,
         );
         body_buf.shape_until_scroll(&mut self.font_system, false);
@@ -392,7 +397,9 @@ impl NotificationRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            let _ = self.text_renderer.render(&self.text_atlas, &self.viewport, &mut pass);
+            let _ = self
+                .text_renderer
+                .render(&self.text_atlas, &self.viewport, &mut pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

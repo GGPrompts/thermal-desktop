@@ -11,7 +11,6 @@ use clap::Parser;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use smithay_client_toolkit as sctk;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
@@ -19,9 +18,9 @@ use sctk::{
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
+        Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
-        Capability, SeatHandler, SeatState,
     },
     shell::{
         WaylandSurface,
@@ -31,10 +30,11 @@ use sctk::{
         },
     },
 };
-use tracing::{info, warn, error};
+use smithay_client_toolkit as sctk;
+use tracing::{error, info, warn};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
-    globals::{registry_queue_init, GlobalList},
+    globals::{GlobalList, registry_queue_init},
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_surface},
 };
 use wayland_protocols::ext::idle_notify::v1::client::{
@@ -44,7 +44,10 @@ use wayland_protocols::ext::idle_notify::v1::client::{
 // -- CLI --
 
 #[derive(Parser)]
-#[command(name = "thermal-screensaver", about = "Idle-triggered thermal fluid simulation")]
+#[command(
+    name = "thermal-screensaver",
+    about = "Idle-triggered thermal fluid simulation"
+)]
 struct Cli {
     /// Idle timeout in seconds before screensaver activates
     #[arg(long, default_value = "300")]
@@ -293,7 +296,8 @@ struct ScreensaverSurface {
 
 impl ScreensaverSurface {
     fn render(&self, device: &wgpu::Device, queue: &wgpu::Queue, opacity: f32) {
-        self.pipeline.update_uniforms(queue, self.width, self.height, opacity);
+        self.pipeline
+            .update_uniforms(queue, self.width, self.height, opacity);
 
         let surface_texture = match self.wgpu_surface.get_current_texture() {
             Ok(t) => t,
@@ -542,25 +546,38 @@ impl Dispatch<wl_registry::WlRegistry, GlobalList> for App {
 
 impl CompositorHandler for App {
     fn scale_factor_changed(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: i32,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: i32,
+    ) {
+    }
     fn transform_changed(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: wl_output::Transform,
-    ) {}
-    fn frame(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: u32,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: wl_output::Transform,
+    ) {
+    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
     fn surface_enter(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: &wl_output::WlOutput,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
     fn surface_leave(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface, _: &wl_output::WlOutput,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_surface::WlSurface,
+        _: &wl_output::WlOutput,
+    ) {
+    }
 }
 
 // -- OutputHandler --
@@ -581,7 +598,10 @@ impl LayerShellHandler for App {
         let id = layer.wl_surface().id();
         self.surfaces.retain(|s| s.layer.wl_surface().id() != id);
         self.pending_layers.retain(|l| l.wl_surface().id() != id);
-        if self.surfaces.is_empty() && self.pending_layers.is_empty() && self.phase != Phase::WaitingForIdle {
+        if self.surfaces.is_empty()
+            && self.pending_layers.is_empty()
+            && self.phase != Phase::WaitingForIdle
+        {
             self.phase = Phase::WaitingForIdle;
         }
     }
@@ -602,18 +622,28 @@ impl LayerShellHandler for App {
         let surface_id = layer.wl_surface().id();
 
         // Check if this is an existing surface being reconfigured
-        if let Some(existing) = self.surfaces.iter_mut().find(|s| s.layer.wl_surface().id() == surface_id) {
+        if let Some(existing) = self
+            .surfaces
+            .iter_mut()
+            .find(|s| s.layer.wl_surface().id() == surface_id)
+        {
             existing.width = width;
             existing.height = height;
             existing.config.width = width;
             existing.config.height = height;
-            existing.wgpu_surface.configure(self.device.as_ref().unwrap(), &existing.config);
+            existing
+                .wgpu_surface
+                .configure(self.device.as_ref().unwrap(), &existing.config);
             info!("screensaver surface reconfigured: {}x{}", width, height);
             return;
         }
 
         // New surface from pending_layers
-        let pos = match self.pending_layers.iter().position(|l| l.wl_surface().id() == surface_id) {
+        let pos = match self
+            .pending_layers
+            .iter()
+            .position(|l| l.wl_surface().id() == surface_id)
+        {
             Some(p) => p,
             None => {
                 warn!("configure for unknown surface");
@@ -630,18 +660,21 @@ impl LayerShellHandler for App {
         };
 
         let owned_layer = self.pending_layers.remove(pos);
-        let raw_surface_ptr = owned_layer.wl_surface().id().as_ptr().cast::<std::ffi::c_void>()
-            as *mut std::ffi::c_void;
+        let raw_surface_ptr = owned_layer
+            .wl_surface()
+            .id()
+            .as_ptr()
+            .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
 
         let wgpu_surface = unsafe {
             self.wgpu_instance
                 .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: RawDisplayHandle::Wayland(
-                        WaylandDisplayHandle::new(NonNull::new(self.display_ptr).unwrap()),
-                    ),
-                    raw_window_handle: RawWindowHandle::Wayland(
-                        WaylandWindowHandle::new(NonNull::new(raw_surface_ptr).unwrap()),
-                    ),
+                    raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                        NonNull::new(self.display_ptr).unwrap(),
+                    )),
+                    raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                        NonNull::new(raw_surface_ptr).unwrap(),
+                    )),
                 })
                 .expect("Failed to create wgpu surface")
         };
@@ -720,9 +753,13 @@ impl SeatHandler for App {
     }
 
     fn remove_capability(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: wl_seat::WlSeat, _: Capability,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: wl_seat::WlSeat,
+        _: Capability,
+    ) {
+    }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
@@ -731,33 +768,59 @@ impl SeatHandler for App {
 
 impl KeyboardHandler for App {
     fn enter(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface,
-        _: u32, _: &[u32], _: &[Keysym],
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+        _: &[u32],
+        _: &[Keysym],
+    ) {
+    }
 
     fn leave(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+    }
 
     fn press_key(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent,
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
     ) {
         // Any keypress dismisses the screensaver
         self.begin_dismiss();
     }
 
     fn release_key(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard, _: u32, _: KeyEvent,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
+    ) {
+    }
 
     fn update_modifiers(
-        &mut self, _: &Connection, _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard, _: u32, _: Modifiers, _: u32,
-    ) {}
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: Modifiers,
+        _: u32,
+    ) {
+    }
 }
 
 // -- PointerHandler --
@@ -831,8 +894,7 @@ fn main() {
     let output_state = OutputState::new(&globals, &qh);
     let registry_state = RegistryState::new(&globals);
     let seat_state = SeatState::new(&globals, &qh);
-    let layer_shell =
-        LayerShell::bind(&globals, &qh).expect("wlr-layer-shell not available");
+    let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr-layer-shell not available");
 
     // Bind ext-idle-notifier-v1 manually from the global list
     let idle_notifier: ext_idle_notifier_v1::ExtIdleNotifierV1 = globals
@@ -875,20 +937,29 @@ fn main() {
     }
     let seat = &seats[0];
 
-    let idle_notification = app.idle_notifier.get_idle_notification(timeout_ms, seat, &qh, ());
+    let idle_notification = app
+        .idle_notifier
+        .get_idle_notification(timeout_ms, seat, &qh, ());
     app.idle_notification = Some(idle_notification);
 
-    info!("idle notification created, timeout={}ms, entering event loop", timeout_ms);
+    info!(
+        "idle notification created, timeout={}ms, entering event loop",
+        timeout_ms
+    );
 
     // Event loop
     loop {
         // Process pending events
-        event_queue.dispatch_pending(&mut app).expect("dispatch failed");
+        event_queue
+            .dispatch_pending(&mut app)
+            .expect("dispatch failed");
         conn.flush().expect("flush failed");
 
         if let Some(guard) = conn.prepare_read() {
             let _ = guard.read();
-            event_queue.dispatch_pending(&mut app).expect("dispatch failed");
+            event_queue
+                .dispatch_pending(&mut app)
+                .expect("dispatch failed");
         }
 
         if app.exit {

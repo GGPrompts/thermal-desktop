@@ -43,14 +43,23 @@ pub async fn click(args: Value) -> Result<ToolResult> {
 
     // Move mouse then click
     let move_output = Command::new("ydotool")
-        .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
+        .args([
+            "mousemove",
+            "--absolute",
+            "-x",
+            &x.to_string(),
+            "-y",
+            &y.to_string(),
+        ])
         .output()
         .await
         .context("failed to run ydotool mousemove — is ydotool installed and ydotoold running?")?;
 
     if !move_output.status.success() {
         let stderr = String::from_utf8_lossy(&move_output.stderr);
-        return Ok(ToolResult::error(format!("ydotool mousemove failed: {stderr}")));
+        return Ok(ToolResult::error(format!(
+            "ydotool mousemove failed: {stderr}"
+        )));
     }
 
     let click_output = Command::new("ydotool")
@@ -164,14 +173,18 @@ pub async fn scroll(args: Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("up");
 
-    let clicks = args
-        .get("clicks")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(3);
+    let clicks = args.get("clicks").and_then(|v| v.as_i64()).unwrap_or(3);
 
     // Move to position first
     let move_output = Command::new("ydotool")
-        .args(["mousemove", "--absolute", "-x", &x.to_string(), "-y", &y.to_string()])
+        .args([
+            "mousemove",
+            "--absolute",
+            "-x",
+            &x.to_string(),
+            "-y",
+            &y.to_string(),
+        ])
         .output()
         .await
         .context("failed to run ydotool mousemove — is ydotool installed and ydotoold running?")?;
@@ -202,7 +215,9 @@ pub async fn scroll(args: Value) -> Result<ToolResult> {
 
     if !scroll_output.status.success() {
         let stderr = String::from_utf8_lossy(&scroll_output.stderr);
-        return Ok(ToolResult::error(format!("ydotool scroll failed: {stderr}")));
+        return Ok(ToolResult::error(format!(
+            "ydotool scroll failed: {stderr}"
+        )));
     }
 
     Ok(ToolResult::success(vec![ContentBlock::text(format!(

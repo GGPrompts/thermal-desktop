@@ -16,16 +16,16 @@
 //! graphics commands are processed by the shared [`ImageStore`].
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
+use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, RenderableContent};
 use alacritty_terminal::vte::ansi;
-use alacritty_terminal::Term;
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -74,7 +74,10 @@ pub struct TerminalSize {
 
 impl TerminalSize {
     pub fn new(columns: usize, screen_lines: usize) -> Self {
-        Self { columns, screen_lines }
+        Self {
+            columns,
+            screen_lines,
+        }
     }
 }
 
@@ -239,10 +242,8 @@ impl Terminal {
 
                         // Process any graphics commands found.
                         if !gfx_result.commands.is_empty() {
-                            let cursor_row =
-                                term_guard.grid().cursor.point.line.0.max(0) as usize;
-                            let cursor_col =
-                                term_guard.grid().cursor.point.column.0;
+                            let cursor_row = term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            let cursor_col = term_guard.grid().cursor.point.column.0;
                             drop(term_guard);
                             let mut store = image_store.lock();
                             for cmd in gfx_result.commands {
@@ -260,8 +261,7 @@ impl Terminal {
                         // filtered bytes without modifying them).
                         let marks = osc_parser.feed(filtered);
                         if !marks.is_empty() {
-                            let cursor_line =
-                                term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            let cursor_line = term_guard.grid().cursor.point.line.0.max(0) as usize;
                             drop(term_guard);
                             let mut t = tracker.lock();
                             t.set_current_line(cursor_line);
@@ -360,8 +360,7 @@ mod tests {
         let pty_dirty = Arc::new(AtomicBool::new(false));
 
         // Create a wakeup pipe for the byte processor.
-        let (wakeup_read, wakeup_write) =
-            nix::unistd::pipe().expect("pipe() failed");
+        let (wakeup_read, wakeup_write) = nix::unistd::pipe().expect("pipe() failed");
         // Keep the read end alive so the write end doesn't error.
         let _wakeup_read = wakeup_read;
 

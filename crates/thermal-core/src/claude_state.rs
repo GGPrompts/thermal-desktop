@@ -5,7 +5,9 @@
 //! state directory get `agent_type = Some("claude")`, files in the Codex state
 //! directory get `agent_type = Some("codex")`.
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
+use notify::{
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,19 +20,14 @@ const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
 const CODEX_STATE_DIR: &str = "/tmp/codex-state";
 
 /// Status of a Claude session.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeStatus {
+    #[default]
     Idle,
     Processing,
     ToolUse,
     AwaitingInput,
-}
-
-impl Default for ClaudeStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Tool argument details from the Claude state file.
@@ -184,25 +181,23 @@ impl ClaudeStatePoller {
 
         while let Ok(result) = self.rx.try_recv() {
             match result {
-                Ok(event) => {
-                    match event.kind {
-                        EventKind::Create(_) | EventKind::Modify(_) => {
-                            for path in &event.paths {
-                                if Self::is_json(path) && !dirty_paths.contains(path) {
-                                    dirty_paths.push(path.clone());
-                                }
+                Ok(event) => match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) => {
+                        for path in &event.paths {
+                            if Self::is_json(path) && !dirty_paths.contains(path) {
+                                dirty_paths.push(path.clone());
                             }
                         }
-                        EventKind::Remove(_) => {
-                            for path in &event.paths {
-                                if Self::is_json(path) {
-                                    removed_paths.push(path.clone());
-                                }
-                            }
-                        }
-                        _ => {}
                     }
-                }
+                    EventKind::Remove(_) => {
+                        for path in &event.paths {
+                            if Self::is_json(path) {
+                                removed_paths.push(path.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                },
                 Err(_) => {
                     // Watcher error — silently skip.
                 }
@@ -240,10 +235,10 @@ impl ClaudeStatePoller {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if Self::is_json(&path) {
-                    if let Some(state) = Self::read_file(&path) {
-                        map.insert(path, state);
-                    }
+                if Self::is_json(&path)
+                    && let Some(state) = Self::read_file(&path)
+                {
+                    map.insert(path, state);
                 }
             }
         }
@@ -264,7 +259,7 @@ impl ClaudeStatePoller {
 
     /// Check if a path has a `.json` extension.
     fn is_json(path: &Path) -> bool {
-        path.extension().map_or(false, |ext| ext == "json")
+        path.extension().is_some_and(|ext| ext == "json")
     }
 }
 

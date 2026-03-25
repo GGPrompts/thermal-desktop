@@ -5,7 +5,9 @@
 //! When the voice assistant is active, the HUD switches from agent tabs to
 //! voice UI mode.
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
+use notify::{
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
+};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::mpsc;

@@ -150,8 +150,14 @@ impl SparklineSet {
         let mut all = Vec::new();
 
         all.extend(self.cpu_usage.render_rects(start_x, y, spark_width));
-        all.extend(self.cpu_temp.render_rects(start_x + spark_width + gap, y, spark_width));
-        all.extend(self.mem_used.render_rects(start_x + (spark_width + gap) * 2.0, y, spark_width));
+        all.extend(
+            self.cpu_temp
+                .render_rects(start_x + spark_width + gap, y, spark_width),
+        );
+        all.extend(
+            self.mem_used
+                .render_rects(start_x + (spark_width + gap) * 2.0, y, spark_width),
+        );
 
         all
     }
@@ -284,8 +290,14 @@ mod tests {
         }
         let rects = s.render_rects(0.0, 0.0, 50.0);
         for i in 1..rects.len() {
-            assert!(rects[i].x > rects[i - 1].x,
-                "rect[{}].x={} should be > rect[{}].x={}", i, rects[i].x, i-1, rects[i-1].x);
+            assert!(
+                rects[i].x > rects[i - 1].x,
+                "rect[{}].x={} should be > rect[{}].x={}",
+                i,
+                rects[i].x,
+                i - 1,
+                rects[i - 1].x
+            );
         }
     }
 
@@ -470,7 +482,7 @@ mod tests {
             cpu_usage_pct: 0.0,
             cpu_temp_c: None,
             mem_used_mb: 1000,
-            mem_total_mb: 0,  // avoid divide-by-zero
+            mem_total_mb: 0, // avoid divide-by-zero
             net_rx_kbps: 0.0,
             net_tx_kbps: 0.0,
             gpu_temp_c: None,

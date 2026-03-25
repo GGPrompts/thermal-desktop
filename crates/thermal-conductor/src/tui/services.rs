@@ -11,17 +11,17 @@ use std::process::Command;
 use std::time::Instant;
 
 use nix::sys::signal::{self, Signal};
-use nix::unistd::{getuid, Pid};
+use nix::unistd::{Pid, getuid};
 
 use ratatui::{
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table},
-    Frame,
 };
 
-use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
+use thermal_core::{ClaudeStatePoller, palette::ThermalPalette};
 
 use super::TuiPage;
 
@@ -125,22 +125,17 @@ fn runtime_dir() -> PathBuf {
 fn read_pid_from_file(filename: &str) -> Option<u32> {
     let path = runtime_dir().join(filename);
     let mut contents = String::new();
-    fs::File::open(&path).ok()?.read_to_string(&mut contents).ok()?;
+    fs::File::open(&path)
+        .ok()?
+        .read_to_string(&mut contents)
+        .ok()?;
     let pid: u32 = contents.trim().parse().ok()?;
     // Verify the process is actually alive.
-    if is_pid_alive(pid) {
-        Some(pid)
-    } else {
-        None
-    }
+    if is_pid_alive(pid) { Some(pid) } else { None }
 }
 
 fn pgrep_pid(binary: &str) -> Option<u32> {
-    let output = Command::new("pgrep")
-        .arg("-x")
-        .arg(binary)
-        .output()
-        .ok()?;
+    let output = Command::new("pgrep").arg("-x").arg(binary).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -193,10 +188,7 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
         }
     } else {
         // No known PID — try pkill as fallback.
-        let result = Command::new("pkill")
-            .arg("-x")
-            .arg(def.binary)
-            .status();
+        let result = Command::new("pkill").arg("-x").arg(def.binary).status();
         match result {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => Err(format!("{} not running", def.binary)),
@@ -255,11 +247,8 @@ impl ServicesPage {
         if status.running {
             match stop_service(def, status) {
                 Ok(()) => {
-                    self.status_msg = Some((
-                        format!("Stopping {}...", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
+                    self.status_msg =
+                        Some((format!("Stopping {}...", def.binary), false, Instant::now()));
                 }
                 Err(e) => {
                     self.status_msg = Some((e, true, Instant::now()));
@@ -268,11 +257,8 @@ impl ServicesPage {
         } else {
             match start_service(def) {
                 Ok(()) => {
-                    self.status_msg = Some((
-                        format!("Starting {}...", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
+                    self.status_msg =
+                        Some((format!("Starting {}...", def.binary), false, Instant::now()));
                 }
                 Err(e) => {
                     self.status_msg = Some((e, true, Instant::now()));
@@ -291,7 +277,8 @@ impl ServicesPage {
                 use std::io::{Read as _, Write as _};
                 let msg = format!("{json}\n");
                 if let Err(e) = stream.write_all(msg.as_bytes()) {
-                    self.status_msg = Some((format!("audio send failed: {e}"), true, Instant::now()));
+                    self.status_msg =
+                        Some((format!("audio send failed: {e}"), true, Instant::now()));
                     return;
                 }
                 let _ = stream.shutdown(std::net::Shutdown::Write);
@@ -316,7 +303,11 @@ impl ServicesPage {
 
     fn toggle_audio_mute(&mut self) {
         self.send_audio_command(r#"{"action":"toggle_mute"}"#);
-        let state = if self.audio_state.muted { "muted" } else { "unmuted" };
+        let state = if self.audio_state.muted {
+            "muted"
+        } else {
+            "unmuted"
+        };
         self.status_msg = Some((format!("Audio {state}"), false, Instant::now()));
     }
 
@@ -369,11 +360,8 @@ impl ServicesPage {
             // Not running — just start it.
             match start_service(def) {
                 Ok(()) => {
-                    self.status_msg = Some((
-                        format!("Starting {}...", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
+                    self.status_msg =
+                        Some((format!("Starting {}...", def.binary), false, Instant::now()));
                 }
                 Err(e) => {
                     self.status_msg = Some((e, true, Instant::now()));
@@ -407,11 +395,8 @@ impl TuiPage for ServicesPage {
                 let def = &SERVICES[idx];
                 match start_service(def) {
                     Ok(()) => {
-                        self.status_msg = Some((
-                            format!("Restarted {}", def.binary),
-                            false,
-                            Instant::now(),
-                        ));
+                        self.status_msg =
+                            Some((format!("Restarted {}", def.binary), false, Instant::now()));
                     }
                     Err(e) => {
                         self.status_msg = Some((e, true, Instant::now()));
@@ -441,16 +426,13 @@ impl TuiPage for ServicesPage {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        f.render_widget(
-            Block::default().style(Style::default().bg(BG)),
-            area,
-        );
+        f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2), // title
-                Constraint::Min(5),   // service table
+                Constraint::Min(5),    // service table
                 Constraint::Length(2), // hints
                 Constraint::Length(1), // status message
             ])
@@ -517,9 +499,17 @@ impl TuiPage for ServicesPage {
 
                 Row::new(vec![
                     Span::styled(pointer, Style::default().fg(ACCENT_COLD)),
-                    Span::styled(def.binary, Style::default().fg(if selected { TEXT_BRIGHT } else { TEXT })),
+                    Span::styled(
+                        def.binary,
+                        Style::default().fg(if selected { TEXT_BRIGHT } else { TEXT }),
+                    ),
                     Span::styled(def.description, Style::default().fg(TEXT_MUTED)),
-                    Span::styled(status_text.clone(), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        status_text.clone(),
+                        Style::default()
+                            .fg(status_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(pid_text, Style::default().fg(TEXT_MUTED)),
                 ])
                 .style(row_style)
@@ -550,9 +540,7 @@ impl TuiPage for ServicesPage {
         let mut hints = vec![
             Span::styled(
                 "Enter/Space",
-                Style::default()
-                    .fg(WARM)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
             ),
             Span::styled(": toggle  ", Style::default().fg(TEXT_MUTED)),
             Span::styled(
@@ -574,21 +562,16 @@ impl TuiPage for ServicesPage {
             hints.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
             hints.push(Span::styled(
                 "m",
-                Style::default()
-                    .fg(WARM)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
             ));
             hints.push(Span::styled(": mute  ", Style::default().fg(TEXT_MUTED)));
             hints.push(Span::styled(
                 "+/-",
-                Style::default()
-                    .fg(WARM)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(WARM).add_modifier(Modifier::BOLD),
             ));
             hints.push(Span::styled(": volume", Style::default().fg(TEXT_MUTED)));
         }
-        let hint = Paragraph::new(Line::from(hints))
-        .alignment(Alignment::Center);
+        let hint = Paragraph::new(Line::from(hints)).alignment(Alignment::Center);
         f.render_widget(hint, chunks[2]);
 
         // Status message
@@ -709,7 +692,11 @@ mod tests {
     fn all_services_have_nonempty_binary_and_description() {
         for def in SERVICES {
             assert!(!def.binary.is_empty(), "service has empty binary name");
-            assert!(!def.description.is_empty(), "service {} has empty description", def.binary);
+            assert!(
+                !def.description.is_empty(),
+                "service {} has empty description",
+                def.binary
+            );
         }
     }
 

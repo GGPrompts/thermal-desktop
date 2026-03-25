@@ -64,6 +64,14 @@ fn status_color(status: &ClaudeStatus) -> Color {
     }
 }
 
+/// Short label and color for the agent type column.
+fn agent_type_badge(session: &ClaudeSessionState) -> (&'static str, Color) {
+    match session.agent_type.as_deref() {
+        Some("codex") => ("COX", pal(ThermalPalette::ACCENT_COOL)),
+        _ => ("CLU", pal(ThermalPalette::ACCENT_WARM)),
+    }
+}
+
 fn status_label(status: &ClaudeStatus) -> &'static str {
     match status {
         ClaudeStatus::Idle => "IDLE",
@@ -679,7 +687,7 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells =
-            ["Session", "Status", "Activity", "Ctx%", "Project", "WS", "Updated"]
+            ["Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated"]
                 .iter()
                 .map(|h| {
                     Cell::from(*h).style(
@@ -698,6 +706,7 @@ impl TuiPage for SessionsPage {
                 let color = status_color(&s.status);
                 let label = status_label(&s.status);
                 let activity = format_activity(s);
+                let (agent_badge, agent_color) = agent_type_badge(s);
 
                 let (ctx_str, ctx_c) = match s.context_percent {
                     Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
@@ -740,6 +749,7 @@ impl TuiPage for SessionsPage {
 
                     Row::new(vec![
                         Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
@@ -757,6 +767,7 @@ impl TuiPage for SessionsPage {
                     Row::new(vec![
                         Cell::from(short_id.to_string())
                             .style(Style::default().fg(TEXT)),
+                        Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
@@ -772,10 +783,11 @@ impl TuiPage for SessionsPage {
             rows,
             [
                 Constraint::Length(14),
+                Constraint::Length(5),  // Agent (CLU/COX)
                 Constraint::Length(10),
                 Constraint::Length(28),
                 Constraint::Length(6),
-                Constraint::Min(16),
+                Constraint::Min(14),
                 Constraint::Length(4),
                 Constraint::Length(8),
             ],

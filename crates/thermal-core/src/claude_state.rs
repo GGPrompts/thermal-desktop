@@ -1,5 +1,9 @@
-//! ClaudeStatePoller — monitors `/tmp/claude-code-state/` for Claude session
-//! state files using the `notify` crate.
+//! ClaudeStatePoller — monitors `/tmp/claude-code-state/` and `/tmp/codex-state/`
+//! for agent session state files using the `notify` crate.
+//!
+//! Supports both Claude Code and OpenAI Codex sessions. Files in the Claude
+//! state directory get `agent_type = Some("claude")`, files in the Codex state
+//! directory get `agent_type = Some("codex")`.
 
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher};
 use serde::Deserialize;
@@ -8,7 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 /// The directory where Claude Code state JSON files are written.
-const STATE_DIR: &str = "/tmp/claude-code-state";
+const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
+
+/// The directory where Codex state JSON files are written (via adapter script).
+const CODEX_STATE_DIR: &str = "/tmp/codex-state";
 
 /// Status of a Claude session.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -88,41 +95,83 @@ impl Default for ClaudeSessionState {
     }
 }
 
-/// Watches `/tmp/claude-code-state/` for Claude session state file changes.
+// ---------------------------------------------------------------------------
+// Generalized type aliases — new code can use these cleaner names.
+// ---------------------------------------------------------------------------
+
+/// Alias for [`ClaudeStatePoller`] — watches both Claude and Codex state dirs.
+pub type AgentStatePoller = ClaudeStatePoller;
+
+/// Alias for [`ClaudeSessionState`] — represents any agent session.
+pub type AgentSessionState = ClaudeSessionState;
+
+/// Alias for [`ClaudeStatus`] — agent-agnostic status enum.
+pub type AgentStatus = ClaudeStatus;
+
+// ---------------------------------------------------------------------------
+// Poller
+// ---------------------------------------------------------------------------
+
+/// Infer the `agent_type` string from a state file's parent directory.
+fn agent_type_for_path(path: &Path) -> Option<String> {
+    let parent = path.parent()?.to_str()?;
+    if parent.contains("codex-state") {
+        Some("codex".to_string())
+    } else {
+        Some("claude".to_string())
+    }
+}
+
+/// Watches `/tmp/claude-code-state/` and `/tmp/codex-state/` for agent session
+/// state file changes.
 ///
 /// Uses the `notify` crate's recommended (OS-native) watcher. Call
 /// [`ClaudeStatePoller::poll`] regularly to drain events and re-read changed
 /// files, or [`ClaudeStatePoller::get_all`] for a full snapshot.
 pub struct ClaudeStatePoller {
-    _watcher: RecommendedWatcher,
+    _watchers: Vec<RecommendedWatcher>,
     rx: mpsc::Receiver<NotifyResult<Event>>,
-    state_dir: PathBuf,
+    state_dirs: Vec<PathBuf>,
     /// Cached session states keyed by file path.
     sessions: HashMap<PathBuf, ClaudeSessionState>,
 }
 
 impl ClaudeStatePoller {
-    /// Create a new poller watching `/tmp/claude-code-state/`.
-    /// Creates the directory if it does not exist.
+    /// Create a new poller watching both Claude and Codex state directories.
+    /// Creates the directories if they do not exist.
     pub fn new() -> NotifyResult<Self> {
-        let state_dir = PathBuf::from(STATE_DIR);
+        let claude_dir = PathBuf::from(CLAUDE_STATE_DIR);
+        let codex_dir = PathBuf::from(CODEX_STATE_DIR);
 
-        // Ensure the state directory exists.
-        if !state_dir.exists() {
-            let _ = std::fs::create_dir_all(&state_dir);
+        let dirs = vec![claude_dir, codex_dir];
+
+        // Ensure state directories exist.
+        for dir in &dirs {
+            if !dir.exists() {
+                let _ = std::fs::create_dir_all(dir);
+            }
         }
 
         let (tx, rx) = mpsc::channel();
-        let mut watcher = notify::recommended_watcher(tx)?;
-        watcher.watch(&state_dir, RecursiveMode::NonRecursive)?;
+        let mut watchers = Vec::new();
 
-        // Read initial state.
-        let sessions = Self::read_all_files(&state_dir);
+        for dir in &dirs {
+            let tx_clone = tx.clone();
+            let mut watcher = notify::recommended_watcher(tx_clone)?;
+            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+            watchers.push(watcher);
+        }
+
+        // Read initial state from all directories.
+        let mut sessions = HashMap::new();
+        for dir in &dirs {
+            sessions.extend(Self::read_all_files(dir));
+        }
 
         Ok(Self {
-            _watcher: watcher,
+            _watchers: watchers,
             rx,
-            state_dir,
+            state_dirs: dirs,
             sessions,
         })
     }
@@ -175,12 +224,14 @@ impl ClaudeStatePoller {
         self.sessions.values().cloned().collect()
     }
 
-    /// Read all `*.json` files in the state directory and return the current
-    /// snapshot of all sessions.
+    /// Read all `*.json` files in all watched state directories and return
+    /// the current snapshot of all sessions.
     pub fn get_all(&self) -> Vec<ClaudeSessionState> {
-        Self::read_all_files(&self.state_dir)
-            .into_values()
-            .collect()
+        let mut all = HashMap::new();
+        for dir in &self.state_dirs {
+            all.extend(Self::read_all_files(dir));
+        }
+        all.into_values().collect()
     }
 
     /// Read all JSON files in a directory into a map.
@@ -199,10 +250,16 @@ impl ClaudeStatePoller {
         map
     }
 
-    /// Parse a single JSON state file.
+    /// Parse a single JSON state file, setting `agent_type` based on the
+    /// parent directory if not already set in the JSON.
     fn read_file(path: &Path) -> Option<ClaudeSessionState> {
         let data = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        let mut state: ClaudeSessionState = serde_json::from_str(&data).ok()?;
+        // Set agent_type from directory if not already specified in JSON.
+        if state.agent_type.is_none() {
+            state.agent_type = agent_type_for_path(path);
+        }
+        Some(state)
     }
 
     /// Check if a path has a `.json` extension.
@@ -410,5 +467,41 @@ mod tests {
         assert!(!ClaudeStatePoller::is_json(Path::new("state.toml")));
         assert!(!ClaudeStatePoller::is_json(Path::new("state")));
         assert!(!ClaudeStatePoller::is_json(Path::new("")));
+    }
+
+    // --- agent_type_for_path ---
+
+    #[test]
+    fn agent_type_claude_dir() {
+        let path = Path::new("/tmp/claude-code-state/session-abc.json");
+        assert_eq!(agent_type_for_path(path), Some("claude".to_string()));
+    }
+
+    #[test]
+    fn agent_type_codex_dir() {
+        let path = Path::new("/tmp/codex-state/session-xyz.json");
+        assert_eq!(agent_type_for_path(path), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn agent_type_unknown_dir_defaults_to_claude() {
+        let path = Path::new("/tmp/other-state/session.json");
+        assert_eq!(agent_type_for_path(path), Some("claude".to_string()));
+    }
+
+    #[test]
+    fn session_with_agent_type_preserves_it() {
+        let json = r#"{"session_id": "typed", "agent_type": "codex"}"#;
+        let s = parse(json);
+        assert_eq!(s.agent_type.as_deref(), Some("codex"));
+    }
+
+    // --- type alias smoke tests ---
+
+    #[test]
+    fn type_aliases_compile() {
+        // Ensure the generalized aliases are usable.
+        let _s: AgentSessionState = ClaudeSessionState::default();
+        let _st: AgentStatus = ClaudeStatus::Idle;
     }
 }

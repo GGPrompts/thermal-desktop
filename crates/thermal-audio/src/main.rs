@@ -526,13 +526,19 @@ fn basename(path: &str) -> &str {
 
 /// Derive a short human-readable label from a session.
 /// Prefers the project folder name from working_dir, falls back to short session ID.
+/// Prefixes with "Codex" for codex sessions to distinguish in TTS announcements.
 fn session_label(session: &ClaudeSessionState) -> String {
+    let prefix = match session.agent_type.as_deref() {
+        Some("codex") => "Codex ",
+        _ => "",
+    };
+
     // Try to extract project folder name from working_dir
     if let Some(ref dir) = session.working_dir {
         if let Some(name) = std::path::Path::new(dir).file_name() {
             if let Some(s) = name.to_str() {
                 if !s.is_empty() {
-                    return s.to_string();
+                    return format!("{prefix}{s}");
                 }
             }
         }
@@ -543,9 +549,9 @@ fn session_label(session: &ClaudeSessionState) -> String {
         } else {
             &session.session_id
         };
-        return short.to_string();
+        return format!("{prefix}{short}");
     }
-    "session".to_string()
+    format!("{prefix}session")
 }
 
 // ---------------------------------------------------------------------------

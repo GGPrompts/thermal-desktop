@@ -1,28 +1,34 @@
-/// Claude agent status module for thermal-bar.
+/// Agent status module for thermal-bar.
 ///
-/// Monitors active Claude Code sessions via `ClaudeStatePoller` and
-/// displays an aggregate status summary in the bar's right zone.
+/// Monitors active agent sessions (Claude Code + Codex) via `ClaudeStatePoller`
+/// and displays per-agent-type summaries in the bar's right zone.
 /// Shows nothing when no sessions are active to avoid clutter.
-use thermal_core::{ClaudeStatePoller, ClaudeStatus, ThermalPalette};
+///
+/// Display prefixes: "CLU" for Claude sessions, "COX" for Codex sessions.
+use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ThermalPalette};
 
 use crate::layout::{ModuleOutput, Zone};
 
-pub struct ClaudeModule {
+/// Backward-compatible alias.
+pub type ClaudeModule = AgentModule;
+
+pub struct AgentModule {
     poller: ClaudeStatePoller,
 }
 
-impl ClaudeModule {
+impl AgentModule {
     pub fn new() -> Self {
-        // ClaudeStatePoller::new() creates /tmp/claude-code-state/ if needed
-        // and sets up a filesystem watcher. If it fails (e.g. no inotify),
-        // we still want the bar to run, so fall back gracefully.
-        let poller = ClaudeStatePoller::new().expect("failed to create ClaudeStatePoller");
+        // ClaudeStatePoller::new() creates state dirs if needed and sets up
+        // filesystem watchers. If it fails (e.g. no inotify), we still want
+        // the bar to run, so fall back gracefully.
+        let poller = ClaudeStatePoller::new().expect("failed to create AgentStatePoller");
         Self { poller }
     }
 
-    /// Poll Claude sessions and produce right-zone module outputs.
+    /// Poll agent sessions and produce right-zone module outputs.
     ///
-    /// Returns an empty vec if no sessions are active.
+    /// Returns an empty vec if no sessions are active. Produces separate
+    /// summary items for Claude ("CLU") and Codex ("COX") if both are present.
     pub fn render(&mut self) -> Vec<ModuleOutput> {
         let sessions = self.poller.poll();
 
@@ -30,67 +36,107 @@ impl ClaudeModule {
             return Vec::new();
         }
 
-        let total = sessions.len();
-        let mut tool_use = 0usize;
-        let mut processing = 0usize;
-        let mut idle = 0usize;
-        let mut awaiting = 0usize;
+        // Partition sessions by agent type.
+        let mut claude_sessions: Vec<&ClaudeSessionState> = Vec::new();
+        let mut codex_sessions: Vec<&ClaudeSessionState> = Vec::new();
 
         for s in &sessions {
-            match s.status {
-                ClaudeStatus::ToolUse => tool_use += 1,
-                ClaudeStatus::Processing => processing += 1,
-                ClaudeStatus::Idle => idle += 1,
-                ClaudeStatus::AwaitingInput => awaiting += 1,
+            match s.agent_type.as_deref() {
+                Some("codex") => codex_sessions.push(s),
+                _ => claude_sessions.push(s),
             }
         }
 
-        // Pick the dominant color based on hottest active state.
-        let color = if tool_use > 0 {
-            ThermalPalette::ACCENT_HOT
-        } else if processing > 0 {
-            ThermalPalette::ACCENT_WARM
-        } else if awaiting > 0 {
-            ThermalPalette::ACCENT_COOL
-        } else {
-            ThermalPalette::ACCENT_COLD
-        };
+        let mut outputs = Vec::new();
 
-        // Build a compact summary string.
-        let mut parts: Vec<String> = Vec::new();
-        if tool_use > 0 {
-            parts.push(format!("{tool_use} tool"));
+        if let Some(output) = build_agent_summary("CLU", &claude_sessions) {
+            outputs.push(output);
         }
-        if processing > 0 {
-            parts.push(format!("{processing} run"));
-        }
-        if awaiting > 0 {
-            parts.push(format!("{awaiting} wait"));
-        }
-        if idle > 0 {
-            parts.push(format!("{idle} idle"));
+        if let Some(output) = build_agent_summary("COX", &codex_sessions) {
+            outputs.push(output);
         }
 
-        let summary = if parts.len() == 1 && total == 1 {
-            // Single session — just show the status directly.
-            format!("CLU {}", parts[0])
-        } else {
-            format!("CLU {total}: {}", parts.join(", "))
-        };
-
-        vec![ModuleOutput::new(Zone::Right, summary, color)]
+        outputs
     }
 }
 
+/// Build a single ModuleOutput for a group of sessions with the given prefix.
+fn build_agent_summary(prefix: &str, sessions: &[&ClaudeSessionState]) -> Option<ModuleOutput> {
+    if sessions.is_empty() {
+        return None;
+    }
+
+    let total = sessions.len();
+    let mut tool_use = 0usize;
+    let mut processing = 0usize;
+    let mut idle = 0usize;
+    let mut awaiting = 0usize;
+
+    for s in sessions {
+        match s.status {
+            ClaudeStatus::ToolUse => tool_use += 1,
+            ClaudeStatus::Processing => processing += 1,
+            ClaudeStatus::Idle => idle += 1,
+            ClaudeStatus::AwaitingInput => awaiting += 1,
+        }
+    }
+
+    // Pick the dominant color based on hottest active state.
+    let color = if tool_use > 0 {
+        ThermalPalette::ACCENT_HOT
+    } else if processing > 0 {
+        ThermalPalette::ACCENT_WARM
+    } else if awaiting > 0 {
+        ThermalPalette::ACCENT_COOL
+    } else {
+        ThermalPalette::ACCENT_COLD
+    };
+
+    // Build a compact summary string.
+    let mut parts: Vec<String> = Vec::new();
+    if tool_use > 0 {
+        parts.push(format!("{tool_use} tool"));
+    }
+    if processing > 0 {
+        parts.push(format!("{processing} run"));
+    }
+    if awaiting > 0 {
+        parts.push(format!("{awaiting} wait"));
+    }
+    if idle > 0 {
+        parts.push(format!("{idle} idle"));
+    }
+
+    let summary = if parts.len() == 1 && total == 1 {
+        // Single session -- just show the status directly.
+        format!("{prefix} {}", parts[0])
+    } else {
+        format!("{prefix} {total}: {}", parts.join(", "))
+    };
+
+    Some(ModuleOutput::new(Zone::Right, summary, color))
+}
+
 // ---------------------------------------------------------------------------
-// Pure helper — testable without ClaudeStatePoller
+// Pure helper -- testable without ClaudeStatePoller
 // ---------------------------------------------------------------------------
 
 /// Compute the summary text and color from a slice of `ClaudeStatus` values.
 ///
-/// This mirrors the logic in `ClaudeModule::render()` but accepts a pre-built
+/// This mirrors the logic in `AgentModule::render()` but accepts a pre-built
 /// slice so unit tests can drive it without touching the filesystem.
+/// Uses "CLU" prefix for backward compatibility.
+#[cfg(test)]
 pub(crate) fn build_claude_summary(
+    statuses: &[ClaudeStatus],
+) -> Option<(String, [f32; 4])> {
+    build_summary_for_prefix("CLU", statuses)
+}
+
+/// Generic summary builder that accepts a prefix.
+#[cfg(test)]
+pub(crate) fn build_summary_for_prefix(
+    prefix: &str,
     statuses: &[ClaudeStatus],
 ) -> Option<(String, [f32; 4])> {
     if statuses.is_empty() {
@@ -129,9 +175,9 @@ pub(crate) fn build_claude_summary(
     if idle > 0       { parts.push(format!("{idle} idle")); }
 
     let summary = if parts.len() == 1 && total == 1 {
-        format!("CLU {}", parts[0])
+        format!("{prefix} {}", parts[0])
     } else {
-        format!("CLU {total}: {}", parts.join(", "))
+        format!("{prefix} {total}: {}", parts.join(", "))
     };
 
     Some((summary, color))
@@ -146,7 +192,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // build_claude_summary — empty input
+    // build_claude_summary -- empty input
     // -----------------------------------------------------------------------
 
     #[test]
@@ -187,7 +233,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Multiple sessions — aggregate formatting
+    // Multiple sessions -- aggregate formatting
     // -----------------------------------------------------------------------
 
     #[test]
@@ -201,7 +247,7 @@ mod tests {
     fn summary_two_sessions_one_each() {
         let statuses = [ClaudeStatus::ToolUse, ClaudeStatus::Idle];
         let (text, color) = build_claude_summary(&statuses).unwrap();
-        // tool_use > 0 → color should be ACCENT_HOT
+        // tool_use > 0 -> color should be ACCENT_HOT
         assert_eq!(color, ThermalPalette::ACCENT_HOT);
         assert!(text.contains("tool"), "should mention tool: '{text}'");
         assert!(text.contains("idle"), "should mention idle: '{text}'");
@@ -256,7 +302,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Summary text — prefix and count
+    // Summary text -- prefix and count
     // -----------------------------------------------------------------------
 
     #[test]
@@ -273,7 +319,7 @@ mod tests {
 
     #[test]
     fn summary_single_session_no_total_count_in_prefix() {
-        // Single session → "CLU <status>", not "CLU 1: <status>"
+        // Single session -> "CLU <status>", not "CLU 1: <status>"
         let (text, _) = build_claude_summary(&[ClaudeStatus::Idle]).unwrap();
         assert!(!text.contains(':'), "single session should not have ':' in '{text}'");
     }
@@ -291,5 +337,22 @@ mod tests {
         let statuses = [ClaudeStatus::ToolUse, ClaudeStatus::ToolUse, ClaudeStatus::ToolUse];
         let (text, _) = build_claude_summary(&statuses).unwrap();
         assert!(text.contains("3 tool"), "expected '3 tool' in '{text}'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Codex prefix (COX)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn codex_summary_uses_cox_prefix() {
+        let (text, _) = build_summary_for_prefix("COX", &[ClaudeStatus::Processing]).unwrap();
+        assert_eq!(text, "COX 1 run");
+    }
+
+    #[test]
+    fn codex_summary_multiple() {
+        let statuses = [ClaudeStatus::ToolUse, ClaudeStatus::Idle];
+        let (text, _) = build_summary_for_prefix("COX", &statuses).unwrap();
+        assert!(text.starts_with("COX 2:"), "text='{text}'");
     }
 }

@@ -4,6 +4,7 @@
 //! The daemon owns PTY sessions; clients spawn, list, send input, and kill sessions.
 
 mod agent_timeline;
+pub(crate) mod backend;
 mod client;
 mod daemon;
 mod grid_renderer;
@@ -25,7 +26,7 @@ use anyhow::{Result, Context, bail};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
-use kitty::KittyController;
+use backend::{Backend, BackendPreference, detect_backend};
 
 /// Thermal Conductor — orchestrate Claude agent therminals via the session daemon.
 ///
@@ -34,6 +35,10 @@ use kitty::KittyController;
 #[derive(Parser)]
 #[command(name = "thermal-conductor", version, about, after_help = "Run `thc` or `thc tui` to launch the interactive dashboard.")]
 struct Cli {
+    /// Session backend: auto (try kitty then daemon), kitty, or daemon
+    #[arg(long, default_value = "auto", global = true)]
+    backend: BackendPreference,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -128,9 +133,11 @@ fn main() -> Result<()> {
     // Default to TUI when no subcommand is given.
     let command = cli.command.unwrap_or(Commands::Tui);
 
+    let backend_pref = cli.backend;
+
     // TUI runs its own synchronous event loop — no tokio needed.
     if matches!(command, Commands::Tui) {
-        return tui::run();
+        return tui::run(backend_pref);
     }
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
@@ -147,7 +154,7 @@ fn main() -> Result<()> {
             .block_on(daemon::run_daemon());
     }
 
-    // All other subcommands use KittyController (or are self-contained).
+    // All other subcommands use a detected backend (or are self-contained).
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -158,11 +165,11 @@ fn main() -> Result<()> {
                     project,
                     command,
                     worktree,
-                } => cmd_spawn(count, project, command, worktree).await,
+                } => cmd_spawn(count, project, command, worktree, backend_pref).await,
                 Commands::Status => cmd_status().await,
-                Commands::Send { session_id, prompt } => cmd_send(session_id, prompt).await,
-                Commands::List { json } => cmd_list(json).await,
-                Commands::Kill { session_id } => cmd_kill(session_id).await,
+                Commands::Send { session_id, prompt } => cmd_send(session_id, prompt, backend_pref).await,
+                Commands::List { json } => cmd_list(json, backend_pref).await,
+                Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
@@ -171,18 +178,9 @@ fn main() -> Result<()> {
         })
 }
 
-/// Ensure KittyController is available, or exit with a clear error.
-async fn require_kitty(controller: &KittyController) {
-    if !controller.is_available().await {
-        eprintln!("Kitty remote control not available. Is kitty running with allow_remote_control enabled?");
-        std::process::exit(1);
-    }
-}
-
-/// Spawn N therminal sessions via kitty remote control.
-async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>, worktree: bool) -> Result<()> {
-    let controller = KittyController::new();
-    require_kitty(&controller).await;
+/// Spawn N therminal sessions via the detected backend.
+async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>, worktree: bool, pref: BackendPreference) -> Result<()> {
+    let mut backend = detect_backend(pref).await?;
 
     let cmd = command.unwrap_or_else(|| {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
@@ -196,7 +194,7 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
     });
 
     let wt_label = if worktree { " (with worktrees)" } else { "" };
-    println!("Spawning {count} therminal{}{wt_label}...", if count == 1 { "" } else { "s" });
+    println!("Spawning {count} therminal{}{wt_label} via {}...", if count == 1 { "" } else { "s" }, backend.name());
 
     for _i in 0..count {
         let ts = SystemTime::now()
@@ -205,34 +203,50 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
             .as_millis();
         let id = format!("session-{ts}");
 
-        // Optionally create a git worktree for this session.
-        let (effective_cwd, wt_path) = if worktree {
-            match cmd_create_worktree(&cwd, &id) {
-                Ok(wt) => (wt.clone(), Some(wt)),
-                Err(e) => {
-                    eprintln!("  Warning: worktree creation failed ({e}), using original cwd");
+        match &mut backend {
+            Backend::Kitty(controller) => {
+                // Optionally create a git worktree for this session.
+                let (effective_cwd, wt_path) = if worktree {
+                    match cmd_create_worktree(&cwd, &id) {
+                        Ok(wt) => (wt.clone(), Some(wt)),
+                        Err(e) => {
+                            eprintln!("  Warning: worktree creation failed ({e}), using original cwd");
+                            (cwd.clone(), None)
+                        }
+                    }
+                } else {
                     (cwd.clone(), None)
-                }
-            }
-        } else {
-            (cwd.clone(), None)
-        };
+                };
 
-        controller
-            .spawn(
-                &id,
-                &cmd,
-                &effective_cwd,
-                None,
-                wt_path.as_deref(),
-            )
-            .await?;
+                controller
+                    .spawn(
+                        &id,
+                        &cmd,
+                        &effective_cwd,
+                        None,
+                        wt_path.as_deref(),
+                    )
+                    .await?;
+            }
+            Backend::Daemon(client) => {
+                let spawned_id = client
+                    .spawn_session(
+                        Some(cmd.clone()),
+                        Some(cwd.clone()),
+                        worktree,
+                    )
+                    .await?;
+                println!("  Therminal spawned (session: {spawned_id})");
+                continue; // daemon prints its own ID
+            }
+        }
         println!("  Therminal spawned (session: {id})");
     }
 
     println!(
-        "{count} therminal{} spawned.",
-        if count == 1 { "" } else { "s" }
+        "{count} therminal{} spawned via {}.",
+        if count == 1 { "" } else { "s" },
+        backend.name(),
     );
     Ok(())
 }
@@ -320,83 +334,153 @@ async fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-/// Send text/prompt to a specific therminal session via kitty.
-async fn cmd_send(session_id: String, prompt: String) -> Result<()> {
-    let controller = KittyController::new();
-    require_kitty(&controller).await;
+/// Send text/prompt to a specific therminal session.
+async fn cmd_send(session_id: String, prompt: String, pref: BackendPreference) -> Result<()> {
+    let mut backend = detect_backend(pref).await?;
 
-    // Append newline to simulate pressing Enter (kitty send-text sends literal text).
-    let text = format!("{prompt}\n");
-    controller.send_text(&session_id, &text).await?;
-    println!("Sent to session {session_id}.");
+    match &mut backend {
+        Backend::Kitty(controller) => {
+            // Append newline to simulate pressing Enter (kitty send-text sends literal text).
+            let text = format!("{prompt}\n");
+            controller.send_text(&session_id, &text).await?;
+        }
+        Backend::Daemon(client) => {
+            let data = format!("{prompt}\n").into_bytes();
+            client.send_input(&session_id, data).await?;
+        }
+    }
+
+    println!("Sent to session {session_id} via {}.", backend.name());
     Ok(())
 }
 
-/// List all thermal sessions from kitty.
-async fn cmd_list(json: bool) -> Result<()> {
-    let controller = KittyController::new();
-    require_kitty(&controller).await;
+/// List all thermal sessions.
+async fn cmd_list(json: bool, pref: BackendPreference) -> Result<()> {
+    let mut backend = detect_backend(pref).await?;
 
-    let windows = controller.list_windows().await?;
+    match &mut backend {
+        Backend::Kitty(controller) => {
+            let windows = controller.list_windows().await?;
 
-    if json {
-        // WindowInfo doesn't derive Serialize, so build JSON manually.
-        let json_array: Vec<serde_json::Value> = windows
-            .iter()
-            .map(|w| {
-                serde_json::json!({
-                    "session_id": w.session_id,
-                    "kitty_window_id": w.kitty_window_id,
-                    "cwd": w.cwd,
-                    "title": w.title,
-                    "is_focused": w.is_focused,
-                    "foreground_command": w.foreground_command,
-                    "worktree_path": w.worktree_path,
-                    "profile_name": w.profile_name,
-                    "original_cwd": w.original_cwd,
-                    "spawn_time": w.spawn_time,
-                })
-            })
-            .collect();
-        let pretty = serde_json::to_string_pretty(&json_array)?;
-        println!("{pretty}");
-        return Ok(());
+            if json {
+                // WindowInfo doesn't derive Serialize, so build JSON manually.
+                let json_array: Vec<serde_json::Value> = windows
+                    .iter()
+                    .map(|w| {
+                        serde_json::json!({
+                            "backend": "kitty",
+                            "session_id": w.session_id,
+                            "kitty_window_id": w.kitty_window_id,
+                            "cwd": w.cwd,
+                            "title": w.title,
+                            "is_focused": w.is_focused,
+                            "foreground_command": w.foreground_command,
+                            "worktree_path": w.worktree_path,
+                            "profile_name": w.profile_name,
+                            "original_cwd": w.original_cwd,
+                            "spawn_time": w.spawn_time,
+                        })
+                    })
+                    .collect();
+                let pretty = serde_json::to_string_pretty(&json_array)?;
+                println!("{pretty}");
+                return Ok(());
+            }
+
+            if windows.is_empty() {
+                println!("No active thermal sessions (backend: kitty).");
+                return Ok(());
+            }
+
+            for w in &windows {
+                let cmd = w.foreground_command.as_deref().unwrap_or("-");
+                let focused = if w.is_focused { " *" } else { "" };
+                let profile = w.profile_name.as_deref().map(|p| format!("  profile: {p}")).unwrap_or_default();
+                println!(
+                    "  [{}]  cmd: {}  cwd: {}{}{}",
+                    w.session_id,
+                    cmd,
+                    w.cwd,
+                    focused,
+                    profile,
+                );
+            }
+            println!(
+                "\n{} session{} (backend: kitty).",
+                windows.len(),
+                if windows.len() == 1 { "" } else { "s" }
+            );
+        }
+        Backend::Daemon(client) => {
+            let sessions = client.list_sessions().await?;
+
+            if json {
+                let json_array: Vec<serde_json::Value> = sessions
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "backend": "daemon",
+                            "session_id": s.id,
+                            "shell_command": s.shell_command,
+                            "cwd": s.cwd,
+                            "title": s.title,
+                            "shell_pid": s.shell_pid,
+                            "cols": s.cols,
+                            "rows": s.rows,
+                            "start_time": s.start_time,
+                            "connected_clients": s.connected_client_count,
+                            "is_alive": s.is_alive,
+                            "worktree_path": s.worktree_path,
+                        })
+                    })
+                    .collect();
+                let pretty = serde_json::to_string_pretty(&json_array)?;
+                println!("{pretty}");
+                return Ok(());
+            }
+
+            if sessions.is_empty() {
+                println!("No active thermal sessions (backend: daemon).");
+                return Ok(());
+            }
+
+            for s in &sessions {
+                let alive = if s.is_alive { "" } else { " (dead)" };
+                let wt = s.worktree_path.as_deref().map(|p| format!("  wt: {p}")).unwrap_or_default();
+                println!(
+                    "  [{}]  shell: {}  cwd: {}  pid: {}{}{}",
+                    s.id,
+                    s.shell_command,
+                    s.cwd,
+                    s.shell_pid,
+                    alive,
+                    wt,
+                );
+            }
+            println!(
+                "\n{} session{} (backend: daemon).",
+                sessions.len(),
+                if sessions.len() == 1 { "" } else { "s" }
+            );
+        }
     }
-
-    if windows.is_empty() {
-        println!("No active thermal sessions.");
-        return Ok(());
-    }
-
-    // Compact table output: session ID, foreground command, focused, cwd
-    for w in &windows {
-        let cmd = w.foreground_command.as_deref().unwrap_or("-");
-        let focused = if w.is_focused { " *" } else { "" };
-        let profile = w.profile_name.as_deref().map(|p| format!("  profile: {p}")).unwrap_or_default();
-        println!(
-            "  [{}]  cmd: {}  cwd: {}{}{}",
-            w.session_id,
-            cmd,
-            w.cwd,
-            focused,
-            profile,
-        );
-    }
-    println!(
-        "\n{} session{}.",
-        windows.len(),
-        if windows.len() == 1 { "" } else { "s" }
-    );
     Ok(())
 }
 
-/// Kill (close) a therminal session via kitty.
-async fn cmd_kill(session_id: String) -> Result<()> {
-    let controller = KittyController::new();
-    require_kitty(&controller).await;
+/// Kill (close) a therminal session.
+async fn cmd_kill(session_id: String, pref: BackendPreference) -> Result<()> {
+    let mut backend = detect_backend(pref).await?;
 
-    controller.close_window(&session_id).await?;
-    println!("Session {session_id} closed.");
+    match &mut backend {
+        Backend::Kitty(controller) => {
+            controller.close_window(&session_id).await?;
+        }
+        Backend::Daemon(client) => {
+            client.kill_session(&session_id).await?;
+        }
+    }
+
+    println!("Session {session_id} closed via {}.", backend.name());
     Ok(())
 }
 

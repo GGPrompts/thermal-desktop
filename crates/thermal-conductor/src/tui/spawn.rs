@@ -14,6 +14,7 @@ use ratatui::{
 use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
 
 use super::TuiPage;
+use crate::backend::BackendPreference;
 use crate::profiles_config::{Profile, expand_tilde, load_profiles};
 
 // ---------------------------------------------------------------------------
@@ -93,10 +94,12 @@ pub struct SpawnPage {
     launch_cwd: String,
     /// Set to true by external code to trigger a profile reload on next tick.
     pub(crate) needs_reload: bool,
+    /// Which backend to use for spawning.
+    backend_pref: BackendPreference,
 }
 
 impl SpawnPage {
-    pub fn new() -> Self {
+    pub fn new(backend_pref: BackendPreference) -> Self {
         let (default_cwd, profiles) = load_profiles();
         let launch_cwd = std::env::current_dir()
             .ok()
@@ -133,6 +136,7 @@ impl SpawnPage {
             spawning: false,
             launch_cwd,
             needs_reload: false,
+            backend_pref,
         }
     }
 
@@ -215,6 +219,7 @@ impl SpawnPage {
             .map(|p| p.name.clone());
 
         let worktree = self.worktree_enabled;
+        let backend_pref = self.backend_pref;
 
         // Capture display strings before moving values into the spawn closure.
         let display_profile = profile_name.as_deref().unwrap_or("Custom").to_string();
@@ -229,36 +234,52 @@ impl SpawnPage {
                 .build();
             if let Ok(rt) = rt {
                 let _ = rt.block_on(async {
-                    let controller = crate::kitty::KittyController::new();
-                    if !controller.is_available().await {
-                        return;
-                    }
-                    for _ in 0..count {
-                        let ts = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis();
-                        let id = format!("session-{ts}");
+                    let backend = match crate::backend::detect_backend(backend_pref).await {
+                        Ok(b) => b,
+                        Err(_) => return,
+                    };
 
-                        // Optionally create a git worktree.
-                        let (spawn_cwd, wt_path) = if worktree {
-                            match crate::cmd_create_worktree(&effective_cwd, &id) {
-                                Ok(wt) => (wt.clone(), Some(wt)),
-                                Err(_) => (effective_cwd.clone(), None),
+                    match backend {
+                        crate::backend::Backend::Kitty(controller) => {
+                            for _ in 0..count {
+                                let ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis();
+                                let id = format!("session-{ts}");
+
+                                // Optionally create a git worktree.
+                                let (spawn_cwd, wt_path) = if worktree {
+                                    match crate::cmd_create_worktree(&effective_cwd, &id) {
+                                        Ok(wt) => (wt.clone(), Some(wt)),
+                                        Err(_) => (effective_cwd.clone(), None),
+                                    }
+                                } else {
+                                    (effective_cwd.clone(), None)
+                                };
+
+                                let _ = controller
+                                    .spawn(
+                                        &id,
+                                        &command,
+                                        &spawn_cwd,
+                                        profile_clone.as_deref(),
+                                        wt_path.as_deref(),
+                                    )
+                                    .await;
                             }
-                        } else {
-                            (effective_cwd.clone(), None)
-                        };
-
-                        let _ = controller
-                            .spawn(
-                                &id,
-                                &command,
-                                &spawn_cwd,
-                                profile_clone.as_deref(),
-                                wt_path.as_deref(),
-                            )
-                            .await;
+                        }
+                        crate::backend::Backend::Daemon(mut client) => {
+                            for _ in 0..count {
+                                let _ = client
+                                    .spawn_session(
+                                        Some(command.clone()),
+                                        Some(effective_cwd.clone()),
+                                        worktree,
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                 });
             }
@@ -266,10 +287,11 @@ impl SpawnPage {
 
         self.status_msg = Some((
             format!(
-                "Spawned {} x {} in {}",
+                "Spawned {} x {} in {} (backend: {})",
                 count,
                 display_profile,
                 display_cwd,
+                backend_pref,
             ),
             false,
         ));
@@ -798,6 +820,7 @@ cwd = "~/code"
             spawning: false,
             launch_cwd: launch_cwd.to_string(),
             needs_reload: false,
+            backend_pref: BackendPreference::Auto,
         }
     }
 

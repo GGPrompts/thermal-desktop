@@ -30,6 +30,7 @@ use ratatui::{
 
 use thermal_core::ClaudeStatePoller;
 
+use crate::backend::BackendPreference;
 use self::profiles::ProfilesPage;
 use self::services::ServicesPage;
 use self::sessions::SessionsPage;
@@ -113,12 +114,12 @@ struct App {
 }
 
 impl App {
-    fn new() -> Result<Self> {
+    fn new(backend_pref: BackendPreference) -> Result<Self> {
         let poller = ClaudeStatePoller::new()?;
 
         let pages: Vec<Box<dyn TuiPage>> = vec![
             Box::new(SessionsPage::new()),
-            Box::new(SpawnPage::new()),
+            Box::new(SpawnPage::new(backend_pref)),
             Box::new(ProfilesPage::new()),
             Box::new(ServicesPage::new()),
         ];
@@ -249,14 +250,14 @@ fn ui(f: &mut Frame, app: &mut App) {
 // ---------------------------------------------------------------------------
 
 /// Launch the TUI dashboard. This blocks until the user quits.
-pub fn run() -> Result<()> {
+pub fn run(backend_pref: BackendPreference) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new()?;
+    let mut app = App::new(backend_pref)?;
 
     // Initial tick to populate sessions.
     app.tick();

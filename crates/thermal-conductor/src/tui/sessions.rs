@@ -346,8 +346,8 @@ pub struct SessionsPage {
     cached_context_pct: HashMap<String, f32>,
     history: HashMap<String, VecDeque<HistoryEntry>>,
     history_popup: Option<String>,
-    /// PID → Hyprland workspace ID cache.
-    workspace_map: HashMap<u32, i64>,
+    /// working_dir → Hyprland workspace ID cache.
+    workspace_map: HashMap<String, i64>,
     last_workspace_refresh: Instant,
 }
 
@@ -514,14 +514,23 @@ impl TuiPage for SessionsPage {
     fn tick(&mut self, poller: &mut ClaudeStatePoller) {
         self.update_from_poller(poller);
 
-        // Refresh workspace map every 3s (runs hyprctl).
+        // Refresh workspace map every 3s (runs hyprctl + reads /proc).
         if self.last_workspace_refresh.elapsed() >= std::time::Duration::from_secs(3) {
             let window_pids = query_hyprland_workspaces();
             self.workspace_map.clear();
-            for s in &self.sessions {
-                if let Some(pid) = s.pid {
-                    if let Some(ws) = find_workspace_for_pid(pid, &window_pids) {
-                        self.workspace_map.insert(pid, ws);
+            // Scan live "claude" processes, read their cwd, walk to a window PID.
+            if let Ok(output) = Command::new("pgrep").arg("-x").arg("claude").output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Ok(pid) = line.trim().parse::<u32>() {
+                        // Read this process's cwd from /proc.
+                        if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
+                            if let Some(cwd_str) = cwd.to_str() {
+                                if let Some(ws) = find_workspace_for_pid(pid, &window_pids) {
+                                    self.workspace_map.insert(cwd_str.to_string(), ws);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -593,8 +602,8 @@ impl TuiPage for SessionsPage {
                     .unwrap_or("-")
                     .to_string();
 
-                let ws_str = s.pid
-                    .and_then(|pid| self.workspace_map.get(&pid))
+                let ws_str = s.working_dir.as_deref()
+                    .and_then(|wd| self.workspace_map.get(wd))
                     .map(|ws| ws.to_string())
                     .unwrap_or_else(|| "-".into());
 

@@ -209,6 +209,14 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
 // ServicesPage
 // ---------------------------------------------------------------------------
 
+/// Cached state from thermal-audio's control API.
+#[derive(Debug, Clone, Default)]
+struct AudioControlState {
+    muted: bool,
+    volume: f32,
+    last_fetched: Option<Instant>,
+}
+
 pub struct ServicesPage {
     statuses: Vec<ServiceStatus>,
     selected: usize,
@@ -217,6 +225,8 @@ pub struct ServicesPage {
     pending_restart: Option<(usize, Instant)>,
     /// Last time statuses were refreshed (throttle pgrep calls).
     last_refresh: Instant,
+    /// Cached thermal-audio mute/volume state.
+    audio_state: AudioControlState,
 }
 
 impl ServicesPage {
@@ -228,6 +238,7 @@ impl ServicesPage {
             status_msg: None,
             pending_restart: None,
             last_refresh: Instant::now(),
+            audio_state: AudioControlState::default(),
         }
     }
 
@@ -270,6 +281,70 @@ impl ServicesPage {
         }
         // Force immediate refresh on next tick.
         self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
+    }
+
+    /// Send a JSON command to the thermal-audio socket and parse the response.
+    fn send_audio_command(&mut self, json: &str) {
+        let sock_path = runtime_dir().join("audio.sock");
+        match std::os::unix::net::UnixStream::connect(&sock_path) {
+            Ok(mut stream) => {
+                use std::io::{Read as _, Write as _};
+                let msg = format!("{json}\n");
+                if let Err(e) = stream.write_all(msg.as_bytes()) {
+                    self.status_msg = Some((format!("audio send failed: {e}"), true, Instant::now()));
+                    return;
+                }
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                let mut resp = String::new();
+                let _ = stream.read_to_string(&mut resp);
+                // Parse response for muted/volume fields.
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                    if let Some(m) = v.get("muted").and_then(|v| v.as_bool()) {
+                        self.audio_state.muted = m;
+                    }
+                    if let Some(vol) = v.get("volume").and_then(|v| v.as_f64()) {
+                        self.audio_state.volume = vol as f32;
+                    }
+                    self.audio_state.last_fetched = Some(Instant::now());
+                }
+            }
+            Err(_) => {
+                self.status_msg = Some(("thermal-audio not running".into(), true, Instant::now()));
+            }
+        }
+    }
+
+    fn toggle_audio_mute(&mut self) {
+        self.send_audio_command(r#"{"action":"toggle_mute"}"#);
+        let state = if self.audio_state.muted { "muted" } else { "unmuted" };
+        self.status_msg = Some((format!("Audio {state}"), false, Instant::now()));
+    }
+
+    fn adjust_audio_volume(&mut self, delta: f32) {
+        let new_vol = (self.audio_state.volume + delta).clamp(0.0, 1.0);
+        let cmd = format!(r#"{{"action":"set_volume","value":{:.2}}}"#, new_vol);
+        self.send_audio_command(&cmd);
+        let pct = (self.audio_state.volume * 100.0).round() as u32;
+        self.status_msg = Some((format!("Volume: {pct}%"), false, Instant::now()));
+    }
+
+    fn refresh_audio_state(&mut self) {
+        let sock_path = runtime_dir().join("audio.sock");
+        if !sock_path.exists() {
+            return;
+        }
+        // Only refresh every 2s.
+        if let Some(last) = self.audio_state.last_fetched {
+            if last.elapsed().as_secs() < 2 {
+                return;
+            }
+        }
+        self.send_audio_command(r#"{"action":"get_status"}"#);
+    }
+
+    /// Check if the selected service is thermal-audio.
+    fn selected_is_audio(&self) -> bool {
+        SERVICES[self.selected].binary == "thermal-audio"
     }
 
     fn restart_selected(&mut self) {
@@ -354,6 +429,9 @@ impl TuiPage for ServicesPage {
             }
         }
 
+        // Refresh audio control state periodically.
+        self.refresh_audio_state();
+
         // Clear status message after 4 seconds.
         if let Some((_, _, when)) = &self.status_msg {
             if when.elapsed().as_secs() >= 4 {
@@ -413,9 +491,18 @@ impl TuiPage for ServicesPage {
                 let selected = i == self.selected;
                 let pointer = if selected { "\u{25b8}" } else { " " };
                 let (status_text, status_color) = if status.running {
-                    ("running", RUNNING_COLOR)
+                    if def.binary == "thermal-audio" && self.audio_state.last_fetched.is_some() {
+                        if self.audio_state.muted {
+                            ("muted".to_string(), Color::Rgb(200, 150, 50))
+                        } else {
+                            let pct = (self.audio_state.volume * 100.0).round() as u32;
+                            (format!("vol {pct}%"), RUNNING_COLOR)
+                        }
+                    } else {
+                        ("running".to_string(), RUNNING_COLOR)
+                    }
                 } else {
-                    ("stopped", STOPPED_COLOR)
+                    ("stopped".to_string(), STOPPED_COLOR)
                 };
                 let pid_text = status
                     .pid
@@ -432,7 +519,7 @@ impl TuiPage for ServicesPage {
                     Span::styled(pointer, Style::default().fg(ACCENT_COLD)),
                     Span::styled(def.binary, Style::default().fg(if selected { TEXT_BRIGHT } else { TEXT })),
                     Span::styled(def.description, Style::default().fg(TEXT_MUTED)),
-                    Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                    Span::styled(status_text.clone(), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
                     Span::styled(pid_text, Style::default().fg(TEXT_MUTED)),
                 ])
                 .style(row_style)
@@ -460,7 +547,7 @@ impl TuiPage for ServicesPage {
         f.render_widget(table, chunks[1]);
 
         // Hints
-        let hint = Paragraph::new(Line::from(vec![
+        let mut hints = vec![
             Span::styled(
                 "Enter/Space",
                 Style::default()
@@ -482,7 +569,25 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": navigate", Style::default().fg(TEXT_MUTED)),
-        ]))
+        ];
+        if self.selected_is_audio() {
+            hints.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
+            hints.push(Span::styled(
+                "m",
+                Style::default()
+                    .fg(WARM)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            hints.push(Span::styled(": mute  ", Style::default().fg(TEXT_MUTED)));
+            hints.push(Span::styled(
+                "+/-",
+                Style::default()
+                    .fg(WARM)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            hints.push(Span::styled(": volume", Style::default().fg(TEXT_MUTED)));
+        }
+        let hint = Paragraph::new(Line::from(hints))
         .alignment(Alignment::Center);
         f.render_widget(hint, chunks[2]);
 
@@ -519,6 +624,21 @@ impl TuiPage for ServicesPage {
             }
             KeyCode::Char('r') => {
                 self.restart_selected();
+            }
+            KeyCode::Char('m') => {
+                if self.selected_is_audio() {
+                    self.toggle_audio_mute();
+                }
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if self.selected_is_audio() {
+                    self.adjust_audio_volume(0.1);
+                }
+            }
+            KeyCode::Char('-') => {
+                if self.selected_is_audio() {
+                    self.adjust_audio_volume(-0.1);
+                }
             }
             KeyCode::Esc => {
                 self.status_msg = None;

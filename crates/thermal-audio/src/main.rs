@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 use std::{fs, thread};
@@ -100,6 +101,105 @@ struct TtsResponse {
     error: Option<String>,
 }
 
+/// Extended socket protocol — discriminated union with backward compatibility.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum SocketMessage {
+    /// TTS request (new-style with explicit action).
+    Tts {
+        text: String,
+        voice: Option<String>,
+        #[serde(default = "default_priority")]
+        priority: Priority,
+    },
+    /// Toggle mute on/off.
+    ToggleMute,
+    /// Set mute state explicitly.
+    SetMute { muted: bool },
+    /// Set volume (0.0 to 1.0).
+    SetVolume { value: f32 },
+    /// Get current mute/volume status.
+    GetStatus,
+}
+
+/// Response for control commands (mute/volume/status).
+#[derive(Serialize)]
+struct ControlResponse {
+    ok: bool,
+    muted: bool,
+    volume: f32,
+}
+
+// ---------------------------------------------------------------------------
+// Audio state (mute + volume) — shared across threads
+// ---------------------------------------------------------------------------
+
+/// Persistent audio state for mute/volume control.
+#[derive(Debug, Clone)]
+struct AudioState {
+    muted: bool,
+    volume: f32,
+}
+
+impl Default for AudioState {
+    fn default() -> Self {
+        Self {
+            muted: false,
+            volume: 1.0,
+        }
+    }
+}
+
+/// Config file path: ~/.config/thermal/audio.toml
+fn audio_config_path() -> PathBuf {
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(".config")
+        });
+    config_dir.join("thermal").join("audio.toml")
+}
+
+/// Load audio state from config file, returning default if missing/invalid.
+fn load_audio_state() -> AudioState {
+    let path = audio_config_path();
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return AudioState::default(),
+    };
+
+    let mut state = AudioState::default();
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("muted").and_then(|s| s.trim_start().strip_prefix('=')) {
+            let val = val.trim();
+            if val == "true" {
+                state.muted = true;
+            } else if val == "false" {
+                state.muted = false;
+            }
+        } else if let Some(val) = line.strip_prefix("volume").and_then(|s| s.trim_start().strip_prefix('=')) {
+            if let Ok(v) = val.trim().parse::<f32>() {
+                state.volume = v.clamp(0.0, 1.0);
+            }
+        }
+    }
+    state
+}
+
+/// Save audio state to config file.
+fn save_audio_state(state: &AudioState) {
+    let path = audio_config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let content = format!("muted = {}\nvolume = {:.2}\n", state.muted, state.volume);
+    if let Err(e) = fs::write(&path, content) {
+        warn!("failed to save audio config to {}: {e}", path.display());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Audio manager
 // ---------------------------------------------------------------------------
@@ -120,10 +220,12 @@ struct AudioManager {
     audio_tx: mpsc::Sender<PathBuf>,
     current_child: CurrentChild,
     edge_tts_available: bool,
+    /// Shared volume percentage (0-100) readable by the audio player thread.
+    volume_pct: Arc<AtomicU8>,
 }
 
 impl AudioManager {
-    fn new() -> Result<Self> {
+    fn new(initial_volume: f32) -> Result<Self> {
         let cache_dir = dirs_cache().join("thermal-audio");
         fs::create_dir_all(&cache_dir)
             .with_context(|| format!("creating cache dir {:?}", cache_dir))?;
@@ -140,8 +242,9 @@ impl AudioManager {
             warn!("edge-tts not found on PATH — TTS generation will be skipped");
         }
 
+        let volume_pct = Arc::new(AtomicU8::new((initial_volume.clamp(0.0, 1.0) * 100.0) as u8));
         let current_child: CurrentChild = Arc::new(Mutex::new(None));
-        let audio_tx = spawn_audio_thread(Arc::clone(&current_child));
+        let audio_tx = spawn_audio_thread(Arc::clone(&current_child), Arc::clone(&volume_pct));
 
         Ok(Self {
             cache_dir,
@@ -149,6 +252,7 @@ impl AudioManager {
             audio_tx,
             current_child,
             edge_tts_available,
+            volume_pct,
         })
     }
 
@@ -239,14 +343,15 @@ impl AudioManager {
 /// Spawn a dedicated audio thread that plays files via mpv.
 /// The thread registers each spawned mpv process in `current_child` so that
 /// external callers (e.g. high-priority interrupt) can kill it.
-fn spawn_audio_thread(current_child: CurrentChild) -> mpsc::Sender<PathBuf> {
+fn spawn_audio_thread(current_child: CurrentChild, volume_pct: Arc<AtomicU8>) -> mpsc::Sender<PathBuf> {
     let (tx, rx) = mpsc::channel::<PathBuf>();
 
     thread::Builder::new()
         .name("thermal-audio-player".into())
         .spawn(move || {
             for path in rx {
-                if let Err(e) = play_file(&path, &current_child) {
+                let vol = volume_pct.load(Ordering::Relaxed);
+                if let Err(e) = play_file(&path, &current_child, vol) {
                     warn!("audio play error: {e}");
                 }
             }
@@ -258,10 +363,12 @@ fn spawn_audio_thread(current_child: CurrentChild) -> mpsc::Sender<PathBuf> {
 
 /// Play an audio file via mpv, registering the child process in the shared
 /// mutex so it can be killed externally for interrupt support.
-fn play_file(path: &Path, current_child: &CurrentChild) -> Result<()> {
+/// `volume` is 0-100, passed to mpv's `--volume` flag.
+fn play_file(path: &Path, current_child: &CurrentChild, volume: u8) -> Result<()> {
     let child = std::process::Command::new("mpv")
         .arg("--no-video")
         .arg("--really-quiet")
+        .arg(format!("--volume={volume}"))
         .arg(path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -456,7 +563,15 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let mut audio = AudioManager::new()?;
+    // Load persisted audio state (mute/volume).
+    let audio_state = Arc::new(Mutex::new(load_audio_state()));
+    {
+        let st = audio_state.lock().unwrap();
+        info!("loaded audio state: muted={}, volume={:.2}", st.muted, st.volume);
+    }
+
+    let initial_volume = audio_state.lock().unwrap().volume;
+    let mut audio = AudioManager::new(initial_volume)?;
     let mut voices = VoicePool::new();
 
     // --test mode: speak text and exit.
@@ -518,18 +633,24 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!("socket API listening on {}", sock_path.display());
 
-    // Use a tokio mpsc channel to forward socket requests to the main loop,
+    // Use a tokio mpsc channel to forward TTS requests to the main loop,
     // which owns the AudioManager (not Send-safe across tasks).
     let (sock_tx, mut sock_rx) = tokio::sync::mpsc::unbounded_channel::<TtsRequest>();
 
     // Spawn a task that accepts socket connections and parses requests.
+    // Control messages (mute/volume/status) are handled directly in the
+    // socket handler — only TTS requests are forwarded via the channel.
+    let socket_audio_state = Arc::clone(&audio_state);
+    let socket_volume_pct = Arc::clone(&audio.volume_pct);
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let tx = sock_tx.clone();
+                    let state = Arc::clone(&socket_audio_state);
+                    let vol_pct = Arc::clone(&socket_volume_pct);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_socket_connection(stream, tx).await {
+                        if let Err(e) = handle_socket_connection(stream, tx, state, vol_pct).await {
                             warn!("socket connection error: {e}");
                         }
                     });
@@ -580,9 +701,12 @@ async fn main() -> Result<()> {
                     if prev != session.status {
                         if let Some(text) = transition_text(&label, &prev, &session.status, session) {
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
-                            let voice = voices.assign(&session.session_id);
-                            if let Err(e) = audio.announce(&session.session_id, voice, &text) {
-                                warn!("announce failed: {e}");
+                            let is_muted = audio_state.lock().unwrap().muted;
+                            if !is_muted {
+                                let voice = voices.assign(&session.session_id);
+                                if let Err(e) = audio.announce(&session.session_id, voice, &text) {
+                                    warn!("announce failed: {e}");
+                                }
                             }
                         }
                         prev_states.insert(session.session_id.clone(), session.status.clone());
@@ -598,9 +722,12 @@ async fn main() -> Result<()> {
                             let urgency = if pct >= 90 { "Alert" } else { "Warning" };
                             let text = format!("{urgency}, {label} at {pct}% context");
                             info!("[{}] context alert: {text}", session.session_id);
-                            let voice = voices.assign(&session.session_id);
-                            if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
-                                warn!("context announce failed: {e}");
+                            let is_muted = audio_state.lock().unwrap().muted;
+                            if !is_muted {
+                                let voice = voices.assign(&session.session_id);
+                                if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
+                                    warn!("context announce failed: {e}");
+                                }
                             }
                             prev_context_alert.insert(session.session_id.clone(), threshold);
                         }
@@ -620,18 +747,28 @@ async fn main() -> Result<()> {
                 let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
                 let high_priority = req.priority == Priority::High;
                 info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
-                if let Err(e) = audio.speak(voice, &req.text, high_priority) {
-                    warn!("socket TTS failed: {e}");
+                let is_muted = audio_state.lock().unwrap().muted;
+                if !is_muted {
+                    if let Err(e) = audio.speak(voice, &req.text, high_priority) {
+                        warn!("socket TTS failed: {e}");
+                    }
+                } else {
+                    info!("socket TTS skipped (muted)");
                 }
             }
         }
     }
 }
 
-/// Handle a single socket connection: read one JSON line, parse, forward, respond.
+/// Handle a single socket connection: read one JSON line, parse, forward/handle, respond.
+///
+/// Control messages (mute/volume/status) are handled directly here.
+/// TTS messages are forwarded to the main loop via the channel.
 async fn handle_socket_connection(
     stream: tokio::net::UnixStream,
     tx: tokio::sync::mpsc::UnboundedSender<TtsRequest>,
+    audio_state: Arc<Mutex<AudioState>>,
+    volume_pct: Arc<AtomicU8>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -654,9 +791,34 @@ async fn handle_socket_connection(
         return Ok(());
     }
 
-    match serde_json::from_str::<TtsRequest>(line) {
-        Ok(req) => {
-            if req.text.is_empty() {
+    // Try parsing as the new SocketMessage format first, then fall back to
+    // the legacy TtsRequest format (no "action" field) for backward compat.
+    let message = match serde_json::from_str::<SocketMessage>(line) {
+        Ok(msg) => msg,
+        Err(_) => {
+            // Backward compatibility: try parsing as legacy TtsRequest.
+            match serde_json::from_str::<TtsRequest>(line) {
+                Ok(req) => SocketMessage::Tts {
+                    text: req.text,
+                    voice: req.voice,
+                    priority: req.priority,
+                },
+                Err(e) => {
+                    let resp = serde_json::to_string(&TtsResponse {
+                        ok: false,
+                        error: Some(format!("invalid JSON: {e}")),
+                    })?;
+                    writer.write_all(resp.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    match message {
+        SocketMessage::Tts { text, voice, priority } => {
+            if text.is_empty() {
                 let resp = serde_json::to_string(&TtsResponse {
                     ok: false,
                     error: Some("text field is empty".to_string()),
@@ -666,7 +828,8 @@ async fn handle_socket_connection(
                 return Ok(());
             }
 
-            tx.send(req).context("forwarding TTS request to main loop")?;
+            tx.send(TtsRequest { text, voice, priority })
+                .context("forwarding TTS request to main loop")?;
 
             let resp = serde_json::to_string(&TtsResponse {
                 ok: true,
@@ -675,10 +838,63 @@ async fn handle_socket_connection(
             writer.write_all(resp.as_bytes()).await?;
             writer.write_all(b"\n").await?;
         }
-        Err(e) => {
-            let resp = serde_json::to_string(&TtsResponse {
-                ok: false,
-                error: Some(format!("invalid JSON: {e}")),
+        SocketMessage::ToggleMute => {
+            let state = {
+                let mut st = audio_state.lock().unwrap();
+                st.muted = !st.muted;
+                info!("toggle_mute: muted={}", st.muted);
+                st.clone()
+            };
+            save_audio_state(&state);
+            let resp = serde_json::to_string(&ControlResponse {
+                ok: true,
+                muted: state.muted,
+                volume: state.volume,
+            })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        SocketMessage::SetMute { muted } => {
+            let state = {
+                let mut st = audio_state.lock().unwrap();
+                st.muted = muted;
+                info!("set_mute: muted={muted}");
+                st.clone()
+            };
+            save_audio_state(&state);
+            let resp = serde_json::to_string(&ControlResponse {
+                ok: true,
+                muted: state.muted,
+                volume: state.volume,
+            })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        SocketMessage::SetVolume { value } => {
+            let clamped = value.clamp(0.0, 1.0);
+            let state = {
+                let mut st = audio_state.lock().unwrap();
+                st.volume = clamped;
+                info!("set_volume: volume={clamped:.2}");
+                st.clone()
+            };
+            // Update the atomic volume for the audio player thread.
+            volume_pct.store((clamped * 100.0) as u8, Ordering::Relaxed);
+            save_audio_state(&state);
+            let resp = serde_json::to_string(&ControlResponse {
+                ok: true,
+                muted: state.muted,
+                volume: state.volume,
+            })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        SocketMessage::GetStatus => {
+            let state = audio_state.lock().unwrap().clone();
+            let resp = serde_json::to_string(&ControlResponse {
+                ok: true,
+                muted: state.muted,
+                volume: state.volume,
             })?;
             writer.write_all(resp.as_bytes()).await?;
             writer.write_all(b"\n").await?;
@@ -1230,7 +1446,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Socket message JSON parsing (TtsRequest)
+    // Socket message JSON parsing (TtsRequest — legacy format)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1504,5 +1720,129 @@ mod tests {
         let session = make_session("s");
         let detail = tool_detail("Read", &session);
         assert_eq!(detail, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // SocketMessage parsing (new protocol)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_socket_message_tts() {
+        let json = r#"{"action": "tts", "text": "hello", "voice": "en-US-GuyNeural"}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        match msg {
+            SocketMessage::Tts { text, voice, priority } => {
+                assert_eq!(text, "hello");
+                assert_eq!(voice.as_deref(), Some("en-US-GuyNeural"));
+                assert_eq!(priority, Priority::Normal);
+            }
+            _ => panic!("expected Tts variant"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_message_tts_with_priority() {
+        let json = r#"{"action": "tts", "text": "urgent", "priority": "high"}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        match msg {
+            SocketMessage::Tts { priority, .. } => {
+                assert_eq!(priority, Priority::High);
+            }
+            _ => panic!("expected Tts variant"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_message_toggle_mute() {
+        let json = r#"{"action": "toggle_mute"}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        assert!(matches!(msg, SocketMessage::ToggleMute));
+    }
+
+    #[test]
+    fn parse_socket_message_set_mute_true() {
+        let json = r#"{"action": "set_mute", "muted": true}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        match msg {
+            SocketMessage::SetMute { muted } => assert!(muted),
+            _ => panic!("expected SetMute variant"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_message_set_mute_false() {
+        let json = r#"{"action": "set_mute", "muted": false}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        match msg {
+            SocketMessage::SetMute { muted } => assert!(!muted),
+            _ => panic!("expected SetMute variant"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_message_set_volume() {
+        let json = r#"{"action": "set_volume", "value": 0.5}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        match msg {
+            SocketMessage::SetVolume { value } => {
+                assert!((value - 0.5).abs() < f32::EPSILON);
+            }
+            _ => panic!("expected SetVolume variant"),
+        }
+    }
+
+    #[test]
+    fn parse_socket_message_get_status() {
+        let json = r#"{"action": "get_status"}"#;
+        let msg: SocketMessage = serde_json::from_str(json).expect("should parse");
+        assert!(matches!(msg, SocketMessage::GetStatus));
+    }
+
+    #[test]
+    fn parse_legacy_tts_request_without_action() {
+        // Legacy format: no "action" field. Should fail as SocketMessage but
+        // succeed as TtsRequest for backward compat.
+        let json = r#"{"text": "hello legacy"}"#;
+        // SocketMessage parse will fail (no "action" tag)...
+        assert!(serde_json::from_str::<SocketMessage>(json).is_err());
+        // ...but TtsRequest parse succeeds (backward compat path).
+        let req: TtsRequest = serde_json::from_str(json).expect("legacy should parse");
+        assert_eq!(req.text, "hello legacy");
+    }
+
+    // -----------------------------------------------------------------------
+    // AudioState defaults and persistence format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn audio_state_default_is_unmuted_full_volume() {
+        let state = AudioState::default();
+        assert!(!state.muted);
+        assert!((state.volume - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn control_response_serialization() {
+        let resp = ControlResponse {
+            ok: true,
+            muted: false,
+            volume: 0.8,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"muted\":false"));
+        assert!(json.contains("\"volume\":0.8"));
+    }
+
+    #[test]
+    fn control_response_muted_serialization() {
+        let resp = ControlResponse {
+            ok: true,
+            muted: true,
+            volume: 0.5,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"muted\":true"));
+        assert!(json.contains("\"volume\":0.5"));
     }
 }

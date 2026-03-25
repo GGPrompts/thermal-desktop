@@ -804,6 +804,10 @@ impl TuiPage for ProfilesPage {
         }
     }
 
+    fn has_text_focus(&self) -> bool {
+        matches!(self.focus, Focus::NameField | Focus::CwdField | Focus::CommandField | Focus::CountField)
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }

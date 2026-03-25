@@ -92,6 +92,11 @@ pub trait TuiPage: Any {
         poller: &mut ClaudeStatePoller,
     );
 
+    /// Whether focus is currently on a text input field (suppresses global hotkeys).
+    fn has_text_focus(&self) -> bool {
+        false
+    }
+
     /// Downcast helper for cross-page communication.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
@@ -394,6 +399,7 @@ pub fn run() -> Result<()> {
 /// Check if the active tab is a text input page (like Spawn) where
 /// single-character keys should go to the page rather than be global shortcuts.
 fn is_text_input_page(app: &App) -> bool {
-    // The Spawn page (index 1) and Profiles page (index 2) have text input fields.
-    app.active_tab == 1 || app.active_tab == 2
+    app.pages
+        .get(app.active_tab)
+        .map_or(false, |page| page.has_text_focus())
 }

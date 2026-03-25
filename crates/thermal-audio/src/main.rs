@@ -478,8 +478,30 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Daemon mode.
-    info!("thermal-audio daemon starting");
+    // Daemon mode — single-instance guard via pidfile.
+    let run_dir = PathBuf::from(
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()),
+    )
+    .join("thermal");
+    fs::create_dir_all(&run_dir)?;
+    let pidfile = run_dir.join("audio.pid");
+    if pidfile.exists() {
+        if let Ok(contents) = fs::read_to_string(&pidfile) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                // Check if that PID is still alive.
+                if Path::new(&format!("/proc/{pid}")).exists() {
+                    eprintln!("thermal-audio already running (pid {pid}). Exiting.");
+                    std::process::exit(0);
+                }
+            }
+        }
+        // Stale pidfile — remove it.
+        let _ = fs::remove_file(&pidfile);
+    }
+    fs::write(&pidfile, std::process::id().to_string())
+        .with_context(|| format!("writing pidfile {:?}", pidfile))?;
+
+    info!("thermal-audio daemon starting (pid {})", std::process::id());
 
     // Set up the Unix socket listener.
     let sock_path = socket_path();

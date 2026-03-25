@@ -24,22 +24,25 @@ These launch automatically at login via Hyprland `exec-once`:
 |-----------|-------------|
 | **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), hotkey cheat sheet (center), Claude sessions + clock (right) |
 | **thermal-audio** | TTS daemon — announces Claude session state changes (idle, tool use, awaiting input, context warnings) |
+| **thc daemon** | Session daemon — owns PTY sessions, provides Unix socket API for the TUI and other clients |
 
 ### On-Demand
 | Component | How to Launch | What It Does |
 |-----------|--------------|-------------|
 | **thermal-launch** | Super+D | Fuzzy app launcher overlay with thermal components at the top |
 | **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all Claude sessions with subagent nesting, context %, tools |
-| **thermal-conductor** | `thc` or `thc tui` | Tabbed ratatui TUI dashboard — Sessions page (monitors all Claude sessions) + Spawn page (profile-based session launcher) |
+| **thermal-conductor** | `thc` or `thc tui` | Tabbed ratatui TUI dashboard — Sessions, Spawn, Profiles, Services tabs |
 | **thermal-conductor** | `thermal-conductor window` | GPU-rendered terminal with agent overlays (HUD badge, timeline bar) |
 | **thermal-hud** | `thermal-hud` | Layer-shell overlay showing Claude session tabs or voice assistant state |
 | **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
+| **thermal-screensaver** | `thermal-screensaver` | Idle-triggered thermal fluid simulation overlay (reaction-diffusion shader) |
+| **thermal-wallpaper** | `thermal-wallpaper` | Animated WGSL thermal shader wallpaper — heat field modulated by system metrics |
 | **thermal-lock** | Disabled (NVIDIA) | Lock screen with WGSL heatmap shader + PAM auth |
 
 ### CLI Tools
 ```bash
 # Interactive TUI dashboard (default when no subcommand given)
-thc                            # Launch tabbed TUI (Sessions + Spawn pages)
+thc                            # Launch tabbed TUI (Sessions/Spawn/Profiles/Services)
 thc tui                        # Same, explicit subcommand
 
 # Session management
@@ -114,6 +117,7 @@ See [docs/HOTKEYS.md](docs/HOTKEYS.md) for the complete reference.
 Key ones:
 - **Super+D** — App launcher (thermal components listed first)
 - **Super+Enter** — New kitty terminal
+- **Super+Shift+Enter** — New GPU terminal (thermal-conductor window)
 - **Super+Q** — Close window
 - **Super+\\** — Push-to-talk voice input
 - **Super+B** — btop system monitor
@@ -180,16 +184,19 @@ thermal-core (shared library)
   ├── WgpuContext (GPU device factory)
   └── ThermalTextRenderer (glyphon + fonts)
 
-thermal-bar ──────── layer-shell top bar, 1Hz metrics
-thermal-launch ───── layer-shell overlay launcher
-thermal-hud ──────── layer-shell HUD (agent tabs + voice state)
-thermal-lock ─────── session-lock screen
-thermal-notify ───── D-Bus notification server
-thermal-audio ────── TTS daemon (edge-tts + mpv, Unix socket API)
-thermal-monitor ──── standalone ratatui TUI dashboard
-thermal-conductor ── tabbed TUI dashboard + PTY session daemon + GPU terminal
-thermal-commander ── MCP server (20 desktop control tools)
-thermal-dispatcher ─ voice command router (Whisper → Haiku → tool execution)
+thermal-bar ──────────── layer-shell top bar, 1Hz metrics
+thermal-launch ───────── layer-shell overlay launcher
+thermal-hud ──────────── layer-shell HUD (agent tabs + voice state)
+thermal-lock ─────────── session-lock screen
+thermal-notify ───────── D-Bus notification server
+thermal-audio ────────── TTS daemon (edge-tts + mpv, Unix socket API)
+thermal-voice ────────── push-to-talk STT daemon (cpal + Whisper)
+thermal-monitor ──────── standalone ratatui TUI dashboard
+thermal-conductor ────── tabbed TUI hub + PTY session daemon + GPU terminal
+thermal-commander ────── MCP server (20 desktop control tools)
+thermal-dispatcher ───── voice command router (Whisper → Haiku → tool execution)
+thermal-screensaver ──── idle-triggered thermal fluid simulation overlay
+thermal-wallpaper ────── animated WGSL thermal shader wallpaper daemon
 ```
 
 ### State & IPC

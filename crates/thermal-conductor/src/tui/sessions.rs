@@ -651,12 +651,32 @@ impl TuiPage for SessionsPage {
         event: crossterm::event::MouseEvent,
         _poller: &mut ClaudeStatePoller,
     ) {
-        use crossterm::event::MouseEventKind;
+        use crossterm::event::{MouseButton, MouseEventKind};
         match event.kind {
             MouseEventKind::ScrollDown => self.nav_down(),
             MouseEventKind::ScrollUp => self.nav_up(),
+            MouseEventKind::Down(MouseButton::Left) => {
+                // The sessions table is rendered in chunks[0] which starts at
+                // the page area's top. The table has a Block with Borders::ALL
+                // (1 row top border) + 1 header row + 1 bottom_margin (not used
+                // here but header height=1). So data rows start at relative row 2
+                // (border + header).
+                // Mouse coordinates are absolute, and the page area starts at row 3
+                // (below the 3-row tab bar). So absolute data row 0 = row 3+1+1 = 5.
+                let data_start = 3 + 1 + 1; // tab_bar(3) + table border(1) + header(1)
+                if event.row >= data_start {
+                    let clicked_row = (event.row - data_start) as usize;
+                    if clicked_row < self.display_rows.len() {
+                        self.table_state.select(Some(clicked_row));
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

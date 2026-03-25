@@ -6,6 +6,7 @@
 | Key | Action |
 |-----|--------|
 | Super + Enter | New terminal (kitty) |
+| Super + Shift + Enter | New GPU terminal (thermal-conductor window) |
 | Super + Q | Close window |
 | Super + D | App launcher (thermal-launch) |
 | Super + E | File manager (thunar) |

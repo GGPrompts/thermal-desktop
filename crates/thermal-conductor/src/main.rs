@@ -12,6 +12,7 @@ mod input;
 mod kitty;
 mod kitty_graphics;
 mod osc633;
+pub(crate) mod profiles_config;
 mod protocol;
 mod pty;
 mod terminal;

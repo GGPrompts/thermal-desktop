@@ -10,11 +10,11 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame,
 };
-use serde::Deserialize;
 
 use thermal_core::{palette::ThermalPalette, ClaudeStatePoller};
 
 use super::TuiPage;
+use crate::profiles_config::{Profile, expand_tilde, load_profiles};
 
 // ---------------------------------------------------------------------------
 // Palette helpers
@@ -37,75 +37,6 @@ const COLD: Color = pal(ThermalPalette::COLD);
 const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
 const WARM: Color = pal(ThermalPalette::WARM);
 const SEARING: Color = pal(ThermalPalette::SEARING);
-
-// ---------------------------------------------------------------------------
-// Profile config
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-struct ProfileConfig {
-    #[serde(default)]
-    default_cwd: Option<String>,
-    #[serde(default, rename = "profile")]
-    profiles: Vec<Profile>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Profile {
-    name: String,
-    #[serde(default)]
-    command: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    icon: Option<String>,
-    #[serde(default = "default_count")]
-    count: u32,
-    /// If true, create a git worktree per session to avoid file-edit conflicts.
-    #[serde(default)]
-    git_worktree: bool,
-}
-
-fn default_count() -> u32 {
-    1
-}
-
-fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
-    }
-    path.to_string()
-}
-
-/// Load profiles from config file. Search order:
-/// 1. ./config/profiles.toml (dev)
-/// 2. ~/.config/thermal/profiles.toml (user)
-fn load_profiles() -> (Option<String>, Vec<Profile>) {
-    let candidates = [
-        "config/profiles.toml".to_string(),
-        expand_tilde("~/.config/thermal/profiles.toml"),
-    ];
-
-    for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = toml::from_str::<ProfileConfig>(&content) {
-                return (config.default_cwd, config.profiles);
-            }
-        }
-    }
-
-    // Fallback: single "Custom" profile
-    (None, vec![Profile {
-        name: "Custom".into(),
-        command: None,
-        cwd: None,
-        icon: Some("⚡".into()),
-        count: 1,
-        git_worktree: false,
-    }])
-}
 
 // ---------------------------------------------------------------------------
 // Spawn form focus
@@ -160,6 +91,8 @@ pub struct SpawnPage {
     spawning: bool,
     /// CWD that thc was launched from
     launch_cwd: String,
+    /// Set to true by external code to trigger a profile reload on next tick.
+    pub(crate) needs_reload: bool,
 }
 
 impl SpawnPage {
@@ -199,7 +132,22 @@ impl SpawnPage {
             status_msg: None,
             spawning: false,
             launch_cwd,
+            needs_reload: false,
         }
+    }
+
+    /// Reload profiles from disk.
+    pub(crate) fn reload_profiles(&mut self) {
+        let (default_cwd, profiles) = load_profiles();
+        self.default_cwd = default_cwd;
+        self.profiles = profiles;
+        // Clamp selection
+        if let Some(i) = self.list_state.selected() {
+            if i >= self.profiles.len() {
+                self.list_state.select(if self.profiles.is_empty() { None } else { Some(0) });
+            }
+        }
+        self.apply_selected_profile();
     }
 
     /// Fill editable fields from the selected profile.
@@ -313,7 +261,12 @@ impl TuiPage for SpawnPage {
         "Spawn"
     }
 
-    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {}
+    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
+        if self.needs_reload {
+            self.reload_profiles();
+            self.needs_reload = false;
+        }
+    }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
         f.render_widget(
@@ -524,12 +477,62 @@ impl TuiPage for SpawnPage {
         event: crossterm::event::MouseEvent,
         _poller: &mut ClaudeStatePoller,
     ) {
-        use crossterm::event::MouseEventKind;
+        use crossterm::event::{MouseButton, MouseEventKind};
         match event.kind {
             MouseEventKind::ScrollDown => self.nav_down(),
             MouseEventKind::ScrollUp => self.nav_up(),
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Page area starts at absolute row 3 (below 3-row tab bar).
+                // Layout has margin(1), so content starts at row 3+1=4, col 1.
+                // Left panel: cols 1..29 (Length(28)), right panel: cols 29+.
+                // Left panel is a List with Borders::ALL: border top + items start at row 5.
+                let page_top = 3u16; // tab bar height
+                let margin = 1u16;
+                let content_top = page_top + margin;
+                let content_left = margin;
+                let left_panel_width = 28u16;
+
+                let col = event.column;
+                let row = event.row;
+
+                if col >= content_left && col < content_left + left_panel_width {
+                    // Left panel click — profile list
+                    // List has Borders::ALL: +1 top border for items
+                    let list_data_start = content_top + 1; // border top
+                    if row >= list_data_start {
+                        let clicked_idx = (row - list_data_start) as usize;
+                        if clicked_idx < self.profiles.len() {
+                            self.list_state.select(Some(clicked_idx));
+                            self.apply_selected_profile();
+                            self.focus = Focus::ProfileList;
+                        }
+                    }
+                } else if col >= content_left + left_panel_width {
+                    // Right panel click — form fields
+                    // form_chunks layout (each Length(3)):
+                    //   [0] title:    content_top .. content_top+3
+                    //   [1] cwd:      content_top+3 .. content_top+6
+                    //   [2] command:  content_top+6 .. content_top+9
+                    //   [3] count:    content_top+9 .. content_top+12
+                    //   [4] worktree: content_top+12 .. content_top+15
+                    let form_top = content_top;
+                    if row >= form_top + 3 && row < form_top + 6 {
+                        self.focus = Focus::CwdField;
+                    } else if row >= form_top + 6 && row < form_top + 9 {
+                        self.focus = Focus::CommandField;
+                    } else if row >= form_top + 9 && row < form_top + 12 {
+                        self.focus = Focus::CountField;
+                    } else if row >= form_top + 12 && row < form_top + 15 {
+                        self.focus = Focus::WorktreeToggle;
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -538,6 +541,7 @@ impl TuiPage for SpawnPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiles_config::{ProfileConfig, default_count};
 
     // ── expand_tilde ──────────────────────────────────────────────────────────
 
@@ -752,6 +756,7 @@ cwd = "~/code"
             status_msg: None,
             spawning: false,
             launch_cwd: launch_cwd.to_string(),
+            needs_reload: false,
         }
     }
 

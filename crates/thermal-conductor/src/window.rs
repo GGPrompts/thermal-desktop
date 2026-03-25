@@ -174,7 +174,13 @@ pub fn run() -> anyhow::Result<()> {
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
             .expect("Failed to create wgpu device");
 
-    let surface_format = wgpu::TextureFormat::Bgra8UnormSrgb;
+    let caps = wgpu_surface.get_capabilities(&adapter);
+    let surface_format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
+        .unwrap_or(caps.formats[0]);
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,

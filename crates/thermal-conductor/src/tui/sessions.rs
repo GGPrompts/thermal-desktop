@@ -20,6 +20,8 @@ use thermal_core::{
     ClaudeSessionState, ClaudeStatePoller, ClaudeStatus,
 };
 
+use crate::agent_timeline::{AgentTimeline, ToolCategory};
+
 use super::TuiPage;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +43,17 @@ const TEXT_BRIGHT: Color = pal(ThermalPalette::TEXT_BRIGHT);
 const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
 const COLD: Color = pal(ThermalPalette::COLD);
 const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
+
+/// Map a ToolCategory to a ratatui Color using thermal palette colors.
+fn tool_category_color(cat: ToolCategory) -> Color {
+    match cat {
+        ToolCategory::Read => pal(ThermalPalette::COLD),
+        ToolCategory::Write => pal(ThermalPalette::HOT),
+        ToolCategory::Execute => pal(ThermalPalette::HOTTER),
+        ToolCategory::Thinking => pal(ThermalPalette::MILD),
+        ToolCategory::Idle => pal(ThermalPalette::FREEZING),
+    }
+}
 
 fn status_color(status: &ClaudeStatus) -> Color {
     match status {
@@ -349,6 +362,8 @@ pub struct SessionsPage {
     /// working_dir → Hyprland workspace ID cache.
     workspace_map: HashMap<String, i64>,
     last_workspace_refresh: Instant,
+    /// Per-session tool activity timelines, keyed by session_id.
+    timelines: HashMap<String, AgentTimeline>,
 }
 
 impl SessionsPage {
@@ -363,6 +378,7 @@ impl SessionsPage {
             history_popup: None,
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now() - std::time::Duration::from_secs(10),
+            timelines: HashMap::new(),
         }
     }
 
@@ -380,6 +396,34 @@ impl SessionsPage {
                 s.context_percent = Some(cached);
             }
         }
+
+        // Feed per-session tool activity timelines.
+        let active_ids: std::collections::HashSet<String> =
+            self.sessions.iter().map(|s| s.session_id.clone()).collect();
+        for s in &self.sessions {
+            let tl = self
+                .timelines
+                .entry(s.session_id.clone())
+                .or_insert_with(AgentTimeline::new);
+            if s.status == ClaudeStatus::Idle {
+                tl.record_idle();
+            } else {
+                tl.record_tool_change(s.current_tool.as_deref());
+            }
+        }
+        // Record idle for sessions that have disappeared.
+        let stale_ids: Vec<String> = self
+            .timelines
+            .keys()
+            .filter(|id| !active_ids.contains(id.as_str()))
+            .cloned()
+            .collect();
+        for id in stale_ids {
+            if let Some(tl) = self.timelines.get_mut(&id) {
+                tl.record_idle();
+            }
+        }
+
         self.display_rows = build_display_order(&self.sessions);
         self.clamp_selection();
         self.update_history();
@@ -504,6 +548,69 @@ impl SessionsPage {
     pub fn has_history_popup(&self) -> bool {
         self.history_popup.is_some()
     }
+
+    /// Build a compact 1-line timeline bar from a session's AgentTimeline.
+    ///
+    /// Each character represents a time slice, colored by ToolCategory.
+    /// The bar shows the most recent `width` slices, newest on the right.
+    fn build_timeline_line(&self, session_id: &str, width: usize) -> Line<'static> {
+        let timeline = match self.timelines.get(session_id) {
+            Some(tl) if !tl.entries.is_empty() => tl,
+            _ => {
+                // No timeline data — return a dim placeholder.
+                return Line::from(Span::styled(
+                    "\u{2500}".repeat(width),
+                    Style::default().fg(pal(ThermalPalette::FREEZING)),
+                ));
+            }
+        };
+
+        let now = Instant::now();
+        let entries = &timeline.entries;
+
+        // Determine the time window: last N seconds, where N = width (1 char = 1 second).
+        let window_secs = width as f64;
+        let window_start = now - std::time::Duration::from_secs_f64(window_secs);
+
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(width);
+
+        for i in 0..width {
+            let slot_time = window_start + std::time::Duration::from_secs(i as u64);
+            let slot_end = slot_time + std::time::Duration::from_secs(1);
+
+            // Find which entry covers this time slot (latest entry that started before slot_end).
+            let mut matched_cat = None;
+            for entry in entries.iter().rev() {
+                let entry_end = entry.end_time.unwrap_or(now);
+                if entry.start_time < slot_end && entry_end > slot_time {
+                    matched_cat = Some(entry.category);
+                    break;
+                }
+            }
+
+            let (ch, color) = match matched_cat {
+                Some(cat) => {
+                    let c = tool_category_color(cat);
+                    let block = match cat {
+                        ToolCategory::Read => "\u{2584}",     // lower half block
+                        ToolCategory::Write => "\u{2588}",    // full block
+                        ToolCategory::Execute => "\u{2593}",  // dark shade
+                        ToolCategory::Thinking => "\u{2591}", // light shade
+                        ToolCategory::Idle => "\u{2500}",     // horizontal line
+                    };
+                    (block, c)
+                }
+                None => ("\u{2500}", pal(ThermalPalette::FREEZING)),
+            };
+
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(color),
+            ));
+        }
+
+        Line::from(spans)
+    }
 }
 
 impl TuiPage for SessionsPage {
@@ -543,6 +650,7 @@ impl TuiPage for SessionsPage {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(5),   // table
+                Constraint::Length(1), // timeline bar for selected session
                 Constraint::Length(1), // footer
             ])
             .split(area);
@@ -688,6 +796,38 @@ impl TuiPage for SessionsPage {
 
         f.render_stateful_widget(table, chunks[0], &mut self.table_state);
 
+        // -- Timeline bar for selected session --
+        {
+            let tl_area = chunks[1];
+            let bar_width = tl_area.width.saturating_sub(2) as usize; // leave 1 char padding each side
+            let timeline_line = if let Some(idx) = self.table_state.selected() {
+                if let Some(row) = self.display_rows.get(idx) {
+                    let sid = &row.session.session_id;
+                    let label_span = Span::styled(
+                        " \u{2502} ",
+                        Style::default().fg(pal(ThermalPalette::COLD)),
+                    );
+                    let bar = self.build_timeline_line(sid, bar_width.saturating_sub(3));
+                    let mut spans = vec![label_span];
+                    spans.extend(bar.spans);
+                    Line::from(spans)
+                } else {
+                    Line::from(Span::styled(
+                        " no session selected",
+                        Style::default().fg(TEXT_MUTED),
+                    ))
+                }
+            } else {
+                Line::from(Span::styled(
+                    " no session selected",
+                    Style::default().fg(TEXT_MUTED),
+                ))
+            };
+            let tl_widget = Paragraph::new(timeline_line)
+                .style(Style::default().bg(BG));
+            f.render_widget(tl_widget, tl_area);
+        }
+
         // -- Footer --
         let footer = Paragraph::new(Line::from(vec![
             Span::styled(
@@ -720,7 +860,7 @@ impl TuiPage for SessionsPage {
             Span::styled(": refresh", Style::default().fg(TEXT_MUTED)),
         ]))
         .style(Style::default().bg(BG));
-        f.render_widget(footer, chunks[1]);
+        f.render_widget(footer, chunks[2]);
 
         // -- History popup overlay --
         if let Some(ref sid) = self.history_popup {
@@ -1333,6 +1473,7 @@ mod tests {
             history_popup: None,
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now(),
+            timelines: HashMap::new(),
         }
     }
 

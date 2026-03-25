@@ -696,7 +696,6 @@ impl ImageRenderPipeline {
     }
 
     /// Remove cached textures for images that no longer exist in the store.
-    #[allow(dead_code)]
     pub fn cleanup_cache(&mut self, image_store: &ImageStore) {
         let active_ids: HashSet<u32> = image_store
             .visible_placements()
@@ -715,6 +714,9 @@ impl ImageRenderPipeline {
 /// for backgrounds and cursor.
 /// How many frames between atlas trim operations (~16s at 60fps).
 const ATLAS_TRIM_INTERVAL: u64 = 1000;
+
+/// How many frames between image cache cleanup passes (~16s at 60fps).
+const IMAGE_CLEANUP_INTERVAL: u64 = 1000;
 
 pub struct GridRenderer {
     // Glyphon state
@@ -1010,9 +1012,24 @@ impl GridRenderer {
     }
 
     /// Clean up GPU texture cache for images no longer in the store.
-    #[allow(dead_code)]
     pub fn cleanup_image_cache(&mut self, image_store: &ImageStore) {
         self.image_pipeline.cleanup_cache(image_store);
+    }
+
+    /// Periodically clean up image caches (GPU textures + scrolled-out placements).
+    ///
+    /// Uses `frame_count` with `IMAGE_CLEANUP_INTERVAL` following the same periodic
+    /// pattern as the atlas trim in `render_from_cache`. Call once per frame after
+    /// rendering; the interval check ensures actual work only runs every ~1000 frames.
+    pub fn periodic_image_cleanup(
+        &mut self,
+        image_store: &mut ImageStore,
+        max_visible_row: usize,
+    ) {
+        if self.frame_count % IMAGE_CLEANUP_INTERVAL == 0 {
+            self.cleanup_image_cache(image_store);
+            image_store.cleanup_scrolled(max_visible_row);
+        }
     }
 
     /// Render a scroll indicator overlay when the viewport is scrolled back.

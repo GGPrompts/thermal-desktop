@@ -985,7 +985,7 @@ impl ConductorWindow {
                     // ── Kitty graphics inline images ─────────────────────────
                     {
                         let store = self.terminal.image_store();
-                        let store_guard = store.lock();
+                        let mut store_guard = store.lock();
                         self.grid_renderer.render_images(
                             &store_guard,
                             &self.wgpu.device,
@@ -995,6 +995,8 @@ impl ConductorWindow {
                             self.width,
                             self.height,
                         );
+                        self.grid_renderer
+                            .periodic_image_cleanup(&mut store_guard, screen_lines);
                     }
 
                     // ── Command block overlays ──────────────────────────────
@@ -1134,7 +1136,7 @@ impl ConductorWindow {
         // ── Kitty graphics inline images ──────────────────────────────────
         {
             let store = self.terminal.image_store();
-            let store_guard = store.lock();
+            let mut store_guard = store.lock();
             self.grid_renderer.render_images(
                 &store_guard,
                 &self.wgpu.device,
@@ -1144,6 +1146,8 @@ impl ConductorWindow {
                 self.width,
                 self.height,
             );
+            self.grid_renderer
+                .periodic_image_cleanup(&mut store_guard, screen_lines);
         }
 
         // ── Command block overlays ──────────────────────────────────────

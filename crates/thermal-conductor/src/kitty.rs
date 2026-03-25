@@ -1,103 +1,179 @@
-//! KittyController — interface to kitty terminal via remote control protocol.
+//! KittyController — async interface to kitty terminal via `kitty @` remote control.
 //!
-//! All communication goes through `kitty @` CLI commands over unix sockets.
-//! Supports multiple kitty instances by scanning all `/tmp/kitty-*` sockets.
+//! This is the core orchestration layer for managing thermal sessions inside kitty.
+//! Sessions are identified by a string ID and mapped to kitty windows via the
+//! `thermal-{id}` title convention. A JSON sidecar at
+//! `/run/user/$UID/thermal/sessions.json` tracks metadata that kitty itself does not
+//! persist (worktree paths, profile names, original cwd, spawn timestamps).
 //!
-//! DEPRECATED: This module is no longer used by the CLI commands.
-//! CLI subcommands now talk to the session daemon via `DaemonClient` (client.rs).
-//! This module is kept for reference and will be removed in a future cleanup.
+//! All methods are async and shell out to `kitty @` via `tokio::process::Command`.
+
+use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-/// Controller for interacting with kitty terminal instances via remote control.
-pub struct KittyController {
-    /// All discovered kitty unix sockets.
-    sockets: Vec<String>,
+// ── Title prefix ────────────────────────────────────────────────────────────
+
+const TITLE_PREFIX: &str = "thermal-";
+
+// ── Sidecar types ───────────────────────────────────────────────────────────
+
+/// Metadata for a single thermal session, persisted in the sidecar file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidecarEntry {
+    pub session_id: String,
+    pub worktree_path: Option<String>,
+    pub profile_name: Option<String>,
+    pub original_cwd: String,
+    /// Seconds since Unix epoch.
+    pub spawn_time: u64,
 }
 
-#[allow(dead_code)]
+/// The full sidecar file — a simple map of session_id -> metadata.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SidecarData {
+    pub sessions: Vec<SidecarEntry>,
+}
+
+// ── kitty @ ls JSON structures ──────────────────────────────────────────────
+
+/// Top-level entry from `kitty @ ls` — one per OS window.
+#[derive(Debug, Deserialize)]
+struct KittyOsWindow {
+    tabs: Vec<KittyTab>,
+}
+
+/// A tab within an OS window.
+#[derive(Debug, Deserialize)]
+struct KittyTab {
+    windows: Vec<KittyWindow>,
+}
+
+/// A single kitty window (pane).
+#[derive(Debug, Deserialize)]
+struct KittyWindow {
+    id: i64,
+    title: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    is_focused: bool,
+    #[serde(default)]
+    foreground_processes: Vec<KittyProcess>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KittyProcess {
+    #[serde(default)]
+    pid: i64,
+    #[serde(default)]
+    cmdline: Vec<String>,
+}
+
+// ── Public result type ──────────────────────────────────────────────────────
+
+/// Information about a thermal session window, combining kitty state with sidecar
+/// metadata. Field names parallel `protocol::SessionInfo` where applicable.
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    /// The thermal session ID (the part after `thermal-` in the title).
+    pub session_id: String,
+    /// Kitty's internal window ID.
+    pub kitty_window_id: i64,
+    /// Current working directory as reported by kitty.
+    pub cwd: String,
+    /// Window title (full, including `thermal-` prefix).
+    pub title: String,
+    /// Whether this window is currently focused.
+    pub is_focused: bool,
+    /// Foreground process command line, if available.
+    pub foreground_command: Option<String>,
+    /// From sidecar: git worktree path, if the session uses one.
+    pub worktree_path: Option<String>,
+    /// From sidecar: profile name used to spawn.
+    pub profile_name: Option<String>,
+    /// From sidecar: the directory the session was originally spawned in.
+    pub original_cwd: Option<String>,
+    /// From sidecar: seconds since epoch when spawned.
+    pub spawn_time: Option<u64>,
+}
+
+// ── KittyController ─────────────────────────────────────────────────────────
+
+/// Async controller for managing thermal sessions inside kitty via `kitty @`.
+pub struct KittyController {
+    /// Cached availability result (set once on first check).
+    available: OnceLock<bool>,
+}
+
 impl KittyController {
-    /// Create a new KittyController.
+    /// Create a new controller. Does not perform any I/O — availability is
+    /// checked lazily on first call to `is_available()`.
+    pub fn new() -> Self {
+        Self {
+            available: OnceLock::new(),
+        }
+    }
+
+    // ── Availability ────────────────────────────────────────────────────────
+
+    /// Check whether kitty remote control is reachable.
     ///
-    /// Discovers kitty sockets by checking `KITTY_LISTEN_ON` env var first,
-    /// then scanning `/tmp/kitty-*` for all unix sockets.
-    pub fn new() -> Result<Self> {
-        let sockets = Self::find_sockets()?;
-        tracing::debug!(count = sockets.len(), "kitty sockets found");
-        Ok(Self { sockets })
-    }
-
-    /// Find all kitty remote control sockets.
-    fn find_sockets() -> Result<Vec<String>> {
-        let mut sockets = Vec::new();
-
-        // 1. Check KITTY_LISTEN_ON env var
-        if let Ok(listen_on) = std::env::var("KITTY_LISTEN_ON") {
-            if !listen_on.is_empty() {
-                sockets.push(listen_on);
-            }
+    /// Runs `kitty @ ls` and caches the result. Subsequent calls return the
+    /// cached value without spawning a process.
+    pub async fn is_available(&self) -> bool {
+        if let Some(&cached) = self.available.get() {
+            return cached;
         }
 
-        // 2. Scan /tmp/kitty-* for unix sockets
-        let tmp = std::path::Path::new("/tmp");
-        if let Ok(entries) = std::fs::read_dir(tmp) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.starts_with("kitty-") {
-                        let socket_path = format!("unix:{}", path.display());
-                        if !sockets.contains(&socket_path) {
-                            sockets.push(socket_path);
-                        }
-                    }
-                }
-            }
-        }
+        let result = Command::new("kitty")
+            .args(["@", "ls"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
 
-        if sockets.is_empty() {
-            bail!("no kitty socket found — is kitty running with allow_remote_control enabled?");
-        }
-
-        Ok(sockets)
+        // OnceLock::set may race if called concurrently; that's fine — both
+        // callers will have computed the same value (or close enough).
+        let _ = self.available.set(result);
+        result
     }
 
-    /// Get the first socket (used for spawn, send, kill — targeted operations).
-    fn primary_socket(&self) -> &str {
-        &self.sockets[0]
-    }
+    // ── Spawn ───────────────────────────────────────────────────────────────
 
-    /// Build a `kitty @` command targeting a specific socket.
-    fn cmd_for(&self, socket: &str) -> Command {
-        let mut cmd = Command::new("kitty");
-        cmd.arg("@").arg("--to").arg(socket);
-        cmd
-    }
+    /// Spawn a new kitty window running `command` in directory `cwd`.
+    ///
+    /// The window title is set to `thermal-{id}` for later matching. Metadata
+    /// is written to the sessions sidecar.
+    ///
+    /// Optional `profile_name` and `worktree_path` are stored in the sidecar
+    /// for downstream consumers.
+    pub async fn spawn(
+        &self,
+        id: &str,
+        command: &str,
+        cwd: &str,
+        profile_name: Option<&str>,
+        worktree_path: Option<&str>,
+    ) -> Result<()> {
+        let title = format!("{TITLE_PREFIX}{id}");
 
-    /// Build the base `kitty @` command with the primary socket.
-    fn base_cmd(&self) -> Command {
-        self.cmd_for(self.primary_socket())
-    }
-
-    /// Spawn a new kitty OS window running the given command.
-    /// Returns the kitty window id.
-    pub async fn spawn(&self, title: &str, command: &[&str], cwd: Option<&str>) -> Result<u64> {
-        let mut cmd = self.base_cmd();
-        cmd.arg("launch")
-            .arg("--type=os-window")
-            .arg(format!("--title={title}"));
-
-        if let Some(dir) = cwd {
-            cmd.arg(format!("--cwd={dir}"));
-        }
-
-        // Add -- separator then the command args
-        cmd.arg("--");
-        for arg in command {
-            cmd.arg(arg);
-        }
-
-        let output = cmd
+        let output = Command::new("kitty")
+            .args([
+                "@",
+                "launch",
+                "--type=window",
+                &format!("--title={title}"),
+                &format!("--cwd={cwd}"),
+                "--",
+            ])
+            .arg(command)
             .output()
             .await
             .context("failed to run kitty @ launch")?;
@@ -107,46 +183,98 @@ impl KittyController {
             bail!("kitty @ launch failed: {stderr}");
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let window_id: u64 = stdout
-            .trim()
-            .parse()
-            .context("failed to parse window id from kitty @ launch output")?;
+        // Record in sidecar.
+        let entry = SidecarEntry {
+            session_id: id.to_string(),
+            worktree_path: worktree_path.map(String::from),
+            profile_name: profile_name.map(String::from),
+            original_cwd: cwd.to_string(),
+            spawn_time: now_epoch(),
+        };
+        sidecar_add(entry).await?;
 
-        Ok(window_id)
+        tracing::info!(id, cwd, "spawned kitty window");
+        Ok(())
     }
 
-    /// Get all text content from a kitty window.
-    pub async fn get_text(&self, match_arg: &str) -> Result<String> {
-        let mut cmd = self.base_cmd();
-        cmd.arg("get-text")
-            .arg("--match")
-            .arg(match_arg)
-            .arg("--extent")
-            .arg("all");
+    // ── List ────────────────────────────────────────────────────────────────
 
-        let output = cmd
+    /// List all kitty windows whose title starts with `thermal-`, merged with
+    /// sidecar metadata.
+    pub async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
+        let raw = run_kitty_ls().await?;
+        let os_windows: Vec<KittyOsWindow> =
+            serde_json::from_str(&raw).context("failed to parse kitty @ ls JSON")?;
+
+        let sidecar = sidecar_read().await;
+        let mut results = Vec::new();
+
+        for os_win in &os_windows {
+            for tab in &os_win.tabs {
+                for win in &tab.windows {
+                    if let Some(session_id) = win.title.strip_prefix(TITLE_PREFIX) {
+                        let side = sidecar
+                            .sessions
+                            .iter()
+                            .find(|e| e.session_id == session_id);
+
+                        let foreground_command = win
+                            .foreground_processes
+                            .first()
+                            .map(|p| p.cmdline.join(" "))
+                            .filter(|s| !s.is_empty());
+
+                        results.push(WindowInfo {
+                            session_id: session_id.to_string(),
+                            kitty_window_id: win.id,
+                            cwd: win.cwd.clone(),
+                            title: win.title.clone(),
+                            is_focused: win.is_focused,
+                            foreground_command,
+                            worktree_path: side.and_then(|s| s.worktree_path.clone()),
+                            profile_name: side.and_then(|s| s.profile_name.clone()),
+                            original_cwd: side.map(|s| s.original_cwd.clone()),
+                            spawn_time: side.map(|s| s.spawn_time),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    // ── Close ───────────────────────────────────────────────────────────────
+
+    /// Close the kitty window for session `id` and remove its sidecar entry.
+    pub async fn close_window(&self, id: &str) -> Result<()> {
+        let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
+
+        let output = Command::new("kitty")
+            .args(["@", "close-window", "--match", &match_arg])
             .output()
             .await
-            .context("failed to run kitty @ get-text")?;
+            .context("failed to run kitty @ close-window")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("kitty @ get-text failed: {stderr}");
+            bail!("kitty @ close-window failed: {stderr}");
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        sidecar_remove(id).await?;
+        tracing::info!(id, "closed kitty window");
+        Ok(())
     }
 
-    /// Send text input to a kitty window.
-    pub async fn send_text(&self, match_arg: &str, text: &str) -> Result<()> {
-        let mut cmd = self.base_cmd();
-        cmd.arg("send-text")
-            .arg("--match")
-            .arg(match_arg)
-            .arg(text);
+    // ── Send text ───────────────────────────────────────────────────────────
 
-        let output = cmd
+    /// Send text to the kitty window for session `id`.
+    pub async fn send_text(&self, id: &str, text: &str) -> Result<()> {
+        let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
+
+        let output = Command::new("kitty")
+            .args(["@", "send-text", "--match", &match_arg, "--"])
+            .arg(text)
             .output()
             .await
             .context("failed to run kitty @ send-text")?;
@@ -159,50 +287,212 @@ impl KittyController {
         Ok(())
     }
 
-    /// List all kitty windows across ALL sockets, merged into one JSON array.
-    pub async fn list_windows(&self) -> Result<serde_json::Value> {
-        let mut all_windows = Vec::new();
+    // ── Focus ───────────────────────────────────────────────────────────────
 
-        for socket in &self.sockets {
-            let mut cmd = self.cmd_for(socket);
-            cmd.arg("ls");
+    /// Focus the kitty window for session `id`.
+    pub async fn focus_window(&self, id: &str) -> Result<()> {
+        let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
-            let output = cmd.output().await;
-
-            match output {
-                Ok(out) if out.status.success() => {
-                    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        if let Some(arr) = json.as_array() {
-                            all_windows.extend(arr.clone());
-                        }
-                    }
-                }
-                _ => {
-                    tracing::debug!(socket = %socket, "failed to query kitty socket, skipping");
-                }
-            }
-        }
-
-        Ok(serde_json::Value::Array(all_windows))
-    }
-
-    /// Close a kitty window.
-    pub async fn close_window(&self, match_arg: &str) -> Result<()> {
-        let mut cmd = self.base_cmd();
-        cmd.arg("close-window")
-            .arg("--match")
-            .arg(match_arg);
-
-        let output = cmd
+        let output = Command::new("kitty")
+            .args(["@", "focus-window", "--match", &match_arg])
             .output()
             .await
-            .context("failed to run kitty @ close-window")?;
+            .context("failed to run kitty @ focus-window")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("kitty @ close-window failed: {stderr}");
+            bail!("kitty @ focus-window failed: {stderr}");
         }
 
         Ok(())
+    }
+}
+
+// ── Sidecar helpers ─────────────────────────────────────────────────────────
+
+/// Return the sidecar file path: `/run/user/<uid>/thermal/sessions.json`.
+fn sidecar_path() -> PathBuf {
+    let uid = nix::unistd::getuid().as_raw();
+    PathBuf::from(format!("/run/user/{uid}/thermal/sessions.json"))
+}
+
+/// Read the sidecar, returning default if missing or unparseable.
+async fn sidecar_read() -> SidecarData {
+    let path = sidecar_path();
+    match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+        Err(_) => SidecarData::default(),
+    }
+}
+
+/// Write the sidecar atomically (write temp + rename).
+async fn sidecar_write(data: &SidecarData) -> Result<()> {
+    let path = sidecar_path();
+
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.ok();
+    }
+
+    let json = serde_json::to_string_pretty(data)
+        .context("failed to serialize sidecar")?;
+
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, json.as_bytes())
+        .await
+        .context("failed to write sidecar temp file")?;
+    tokio::fs::rename(&tmp, &path)
+        .await
+        .context("failed to rename sidecar temp file")?;
+
+    Ok(())
+}
+
+/// Add an entry to the sidecar (read-modify-write).
+async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
+    let mut data = sidecar_read().await;
+    // Remove any existing entry with the same ID.
+    data.sessions.retain(|e| e.session_id != entry.session_id);
+    data.sessions.push(entry);
+    sidecar_write(&data).await
+}
+
+/// Remove an entry from the sidecar by session ID.
+async fn sidecar_remove(id: &str) -> Result<()> {
+    let mut data = sidecar_read().await;
+    let before = data.sessions.len();
+    data.sessions.retain(|e| e.session_id != id);
+    if data.sessions.len() != before {
+        sidecar_write(&data).await?;
+    }
+    Ok(())
+}
+
+// ── Kitty ls helper ─────────────────────────────────────────────────────────
+
+/// Run `kitty @ ls` and return the raw JSON string.
+async fn run_kitty_ls() -> Result<String> {
+    let output = Command::new("kitty")
+        .args(["@", "ls"])
+        .output()
+        .await
+        .context("failed to run kitty @ ls")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitty @ ls failed: {stderr}");
+    }
+
+    String::from_utf8(output.stdout).context("kitty @ ls output is not valid UTF-8")
+}
+
+// ── Utilities ───────────────────────────────────────────────────────────────
+
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidecar_round_trip() {
+        let data = SidecarData {
+            sessions: vec![
+                SidecarEntry {
+                    session_id: "abc".into(),
+                    worktree_path: Some("/tmp/wt-abc".into()),
+                    profile_name: Some("dev".into()),
+                    original_cwd: "/home/builder/projects/foo".into(),
+                    spawn_time: 1_700_000_000,
+                },
+                SidecarEntry {
+                    session_id: "def".into(),
+                    worktree_path: None,
+                    profile_name: None,
+                    original_cwd: "/tmp".into(),
+                    spawn_time: 1_700_000_001,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&data).expect("serialize");
+        let decoded: SidecarData = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.sessions.len(), 2);
+        assert_eq!(decoded.sessions[0].session_id, "abc");
+        assert_eq!(decoded.sessions[0].worktree_path.as_deref(), Some("/tmp/wt-abc"));
+        assert_eq!(decoded.sessions[1].profile_name, None);
+    }
+
+    #[test]
+    fn title_prefix_format() {
+        let id = "my-session";
+        let title = format!("{TITLE_PREFIX}{id}");
+        assert_eq!(title, "thermal-my-session");
+        assert_eq!(title.strip_prefix(TITLE_PREFIX), Some("my-session"));
+    }
+
+    #[test]
+    fn parse_kitty_ls_json() {
+        let json = r#"[
+            {
+                "tabs": [
+                    {
+                        "windows": [
+                            {
+                                "id": 1,
+                                "title": "thermal-agent-1",
+                                "cwd": "/home/builder/projects/foo",
+                                "is_focused": true,
+                                "foreground_processes": [
+                                    {"pid": 1234, "cmdline": ["claude", "--model", "opus"]}
+                                ]
+                            },
+                            {
+                                "id": 2,
+                                "title": "plain-shell",
+                                "cwd": "/tmp",
+                                "is_focused": false,
+                                "foreground_processes": []
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]"#;
+
+        let os_windows: Vec<KittyOsWindow> = serde_json::from_str(json).expect("parse");
+        assert_eq!(os_windows.len(), 1);
+        assert_eq!(os_windows[0].tabs.len(), 1);
+        assert_eq!(os_windows[0].tabs[0].windows.len(), 2);
+
+        // Only the first window has a thermal- prefix.
+        let win = &os_windows[0].tabs[0].windows[0];
+        assert_eq!(win.title.strip_prefix(TITLE_PREFIX), Some("agent-1"));
+        assert_eq!(win.id, 1);
+        assert!(win.is_focused);
+        assert_eq!(win.foreground_processes[0].cmdline.join(" "), "claude --model opus");
+
+        // Second window should not match.
+        let win2 = &os_windows[0].tabs[0].windows[1];
+        assert!(win2.title.strip_prefix(TITLE_PREFIX).is_none());
+    }
+
+    #[test]
+    fn now_epoch_is_reasonable() {
+        let epoch = now_epoch();
+        // Should be after 2024-01-01 (1_704_067_200).
+        assert!(epoch > 1_704_067_200);
+    }
+
+    #[test]
+    fn controller_new_does_not_panic() {
+        let _ctrl = KittyController::new();
     }
 }

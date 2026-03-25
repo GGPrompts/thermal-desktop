@@ -16,7 +16,15 @@ pub struct DesktopEntry {
 /// These always appear at the top of the launcher so thermal tools
 /// are always one keystroke away.
 fn thermal_entries() -> Vec<DesktopEntry> {
+    // Only include apps that open visible windows/overlays.
+    // Daemons (audio, voice, notify, etc.) are managed via thc Services tab.
     vec![
+        DesktopEntry {
+            name: "\u{2388} thc — TUI Hub".into(),
+            exec: "kitty --title thermal-conductor thc tui".into(),
+            icon: None,
+            categories: vec!["Thermal".into()],
+        },
         DesktopEntry {
             name: "\u{2388} thermal-monitor".into(),
             exec: "kitty --title thermal-monitor thermal-monitor".into(),
@@ -24,26 +32,14 @@ fn thermal_entries() -> Vec<DesktopEntry> {
             categories: vec!["Thermal".into()],
         },
         DesktopEntry {
-            name: "\u{25b8} thermal-conductor".into(),
+            name: "\u{25b8} thermal-conductor GPU".into(),
             exec: "thermal-conductor window".into(),
-            icon: None,
-            categories: vec!["Thermal".into()],
-        },
-        DesktopEntry {
-            name: "\u{2581} thermal-bar".into(),
-            exec: "pkill -x thermal-bar; sleep 0.3; thermal-bar".into(),
             icon: None,
             categories: vec!["Thermal".into()],
         },
         DesktopEntry {
             name: "\u{25a3} thermal-hud".into(),
             exec: "thermal-hud".into(),
-            icon: None,
-            categories: vec!["Thermal".into()],
-        },
-        DesktopEntry {
-            name: "\u{266b} thermal-audio".into(),
-            exec: "thermal-audio".into(),
             icon: None,
             categories: vec!["Thermal".into()],
         },
@@ -592,8 +588,8 @@ mod tests {
 
     #[test]
     fn thermal_entries_count_matches_known_components() {
-        // There are 6 hard-coded thermal components. Update this number if you add more.
-        assert_eq!(thermal_entries().len(), 6);
+        // Only visible apps (not daemons). Update this number if you add more.
+        assert_eq!(thermal_entries().len(), 5);
     }
 
     // -------------------------------------------------------------------------

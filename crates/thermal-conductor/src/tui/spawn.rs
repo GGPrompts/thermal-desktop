@@ -189,50 +189,87 @@ impl SpawnPage {
         };
 
         let cwd = self.effective_cwd();
-        let project = if cwd.is_empty() {
-            None
-        } else {
+        if !cwd.is_empty() {
             let path = std::path::Path::new(&cwd);
             if !path.is_dir() {
                 self.status_msg = Some((format!("Not a directory: {}", cwd), true));
                 return;
             }
-            Some(cwd.clone())
+        }
+
+        // Use command_input if provided, else fall back to $SHELL.
+        let command = if self.command_input.trim().is_empty() {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        } else {
+            self.command_input.trim().to_string()
         };
+
+        let effective_cwd = if cwd.is_empty() {
+            std::env::var("HOME").unwrap_or_else(|_| "/".into())
+        } else {
+            cwd.clone()
+        };
+
+        let profile_name = self.list_state.selected()
+            .and_then(|i| self.profiles.get(i))
+            .map(|p| p.name.clone());
+
+        let worktree = self.worktree_enabled;
+
+        // Capture display strings before moving values into the spawn closure.
+        let display_profile = profile_name.as_deref().unwrap_or("Custom").to_string();
+        let display_cwd = if effective_cwd.is_empty() { "(default)".to_string() } else { effective_cwd.clone() };
 
         self.spawning = true;
 
-        let project_clone = project.clone();
-        let worktree = self.worktree_enabled;
+        let profile_clone = profile_name.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             if let Ok(rt) = rt {
                 let _ = rt.block_on(async {
-                    match crate::client::DaemonClient::connect().await {
-                        Ok(Some(mut client)) => {
-                            for _ in 0..count {
-                                let _ = client.spawn_session(None, project_clone.clone(), worktree).await;
+                    let controller = crate::kitty::KittyController::new();
+                    if !controller.is_available().await {
+                        return;
+                    }
+                    for _ in 0..count {
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        let id = format!("session-{ts}");
+
+                        // Optionally create a git worktree.
+                        let (spawn_cwd, wt_path) = if worktree {
+                            match crate::cmd_create_worktree(&effective_cwd, &id) {
+                                Ok(wt) => (wt.clone(), Some(wt)),
+                                Err(_) => (effective_cwd.clone(), None),
                             }
-                        }
-                        _ => {}
+                        } else {
+                            (effective_cwd.clone(), None)
+                        };
+
+                        let _ = controller
+                            .spawn(
+                                &id,
+                                &command,
+                                &spawn_cwd,
+                                profile_clone.as_deref(),
+                                wt_path.as_deref(),
+                            )
+                            .await;
                     }
                 });
             }
         });
 
-        let profile_name = self.list_state.selected()
-            .and_then(|i| self.profiles.get(i))
-            .map(|p| p.name.as_str())
-            .unwrap_or("Custom");
-
         self.status_msg = Some((
             format!(
                 "Spawned {} x {} in {}",
                 count,
-                profile_name,
-                project.as_deref().unwrap_or("(default)"),
+                display_profile,
+                display_cwd,
             ),
             false,
         ));

@@ -19,11 +19,13 @@ mod terminal;
 pub(crate) mod tui;
 mod window;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::{Result, Context, bail};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
-use client::DaemonClient;
+use kitty::KittyController;
 
 /// Thermal Conductor — orchestrate Claude agent therminals via the session daemon.
 ///
@@ -38,19 +40,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Spawn new therminal sessions on the daemon
+    /// Spawn new therminal sessions in kitty
     Spawn {
         /// Number of therminals to spawn
         #[arg(short = 'n', long, default_value_t = 1)]
         count: u32,
 
-        /// Project directory to start Claude in
+        /// Project directory to start in
         #[arg(short, long)]
         project: Option<String>,
 
-        /// Shell to use (defaults to $SHELL)
+        /// Command to run (defaults to $SHELL)
         #[arg(short, long)]
-        shell: Option<String>,
+        command: Option<String>,
 
         /// Create a git worktree per session to avoid file-edit conflicts
         #[arg(short = 'w', long)]
@@ -145,7 +147,7 @@ fn main() -> Result<()> {
             .block_on(daemon::run_daemon());
     }
 
-    // All other subcommands talk to the session daemon via DaemonClient.
+    // All other subcommands use KittyController (or are self-contained).
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -154,9 +156,9 @@ fn main() -> Result<()> {
                 Commands::Spawn {
                     count,
                     project,
-                    shell,
+                    command,
                     worktree,
-                } => cmd_spawn(count, project, shell, worktree).await,
+                } => cmd_spawn(count, project, command, worktree).await,
                 Commands::Status => cmd_status().await,
                 Commands::Send { session_id, prompt } => cmd_send(session_id, prompt).await,
                 Commands::List { json } => cmd_list(json).await,
@@ -169,26 +171,62 @@ fn main() -> Result<()> {
         })
 }
 
-/// Connect to the session daemon, or print an error and exit if it's not running.
-async fn connect_daemon() -> Result<DaemonClient> {
-    match DaemonClient::connect().await? {
-        Some(client) => Ok(client),
-        None => {
-            eprintln!("Session daemon not running. Start with: thc daemon");
-            std::process::exit(1);
-        }
+/// Ensure KittyController is available, or exit with a clear error.
+async fn require_kitty(controller: &KittyController) {
+    if !controller.is_available().await {
+        eprintln!("Kitty remote control not available. Is kitty running with allow_remote_control enabled?");
+        std::process::exit(1);
     }
 }
 
-/// Spawn N therminal sessions on the daemon.
-async fn cmd_spawn(count: u32, project: Option<String>, shell: Option<String>, worktree: bool) -> Result<()> {
-    let mut client = connect_daemon().await?;
+/// Spawn N therminal sessions via kitty remote control.
+async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>, worktree: bool) -> Result<()> {
+    let controller = KittyController::new();
+    require_kitty(&controller).await;
+
+    let cmd = command.unwrap_or_else(|| {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    });
+
+    let cwd = project.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()))
+    });
 
     let wt_label = if worktree { " (with worktrees)" } else { "" };
     println!("Spawning {count} therminal{}{wt_label}...", if count == 1 { "" } else { "s" });
 
     for _i in 0..count {
-        let id = client.spawn_session(shell.clone(), project.clone(), worktree).await?;
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let id = format!("session-{ts}");
+
+        // Optionally create a git worktree for this session.
+        let (effective_cwd, wt_path) = if worktree {
+            match cmd_create_worktree(&cwd, &id) {
+                Ok(wt) => (wt.clone(), Some(wt)),
+                Err(e) => {
+                    eprintln!("  Warning: worktree creation failed ({e}), using original cwd");
+                    (cwd.clone(), None)
+                }
+            }
+        } else {
+            (cwd.clone(), None)
+        };
+
+        controller
+            .spawn(
+                &id,
+                &cmd,
+                &effective_cwd,
+                None,
+                wt_path.as_deref(),
+            )
+            .await?;
         println!("  Therminal spawned (session: {id})");
     }
 
@@ -197,6 +235,49 @@ async fn cmd_spawn(count: u32, project: Option<String>, shell: Option<String>, w
         if count == 1 { "" } else { "s" }
     );
     Ok(())
+}
+
+/// Create a git worktree for a session.
+///
+/// Mirrors the logic in `daemon::SessionDaemon::create_worktree()`: resolves the
+/// git repo root from `cwd`, then creates a detached worktree at
+/// `/tmp/thermal-worktrees/{repo_name}-{session_id}`.
+///
+/// Public so the TUI spawn page can also use it.
+pub fn cmd_create_worktree(cwd: &str, session_id: &str) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .context("Failed to run git rev-parse")?;
+
+    if !output.status.success() {
+        bail!("Not a git repository: {cwd}");
+    }
+
+    let repo_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let repo_name = std::path::Path::new(&repo_root)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".to_string());
+
+    let worktree_dir = format!("/tmp/thermal-worktrees/{repo_name}-{session_id}");
+
+    std::fs::create_dir_all("/tmp/thermal-worktrees")
+        .context("Failed to create /tmp/thermal-worktrees")?;
+
+    let wt_output = std::process::Command::new("git")
+        .args(["worktree", "add", &worktree_dir, "HEAD"])
+        .current_dir(&repo_root)
+        .output()
+        .context("Failed to run git worktree add")?;
+
+    if !wt_output.status.success() {
+        let stderr = String::from_utf8_lossy(&wt_output.stderr);
+        bail!("git worktree add failed: {stderr}");
+    }
+
+    Ok(worktree_dir)
 }
 
 /// Show status of all Claude sessions from state files.
@@ -239,69 +320,83 @@ async fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-/// Send text/prompt to a specific therminal session.
+/// Send text/prompt to a specific therminal session via kitty.
 async fn cmd_send(session_id: String, prompt: String) -> Result<()> {
-    let mut client = connect_daemon().await?;
+    let controller = KittyController::new();
+    require_kitty(&controller).await;
 
-    // Send the text as bytes, appending a newline to simulate pressing Enter.
-    let mut data = prompt.into_bytes();
-    data.push(b'\n');
-
-    client.send_input(&session_id, data).await?;
+    // Append newline to simulate pressing Enter (kitty send-text sends literal text).
+    let text = format!("{prompt}\n");
+    controller.send_text(&session_id, &text).await?;
     println!("Sent to session {session_id}.");
     Ok(())
 }
 
-/// List all sessions from the daemon.
+/// List all thermal sessions from kitty.
 async fn cmd_list(json: bool) -> Result<()> {
-    let mut client = connect_daemon().await?;
-    let sessions = client.list_sessions().await?;
+    let controller = KittyController::new();
+    require_kitty(&controller).await;
+
+    let windows = controller.list_windows().await?;
 
     if json {
-        let pretty = serde_json::to_string_pretty(&sessions)?;
+        // WindowInfo doesn't derive Serialize, so build JSON manually.
+        let json_array: Vec<serde_json::Value> = windows
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "session_id": w.session_id,
+                    "kitty_window_id": w.kitty_window_id,
+                    "cwd": w.cwd,
+                    "title": w.title,
+                    "is_focused": w.is_focused,
+                    "foreground_command": w.foreground_command,
+                    "worktree_path": w.worktree_path,
+                    "profile_name": w.profile_name,
+                    "original_cwd": w.original_cwd,
+                    "spawn_time": w.spawn_time,
+                })
+            })
+            .collect();
+        let pretty = serde_json::to_string_pretty(&json_array)?;
         println!("{pretty}");
         return Ok(());
     }
 
-    if sessions.is_empty() {
-        println!("No active sessions.");
+    if windows.is_empty() {
+        println!("No active thermal sessions.");
         return Ok(());
     }
 
-    // Compact table output
-    for session in &sessions {
-        let alive = if session.is_alive { "" } else { " (exited)" };
-        let clients = if session.connected_client_count > 0 {
-            format!("  clients: {}", session.connected_client_count)
-        } else {
-            String::new()
-        };
+    // Compact table output: session ID, foreground command, focused, cwd
+    for w in &windows {
+        let cmd = w.foreground_command.as_deref().unwrap_or("-");
+        let focused = if w.is_focused { " *" } else { "" };
+        let profile = w.profile_name.as_deref().map(|p| format!("  profile: {p}")).unwrap_or_default();
         println!(
-            "  [{}] {}  ({}x{})  pid: {}  cwd: {}{}{}",
-            session.id,
-            session.title,
-            session.cols,
-            session.rows,
-            session.shell_pid,
-            session.cwd,
-            alive,
-            clients,
+            "  [{}]  cmd: {}  cwd: {}{}{}",
+            w.session_id,
+            cmd,
+            w.cwd,
+            focused,
+            profile,
         );
     }
     println!(
         "\n{} session{}.",
-        sessions.len(),
-        if sessions.len() == 1 { "" } else { "s" }
+        windows.len(),
+        if windows.len() == 1 { "" } else { "s" }
     );
     Ok(())
 }
 
-/// Kill (close) a therminal session.
+/// Kill (close) a therminal session via kitty.
 async fn cmd_kill(session_id: String) -> Result<()> {
-    let mut client = connect_daemon().await?;
+    let controller = KittyController::new();
+    require_kitty(&controller).await;
 
-    client.kill_session(&session_id).await?;
-    println!("Session {session_id} killed.");
+    controller.close_window(&session_id).await?;
+    println!("Session {session_id} closed.");
     Ok(())
 }
 

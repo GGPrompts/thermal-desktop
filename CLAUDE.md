@@ -18,17 +18,22 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **Voice pipeline**: cpal + faster-whisper (STT) → Anthropic Haiku API (intent) → tool execution
 
 ### Current Architecture (thermal-conductor)
-thermal-conductor has three modes:
+thermal-conductor has two primary modes and one optional backend:
 
 1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 4 tabs — Sessions (Claude session monitor), Spawn (profile-based session launcher), Profiles (profile editor), Services (daemon management).
-2. **Session daemon** (`thc daemon`): Background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`.
-3. **GPU terminal** (`thermal-conductor window`): Standalone wgpu-rendered terminal with alacritty_terminal backend and agent overlay HUD (badge + timeline bar).
+2. **GPU terminal** (`thermal-conductor window`): Standalone wgpu-rendered terminal with alacritty_terminal backend and agent overlay HUD (badge + timeline bar).
+3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Not required when kitty is available.
+
+The TUI hub uses a pluggable backend layer to manage terminal sessions:
 
 ```
-thc tui (ratatui)           thermal-conductor window (wgpu)
-    ↕ Unix socket IPC            ↕ alacritty_terminal PTY
-thc daemon (PTY owner)       standalone PTY (no daemon)
+thc tui (ratatui)
+    ↕ Backend::Kitty (default)          ↕ Backend::Daemon (fallback)
+kitty @ remote control API          thc daemon (Unix socket)
+    ↕ kitty windows (PTYs)              ↕ alacritty_terminal PTYs
 ```
+
+Backend is selected via `--backend=auto|kitty|daemon` (default: `auto`). In `auto` mode, kitty is probed first (`kitty @ ls`); the daemon is used if kitty remote control is unavailable. Session metadata (worktree paths, profile names, spawn times) is persisted in a sidecar file at `/run/user/$UID/thermal/sessions.json`.
 
 ### Roadmap: GPU AI Terminal
 Evolving toward a fully integrated GPU terminal with native agent orchestration:
@@ -43,7 +48,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | Crate | Status | Description |
 |-------|--------|-------------|
 | **thermal-core** | Production | Shared palette, GPU context factory, ClaudeStatePoller, text rendering, PTY session mgmt |
-| **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Spawn/Profiles/Services) + PTY session daemon + GPU terminal window |
+| **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Spawn/Profiles/Services) + GPU terminal window. Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
 | **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + Claude sessions) |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
 | **thermal-launch** | Prototype | GPU fuzzy-search app launcher overlay |
@@ -91,7 +96,17 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 ## Known Issues
 - **thermal-lock on NVIDIA**: GPU context clash when kitty (OpenGL/Vulkan) and thermal-lock (wgpu) compete for GPU. Surface format fix applied (queries capabilities instead of hardcoding Bgra8UnormSrgb), but still disabled in Hyprland config pending further testing.
 - **thermal-launch**: Functional but fuzzy matching and reticle UI need refinement.
-- **thermal-conductor window + daemon**: Screen streaming from daemon to GPU window not yet implemented — GPU window runs in standalone mode only.
+- **thermal-conductor GPU window**: Runs in standalone mode only (no connection to kitty or daemon backends); agent overlay HUD is decorative until backend streaming is implemented.
+
+## kitty Configuration Requirements
+The default kitty backend requires kitty to be started with remote control enabled. Add to `kitty.conf`:
+
+```
+allow_remote_control yes
+listen_on unix:/tmp/kitty
+```
+
+Reference config lives in `thermal-os-dotfiles`. Without these settings, `thc` falls back to `--backend=daemon` automatically.
 
 ## Task Tracking
 Issue tracking via beads (prefix: `therm`). Legacy per-crate `tasks.jsonl` files for historical reference.

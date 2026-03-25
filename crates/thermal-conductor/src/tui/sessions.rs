@@ -602,9 +602,13 @@ impl TuiPage for SessionsPage {
                     .unwrap_or("-")
                     .to_string();
 
-                let ws_str = s.working_dir.as_deref()
-                    .and_then(|wd| self.workspace_map.get(wd))
+                let ws_str = s.workspace
                     .map(|ws| ws.to_string())
+                    .or_else(|| {
+                        s.working_dir.as_deref()
+                            .and_then(|wd| self.workspace_map.get(wd))
+                            .map(|ws| ws.to_string())
+                    })
                     .unwrap_or_else(|| "-".into());
 
                 let updated = s

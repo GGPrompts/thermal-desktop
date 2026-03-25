@@ -63,6 +63,7 @@ pub struct ClaudeSessionState {
     pub hook_type: Option<String>,
     pub tmux_pane: Option<String>,
     pub pid: Option<u32>,
+    pub workspace: Option<i64>,
 }
 
 impl Default for ClaudeSessionState {
@@ -82,6 +83,7 @@ impl Default for ClaudeSessionState {
             hook_type: None,
             tmux_pane: None,
             pid: None,
+            workspace: None,
         }
     }
 }

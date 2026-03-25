@@ -3,6 +3,9 @@
 //! Loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`).
 //! Users select a profile, optionally override fields, then spawn sessions.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -89,7 +92,7 @@ pub struct SpawnPage {
     worktree_enabled: bool,
     focus: Focus,
     status_msg: Option<(String, bool)>,
-    spawning: bool,
+    spawning: Arc<AtomicBool>,
     /// CWD that thc was launched from
     launch_cwd: String,
     /// Set to true by external code to trigger a profile reload on next tick.
@@ -133,7 +136,7 @@ impl SpawnPage {
             worktree_enabled: worktree,
             focus: Focus::ProfileList,
             status_msg: None,
-            spawning: false,
+            spawning: Arc::new(AtomicBool::new(false)),
             launch_cwd,
             needs_reload: false,
             backend_pref,
@@ -180,7 +183,7 @@ impl SpawnPage {
     }
 
     fn do_spawn(&mut self) {
-        if self.spawning {
+        if self.spawning.load(Ordering::SeqCst) {
             return;
         }
 
@@ -225,8 +228,9 @@ impl SpawnPage {
         let display_profile = profile_name.as_deref().unwrap_or("Custom").to_string();
         let display_cwd = if effective_cwd.is_empty() { "(default)".to_string() } else { effective_cwd.clone() };
 
-        self.spawning = true;
+        self.spawning.store(true, Ordering::SeqCst);
 
+        let spawning_flag = Arc::clone(&self.spawning);
         let profile_clone = profile_name.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -241,12 +245,12 @@ impl SpawnPage {
 
                     match backend {
                         crate::backend::Backend::Kitty(controller) => {
-                            for _ in 0..count {
+                            for i in 0..count {
                                 let ts = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_millis();
-                                let id = format!("session-{ts}");
+                                let id = format!("session-{ts}-{i}");
 
                                 // Optionally create a git worktree.
                                 let (spawn_cwd, wt_path) = if worktree {
@@ -283,11 +287,12 @@ impl SpawnPage {
                     }
                 });
             }
+            spawning_flag.store(false, Ordering::SeqCst);
         });
 
         self.status_msg = Some((
             format!(
-                "Spawned {} x {} in {} (backend: {})",
+                "Spawning {} x {} in {} (backend: {})",
                 count,
                 display_profile,
                 display_cwd,
@@ -295,7 +300,6 @@ impl SpawnPage {
             ),
             false,
         ));
-        self.spawning = false;
     }
 
     fn nav_up(&mut self) {
@@ -817,7 +821,7 @@ cwd = "~/code"
             worktree_enabled: false,
             focus: Focus::ProfileList,
             status_msg: None,
-            spawning: false,
+            spawning: Arc::new(AtomicBool::new(false)),
             launch_cwd: launch_cwd.to_string(),
             needs_reload: false,
             backend_pref: BackendPreference::Auto,

@@ -196,12 +196,12 @@ async fn cmd_spawn(count: u32, project: Option<String>, command: Option<String>,
     let wt_label = if worktree { " (with worktrees)" } else { "" };
     println!("Spawning {count} therminal{}{wt_label} via {}...", if count == 1 { "" } else { "s" }, backend.name());
 
-    for _i in 0..count {
+    for i in 0..count {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let id = format!("session-{ts}");
+        let id = format!("session-{ts}-{i}");
 
         match &mut backend {
             Backend::Kitty(controller) => {

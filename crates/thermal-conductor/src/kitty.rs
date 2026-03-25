@@ -8,6 +8,7 @@
 //!
 //! All methods are async and shell out to `kitty @` via `tokio::process::Command`.
 
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +20,18 @@ use tokio::process::Command;
 // ── Title prefix ────────────────────────────────────────────────────────────
 
 const TITLE_PREFIX: &str = "thermal-";
+
+/// Validate that a session ID contains only safe characters for kitty regex matching.
+/// Allows alphanumeric, hyphens, underscores, and dots.
+fn validate_session_id(id: &str) -> Result<()> {
+    if id.is_empty() {
+        bail!("session ID must not be empty");
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        bail!("session ID contains invalid characters (allowed: alphanumeric, hyphen, underscore, dot): {id}");
+    }
+    Ok(())
+}
 
 // ── Sidecar types ───────────────────────────────────────────────────────────
 
@@ -139,9 +152,11 @@ impl KittyController {
             .map(|s| s.success())
             .unwrap_or(false);
 
-        // OnceLock::set may race if called concurrently; that's fine — both
-        // callers will have computed the same value (or close enough).
-        let _ = self.available.set(result);
+        // Only cache positive results — if kitty is not available now it may
+        // become available later (user starts kitty, enables remote control).
+        if result {
+            let _ = self.available.set(true);
+        }
         result
     }
 
@@ -248,6 +263,7 @@ impl KittyController {
 
     /// Close the kitty window for session `id` and remove its sidecar entry.
     pub async fn close_window(&self, id: &str) -> Result<()> {
+        validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
         let output = Command::new("kitty")
@@ -270,6 +286,7 @@ impl KittyController {
 
     /// Send text to the kitty window for session `id`.
     pub async fn send_text(&self, id: &str, text: &str) -> Result<()> {
+        validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
         let output = Command::new("kitty")
@@ -291,6 +308,7 @@ impl KittyController {
 
     /// Focus the kitty window for session `id`.
     pub async fn focus_window(&self, id: &str) -> Result<()> {
+        validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
         let output = Command::new("kitty")
@@ -325,47 +343,67 @@ async fn sidecar_read() -> SidecarData {
     }
 }
 
-/// Write the sidecar atomically (write temp + rename).
-async fn sidecar_write(data: &SidecarData) -> Result<()> {
-    let path = sidecar_path();
+/// Acquire an exclusive flock on the sidecar lockfile, perform a read-modify-write,
+/// then release. This prevents concurrent thc invocations from clobbering each other.
+async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static) -> Result<()> {
+    // Run the locked operation in a blocking task to avoid holding the lock
+    // across an async suspension point.
+    tokio::task::spawn_blocking(move || {
+        let lock_path = sidecar_path().with_extension("json.lock");
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .context("failed to open sidecar lock file")?;
 
-    // Ensure parent directory exists.
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.ok();
-    }
+        // Acquire exclusive lock (blocking).
+        nix::fcntl::flock(lock_file.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
+            .context("flock on sidecar lock file failed")?;
 
-    let json = serde_json::to_string_pretty(data)
-        .context("failed to serialize sidecar")?;
+        // Read-modify-write under lock.
+        let path = sidecar_path();
+        let mut data: SidecarData = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
 
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, json.as_bytes())
-        .await
-        .context("failed to write sidecar temp file")?;
-    tokio::fs::rename(&tmp, &path)
-        .await
-        .context("failed to rename sidecar temp file")?;
+        f(&mut data);
 
-    Ok(())
+        let json = serde_json::to_string_pretty(&data)
+            .context("failed to serialize sidecar")?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json.as_bytes())
+            .context("failed to write sidecar temp file")?;
+        std::fs::rename(&tmp, &path)
+            .context("failed to rename sidecar temp file")?;
+
+        // Lock is released when lock_file is dropped.
+        Ok(())
+    })
+    .await
+    .context("sidecar update task panicked")?
 }
 
-/// Add an entry to the sidecar (read-modify-write).
+/// Add an entry to the sidecar (locked read-modify-write).
 async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
-    let mut data = sidecar_read().await;
-    // Remove any existing entry with the same ID.
-    data.sessions.retain(|e| e.session_id != entry.session_id);
-    data.sessions.push(entry);
-    sidecar_write(&data).await
+    sidecar_locked_update(move |data| {
+        data.sessions.retain(|e| e.session_id != entry.session_id);
+        data.sessions.push(entry);
+    })
+    .await
 }
 
-/// Remove an entry from the sidecar by session ID.
+/// Remove an entry from the sidecar by session ID (locked read-modify-write).
 async fn sidecar_remove(id: &str) -> Result<()> {
-    let mut data = sidecar_read().await;
-    let before = data.sessions.len();
-    data.sessions.retain(|e| e.session_id != id);
-    if data.sessions.len() != before {
-        sidecar_write(&data).await?;
-    }
-    Ok(())
+    let id = id.to_string();
+    sidecar_locked_update(move |data| {
+        data.sessions.retain(|e| e.session_id != id);
+    })
+    .await
 }
 
 // ── Kitty ls helper ─────────────────────────────────────────────────────────

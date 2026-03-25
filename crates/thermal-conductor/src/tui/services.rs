@@ -215,6 +215,8 @@ pub struct ServicesPage {
     status_msg: Option<(String, bool, Instant)>,
     /// Pending restart: index of service to start after it stops.
     pending_restart: Option<(usize, Instant)>,
+    /// Last time statuses were refreshed (throttle pgrep calls).
+    last_refresh: Instant,
 }
 
 impl ServicesPage {
@@ -225,6 +227,7 @@ impl ServicesPage {
             selected: 0,
             status_msg: None,
             pending_restart: None,
+            last_refresh: Instant::now(),
         }
     }
 
@@ -265,6 +268,8 @@ impl ServicesPage {
                 }
             }
         }
+        // Force immediate refresh on next tick.
+        self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
     }
 
     fn restart_selected(&mut self) {
@@ -309,7 +314,17 @@ impl TuiPage for ServicesPage {
     }
 
     fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
-        self.refresh_statuses();
+        // Throttle status refresh to every 2s — pgrep spawns subprocesses.
+        let now = Instant::now();
+        let refresh_interval = if self.pending_restart.is_some() {
+            std::time::Duration::from_millis(500) // faster during restart
+        } else {
+            std::time::Duration::from_secs(2)
+        };
+        if now.duration_since(self.last_refresh) >= refresh_interval {
+            self.refresh_statuses();
+            self.last_refresh = now;
+        }
 
         // Handle pending restart: once the service is stopped, start it.
         if let Some((idx, started)) = self.pending_restart {

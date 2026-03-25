@@ -436,6 +436,92 @@ fn transcribe(samples: &[i16], config: &Config) -> Result<String> {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Claude dispatch (shell out to `claude -p`)
+// ---------------------------------------------------------------------------
+
+/// Spawn `claude -p` with the transcript and optionally send the response
+/// to thermal-audio for TTS. Runs as a background task — does not block
+/// the socket response so the caller gets the transcript immediately.
+fn spawn_claude_dispatch(transcript: String) {
+    tokio::spawn(async move {
+        dispatch_to_claude(&transcript).await;
+    });
+}
+
+/// Run `claude -p "{transcript}"`, send response to TTS, update state.
+async fn dispatch_to_claude(transcript: &str) {
+    write_state(VoiceState::Processing, Some("dispatching"));
+
+    info!("dispatching transcript to claude -p");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio::process::Command::new("claude")
+            .arg("-p")
+            .arg(transcript)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if response.is_empty() {
+                info!("claude -p returned empty response");
+            } else {
+                info!("claude -p response: {} chars", response.len());
+                send_to_audio(&response).await;
+            }
+        }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!(
+                "claude -p failed (exit {}): {}",
+                output.status,
+                stderr.chars().take(200).collect::<String>()
+            );
+        }
+        Ok(Err(e)) => {
+            error!("failed to execute claude: {e}");
+        }
+        Err(_) => {
+            error!("claude -p timed out after 30s");
+        }
+    }
+
+    write_state(VoiceState::Muted, None);
+}
+
+/// Send text to thermal-audio for TTS playback via Unix socket.
+async fn send_to_audio(text: &str) {
+    let audio_sock = runtime_dir().join("audio.sock");
+
+    match tokio::net::UnixStream::connect(&audio_sock).await {
+        Ok(stream) => {
+            let msg = serde_json::json!({
+                "action": "speak",
+                "text": text,
+            });
+            let (_, mut writer) = stream.into_split();
+            let payload = serde_json::to_string(&msg).unwrap_or_default() + "\n";
+            if let Err(e) = writer.write_all(payload.as_bytes()).await {
+                warn!("failed to write to audio socket: {e}");
+            } else {
+                info!("sent TTS to thermal-audio: {} chars", text.len());
+            }
+        }
+        Err(e) => {
+            warn!(
+                "thermal-audio not available at {}: {e}",
+                audio_sock.display()
+            );
+        }
+    }
+}
+
 fn copy_to_clipboard(text: &str) {
     match std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
@@ -685,7 +771,7 @@ async fn handle_stop(
     }
 
     let samples = recorder.stop();
-    write_state(VoiceState::Processing, None);
+    write_state(VoiceState::Processing, Some("transcribing"));
 
     let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
     if samples.len() < min_samples {
@@ -708,8 +794,14 @@ async fn handle_stop(
     match transcript {
         Ok(Ok(text)) => {
             copy_to_clipboard(&text);
-            write_state(VoiceState::Muted, None);
             info!("transcript: {text}");
+
+            // Fire-and-forget: dispatch to claude -p in the background.
+            // The transcript is already on the clipboard and returned to
+            // the caller; the claude call updates state and sends TTS
+            // independently.
+            spawn_claude_dispatch(text.clone());
+
             SocketResponse::with_transcript(text)
         }
         Ok(Err(e)) => {

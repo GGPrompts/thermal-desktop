@@ -45,14 +45,24 @@ else
     STATE="muted"
 fi
 
+LABEL=""
+if [ -f "$STATE_FILE" ]; then
+    LABEL=$(jq -r '.label // ""' "$STATE_FILE" 2>/dev/null)
+fi
+
 case "$STATE" in
     listening)
         notify-send -a "thermal-voice" -t 2000 "Listening..." \
             "Press Super+\\ again to stop" 2>/dev/null
         ;;
     processing)
-        notify-send -a "thermal-voice" -t 2000 "Processing..." \
-            "Transcribing audio" 2>/dev/null
+        if [ "$LABEL" = "dispatching" ]; then
+            notify-send -a "thermal-voice" -t 3000 "Dispatching..." \
+                "Sending to Claude" 2>/dev/null
+        else
+            notify-send -a "thermal-voice" -t 2000 "Processing..." \
+                "Transcribing audio" 2>/dev/null
+        fi
         ;;
     muted)
         # toggle just finished a stop — output is the transcript or error

@@ -74,6 +74,70 @@ fn ctx_color(pct: f32) -> Color {
 }
 
 // ---------------------------------------------------------------------------
+// Hyprland workspace lookup
+// ---------------------------------------------------------------------------
+
+/// Query hyprctl for all client windows and return a PID → workspace map.
+fn query_hyprland_workspaces() -> HashMap<u32, i64> {
+    let output = match Command::new("hyprctl").args(["clients", "-j"]).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return HashMap::new(),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct HyprClient {
+        pid: u32,
+        workspace: HyprWorkspace,
+    }
+    #[derive(serde::Deserialize)]
+    struct HyprWorkspace {
+        id: i64,
+    }
+
+    let clients: Vec<HyprClient> = match serde_json::from_slice(&output) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    clients.into_iter().map(|c| (c.pid, c.workspace.id)).collect()
+}
+
+/// Walk up the process tree from `pid` until we find a PID in `window_pids`.
+/// Returns the workspace ID if found.
+fn find_workspace_for_pid(pid: u32, window_pids: &HashMap<u32, i64>) -> Option<i64> {
+    let mut current = pid;
+    // Walk up to 10 levels to avoid infinite loops.
+    for _ in 0..10 {
+        if let Some(&ws) = window_pids.get(&current) {
+            return Some(ws);
+        }
+        // Read parent PID from /proc.
+        let stat = match std::fs::read_to_string(format!("/proc/{current}/stat")) {
+            Ok(s) => s,
+            Err(_) => return None,
+        };
+        // Format: "pid (comm) state ppid ..."
+        // Find the closing ')' then split to get ppid.
+        let after_comm = match stat.rfind(')') {
+            Some(pos) => &stat[pos + 2..],
+            None => return None,
+        };
+        let ppid: u32 = match after_comm.split_whitespace().nth(1) {
+            Some(s) => match s.parse() {
+                Ok(p) => p,
+                Err(_) => return None,
+            },
+            None => return None,
+        };
+        if ppid <= 1 {
+            return None;
+        }
+        current = ppid;
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Activity formatting
 // ---------------------------------------------------------------------------
 
@@ -282,6 +346,9 @@ pub struct SessionsPage {
     cached_context_pct: HashMap<String, f32>,
     history: HashMap<String, VecDeque<HistoryEntry>>,
     history_popup: Option<String>,
+    /// PID → Hyprland workspace ID cache.
+    workspace_map: HashMap<u32, i64>,
+    last_workspace_refresh: Instant,
 }
 
 impl SessionsPage {
@@ -294,6 +361,8 @@ impl SessionsPage {
             cached_context_pct: HashMap::new(),
             history: HashMap::new(),
             history_popup: None,
+            workspace_map: HashMap::new(),
+            last_workspace_refresh: Instant::now() - std::time::Duration::from_secs(10),
         }
     }
 
@@ -444,6 +513,20 @@ impl TuiPage for SessionsPage {
 
     fn tick(&mut self, poller: &mut ClaudeStatePoller) {
         self.update_from_poller(poller);
+
+        // Refresh workspace map every 3s (runs hyprctl).
+        if self.last_workspace_refresh.elapsed() >= std::time::Duration::from_secs(3) {
+            let window_pids = query_hyprland_workspaces();
+            self.workspace_map.clear();
+            for s in &self.sessions {
+                if let Some(pid) = s.pid {
+                    if let Some(ws) = find_workspace_for_pid(pid, &window_pids) {
+                        self.workspace_map.insert(pid, ws);
+                    }
+                }
+            }
+            self.last_workspace_refresh = Instant::now();
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
@@ -479,7 +562,7 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells =
-            ["Session", "Status", "Activity", "Ctx%", "Directory", "Updated"]
+            ["Session", "Status", "Activity", "Ctx%", "Project", "WS", "Updated"]
                 .iter()
                 .map(|h| {
                     Cell::from(*h).style(
@@ -504,11 +587,16 @@ impl TuiPage for SessionsPage {
                     None => ("-".into(), TEXT_MUTED),
                 };
 
-                let dir = s.working_dir.as_deref().unwrap_or("-");
-                let short_dir = dir
-                    .strip_prefix("/home/builder/")
-                    .map(|p| format!("~/{}", p))
-                    .unwrap_or_else(|| dir.to_string());
+                let project = s.working_dir.as_deref()
+                    .and_then(|d| std::path::Path::new(d).file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("-")
+                    .to_string();
+
+                let ws_str = s.pid
+                    .and_then(|pid| self.workspace_map.get(&pid))
+                    .map(|ws| ws.to_string())
+                    .unwrap_or_else(|| "-".into());
 
                 let updated = s
                     .last_updated
@@ -534,7 +622,8 @@ impl TuiPage for SessionsPage {
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
-                        Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(project.clone()).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(ws_str).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
                     ])
                 } else {
@@ -550,7 +639,8 @@ impl TuiPage for SessionsPage {
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
-                        Cell::from(short_dir).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(project.clone()).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(ws_str).style(Style::default().fg(ACCENT_COLD)),
                         Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
                     ])
                 }
@@ -564,8 +654,9 @@ impl TuiPage for SessionsPage {
                 Constraint::Length(10),
                 Constraint::Length(28),
                 Constraint::Length(6),
-                Constraint::Percentage(30),
-                Constraint::Length(6),
+                Constraint::Min(16),
+                Constraint::Length(4),
+                Constraint::Length(8),
             ],
         )
         .header(header_row)
@@ -1227,6 +1318,8 @@ mod tests {
             cached_context_pct: HashMap::new(),
             history: HashMap::new(),
             history_popup: None,
+            workspace_map: HashMap::new(),
+            last_workspace_refresh: Instant::now(),
         }
     }
 

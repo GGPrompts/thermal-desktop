@@ -72,6 +72,20 @@ impl BarLayout {
         }
     }
 
+    /// Return the X pixel position where left-zone text ends.
+    /// Used to position sparklines after the text labels (not on top of them).
+    pub fn left_zone_end(&self) -> f32 {
+        let char_width: f32 = 10.0;
+        let padding: f32 = 16.0;
+        let margin: f32 = 8.0;
+        let mut x = margin;
+        for module in &self.left {
+            let w = module.text.chars().count() as f32 * char_width + padding;
+            x += w;
+        }
+        x
+    }
+
     /// Compute pixel X positions for all modules and return a flat list.
     ///
     /// - Left zone: starts at x=8, modules separated by 16px padding.
@@ -102,7 +116,7 @@ impl BarLayout {
             result.push(m);
         }
 
-        // Separator between left and center (stored as a 1px-wide module).
+        // Track where left-zone text ends (used for sparkline positioning).
         let left_end = x;
 
         // --- Right zone (compute right-to-left) ---

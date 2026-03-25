@@ -353,8 +353,9 @@ pub async fn run() -> anyhow::Result<()> {
             last_metrics = Instant::now();
         }
 
-        // Build sparkline rects.
-        let spark_rects = sparklines.render_all(8.0, 6.0);
+        // Build sparkline rects — positioned after the left-zone text labels.
+        let spark_start_x = layout.left_zone_end() + 8.0;
+        let spark_rects = sparklines.render_all(spark_start_x, 6.0);
 
         // Request the next frame callback before rendering.  This must be done
         // prior to wgpu's present() (which internally commits the wl_surface)

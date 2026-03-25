@@ -38,13 +38,13 @@ Backend detection order for `--backend=auto`:
 - `src/protocol.rs` — Wire protocol types (Request/Response, MessagePack framing)
 
 ## kitty Requirements
-kitty must be started with remote control enabled:
+kitty must be started with remote control enabled via Unix socket:
 ```
-allow_remote_control yes
-listen_on unix:/tmp/kitty
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty-thc
 ```
-See `thermal-os-dotfiles` for the reference `kitty.conf`.
+Full thermal-themed kitty.conf lives in `thermal-os-dotfiles/config/kitty/kitty.conf`.
 
 ## Dependencies
 - `thermal-core` for `ClaudeStatePoller` (Sessions tab) and shared palette
-- kitty with `allow_remote_control yes` (or `thc daemon` as fallback)
+- kitty with `allow_remote_control socket-only` (or `thc daemon` as fallback)

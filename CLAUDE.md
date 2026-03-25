@@ -115,14 +115,15 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 - **thermal-conductor GPU window**: Runs in standalone mode only (no connection to kitty or daemon backends); agent overlay HUD is decorative until backend streaming is implemented.
 
 ## kitty Configuration Requirements
-The default kitty backend requires kitty to be started with remote control enabled. Add to `kitty.conf`:
+The default kitty backend requires kitty to be started with remote control enabled via a Unix socket. The full thermal-themed `kitty.conf` lives in `thermal-os-dotfiles/config/kitty/kitty.conf` and includes the thermal color scheme (mapped from `palette.rs`), tab bar styling, and remote control setup.
 
+Critical settings for thc integration:
 ```
-allow_remote_control yes
-listen_on unix:/tmp/kitty
+allow_remote_control socket-only
+listen_on unix:/tmp/kitty-thc
 ```
 
-Reference config lives in `thermal-os-dotfiles`. Without these settings, `thc` falls back to `--backend=daemon` automatically.
+To apply: symlink or copy to `~/.config/kitty/kitty.conf`. Without these settings, `thc` falls back to `--backend=daemon` automatically.
 
 ## Task Tracking
 Issue tracking via beads (prefix: `therm`). Legacy per-crate `tasks.jsonl` files for historical reference.

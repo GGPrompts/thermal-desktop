@@ -62,6 +62,7 @@ use std::sync::{
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
 
+use crate::agent_graph::{AgentGraph, GRAPH_OVERLAY_HEIGHT};
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
@@ -446,6 +447,7 @@ pub fn run() -> anyhow::Result<()> {
         context_warning_active: false,
         context_critical_active: false,
         agent_timeline: AgentTimeline::new(),
+        agent_graph: AgentGraph::new(),
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -531,10 +533,13 @@ pub fn run() -> anyhow::Result<()> {
 
         // ── Poll Claude state ──────────────────────────────────────────
         // Non-blocking: drains file-watch events and re-reads changed files.
-        if let Some(ref mut poller) = state.claude_poller {
+        let all_sessions = if let Some(ref mut poller) = state.claude_poller {
             let sessions = poller.poll();
             state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
-        }
+            sessions
+        } else {
+            Vec::new()
+        };
 
         // ── Track tool changes for the agent timeline ────────────────────
         if let Some(ref session) = state.claude_session {
@@ -543,6 +548,16 @@ pub fn run() -> anyhow::Result<()> {
                 .record_tool_change(session.current_tool.as_deref());
         } else if state.agent_timeline.visible {
             state.agent_timeline.record_idle();
+        }
+
+        // ── Update agent communication graph ─────────────────────────────
+        if state.agent_graph.visible {
+            state.agent_graph.set_layout_size(
+                state.width as f32,
+                GRAPH_OVERLAY_HEIGHT as f32,
+            );
+            state.agent_graph.update_from_sessions(&all_sessions);
+            state.agent_graph.tick_layout();
         }
 
         // ── Update context saturation warnings ──────────────────────────
@@ -566,6 +581,11 @@ pub fn run() -> anyhow::Result<()> {
 
         // Keep redrawing when the timeline is visible (pulse animation).
         if state.agent_timeline.visible && !state.agent_timeline.entries.is_empty() {
+            state.dirty = true;
+        }
+
+        // Keep redrawing when the agent graph is visible (layout animation + arc fading).
+        if state.agent_graph.visible && !state.agent_graph.nodes.is_empty() {
             state.dirty = true;
         }
 
@@ -815,6 +835,8 @@ struct ConductorWindow {
     context_critical_active: bool,
     /// Agent tool-usage timeline bar (toggled with Ctrl+Shift+T).
     agent_timeline: AgentTimeline,
+    /// Agent communication graph overlay (toggled with F3).
+    agent_graph: AgentGraph,
 }
 
 impl ConductorWindow {
@@ -1069,6 +1091,17 @@ impl ConductorWindow {
                         self.height,
                     );
 
+                    // ── Agent graph overlay ────────────────────────────────
+                    self.grid_renderer.render_agent_graph(
+                        &self.agent_graph,
+                        &self.wgpu.device,
+                        &self.wgpu.queue,
+                        &mut encoder,
+                        &view,
+                        self.width,
+                        self.height,
+                    );
+
                     self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                     output.present();
                     return;
@@ -1212,6 +1245,17 @@ impl ConductorWindow {
         // ── Agent timeline overlay ──────────────────────────────────────
         self.grid_renderer.render_agent_timeline(
             &self.agent_timeline,
+            &self.wgpu.device,
+            &self.wgpu.queue,
+            &mut encoder,
+            &view,
+            self.width,
+            self.height,
+        );
+
+        // ── Agent graph overlay ─────────────────────────────────────────
+        self.grid_renderer.render_agent_graph(
+            &self.agent_graph,
             &self.wgpu.device,
             &self.wgpu.queue,
             &mut encoder,
@@ -1837,12 +1881,14 @@ impl WindowHandler for ConductorWindow {
                 .resize(&self.wgpu.device, &self.wgpu.queue, w, h);
 
             // Recalculate terminal grid dimensions and resize.
-            // Account for the timeline bar when it is visible.
-            let effective_h = if self.agent_timeline.visible {
-                h.saturating_sub(TIMELINE_BAR_HEIGHT)
-            } else {
-                h
-            };
+            // Account for the timeline bar and graph overlay when visible.
+            let mut effective_h = h;
+            if self.agent_timeline.visible {
+                effective_h = effective_h.saturating_sub(TIMELINE_BAR_HEIGHT);
+            }
+            if self.agent_graph.visible {
+                effective_h = effective_h.saturating_sub(GRAPH_OVERLAY_HEIGHT);
+            }
             let (cols, rows) = self.grid_renderer.grid_size(w, effective_h);
             self.terminal.resize(
                 cols,
@@ -1994,11 +2040,40 @@ impl KeyboardHandler for ConductorWindow {
             && matches!(event.keysym, Keysym::T | Keysym::t)
         {
             self.agent_timeline.toggle();
-            // Recalculate terminal grid to account for the timeline bar.
-            let effective_h = if self.agent_timeline.visible {
-                self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
+            // Recalculate terminal grid to account for the timeline bar and graph.
+            let mut effective_h = self.height;
+            if self.agent_timeline.visible {
+                effective_h = effective_h.saturating_sub(TIMELINE_BAR_HEIGHT);
+            }
+            if self.agent_graph.visible {
+                effective_h = effective_h.saturating_sub(GRAPH_OVERLAY_HEIGHT);
+            }
+            let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
+            self.terminal.resize(
+                cols,
+                rows,
+                self.grid_renderer.cell_width as u16,
+                self.grid_renderer.cell_height as u16,
+            );
+            self.resize_session(cols as u16, rows as u16);
+            self.dirty = true;
+            return;
+        }
+
+        // ── Agent graph toggle: F3 ───────────────────────────────────────
+        if matches!(event.keysym, Keysym::F3) {
+            self.agent_graph.toggle();
+            // Recalculate terminal grid to account for the graph overlay.
+            let effective_h = if self.agent_graph.visible {
+                self.height.saturating_sub(GRAPH_OVERLAY_HEIGHT)
             } else {
                 self.height
+            };
+            // Also account for timeline if it's visible.
+            let effective_h = if self.agent_timeline.visible {
+                effective_h.saturating_sub(TIMELINE_BAR_HEIGHT)
+            } else {
+                effective_h
             };
             let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
             self.terminal.resize(

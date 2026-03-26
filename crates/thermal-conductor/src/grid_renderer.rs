@@ -25,6 +25,7 @@ use wgpu::util::DeviceExt;
 
 use tracing::debug;
 
+use crate::agent_graph::{AgentGraph, GRAPH_OVERLAY_HEIGHT};
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT, ToolCategory};
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
@@ -2458,6 +2459,468 @@ impl GridRenderer {
         }
     }
 
+    /// Render the agent communication graph overlay.
+    ///
+    /// Draws nodes as filled circles (approximated with rect segments) colored by
+    /// agent status, context-percent circular gauges around each node, animated
+    /// message arcs between agents, and text labels via glyphon.
+    pub fn render_agent_graph(
+        &mut self,
+        graph: &AgentGraph,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        if !graph.visible || graph.nodes.is_empty() {
+            return;
+        }
+
+        let sw = surface_width as f32;
+        let sh = surface_height as f32;
+        let graph_h = GRAPH_OVERLAY_HEIGHT as f32;
+        let graph_y = sh - graph_h;
+
+        // ── Dark background rect ────────────────────────────────────────────
+        let bg = PaletteColor::BG.to_f32_array();
+        let bg_color = [bg[0], bg[1], bg[2], 0.90];
+        let bg_verts = pixel_rect_to_ndc(0.0, graph_y, sw, graph_h, sw, sh, bg_color);
+        let bg_data = bytemuck::cast_slice::<ColorVertex, u8>(&bg_verts);
+        let bg_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("graph_bg"),
+            contents: bg_data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("graph_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, bg_vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── Top separator line ──────────────────────────────────────────────
+        let sep_color = PaletteColor::TEXT_MUTED.to_f32_array();
+        let sep_color_dim = [sep_color[0], sep_color[1], sep_color[2], 0.5];
+        let sep_verts = pixel_rect_to_ndc(0.0, graph_y, sw, 1.0, sw, sh, sep_color_dim);
+        let sep_data = bytemuck::cast_slice::<ColorVertex, u8>(&sep_verts);
+        let sep_vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("graph_sep"),
+            contents: sep_data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("graph_sep_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_vertex_buffer(0, sep_vbuf.slice(..));
+            pass.draw(0..6, 0..1);
+        }
+
+        // ── "AGENT GRAPH" title label ───────────────────────────────────────
+        let title_color = PaletteColor::TEXT_MUTED.to_f32_array();
+        let title_color_dim = [title_color[0], title_color[1], title_color[2], 0.6];
+
+        // ── Collect all rect vertices for nodes, arcs, gauges ───────────────
+        let mut all_verts: Vec<ColorVertex> = Vec::new();
+        let mut label_entries: Vec<(f32, f32, String, PaletteColor)> = Vec::new();
+
+        let nodes = graph.node_list();
+
+        // ── Render message arcs (lines between nodes) ───────────────────────
+        for arc in &graph.arcs {
+            if arc.alpha < 0.01 {
+                continue;
+            }
+
+            let from_pos = graph.nodes.get(&arc.from_session).map(|n| n.pos);
+            let to_pos = graph.nodes.get(&arc.to_session).map(|n| n.pos);
+
+            if let (Some(from), Some(to)) = (from_pos, to_pos) {
+                // Draw line as a thin rotated rect (2px wide).
+                let arc_verts = line_to_rect_verts(
+                    from[0],
+                    graph_y + from[1],
+                    to[0],
+                    graph_y + to[1],
+                    2.0,
+                    sw,
+                    sh,
+                    {
+                        let c = PaletteColor::ACCENT_WARM.to_f32_array();
+                        [c[0], c[1], c[2], arc.alpha * 0.7]
+                    },
+                );
+                all_verts.extend_from_slice(&arc_verts);
+            }
+        }
+
+        // ── Render parent-child edges (persistent connection lines) ─────────
+        for node in &nodes {
+            if let Some(ref parent_id) = node.parent_session_id {
+                if let Some(parent) = graph.nodes.get(parent_id) {
+                    let edge_verts = line_to_rect_verts(
+                        parent.pos[0],
+                        graph_y + parent.pos[1],
+                        node.pos[0],
+                        graph_y + node.pos[1],
+                        1.0,
+                        sw,
+                        sh,
+                        {
+                            let c = PaletteColor::TEXT_MUTED.to_f32_array();
+                            [c[0], c[1], c[2], 0.3]
+                        },
+                    );
+                    all_verts.extend_from_slice(&edge_verts);
+                }
+            }
+        }
+
+        // ── Render nodes ────────────────────────────────────────────────────
+        let node_radius: f32 = 20.0;
+        let pulse_t = (self.frame_count as f32 * 0.05).sin() * 0.5 + 0.5;
+
+        for node in &nodes {
+            let cx = node.pos[0];
+            let cy = graph_y + node.pos[1];
+
+            // Node color based on status.
+            let node_color = match node.status {
+                ClaudeStatus::Processing => {
+                    let c = PaletteColor::HOT.to_f32_array();
+                    let alpha = 0.7 + 0.3 * pulse_t;
+                    [c[0], c[1], c[2], alpha]
+                }
+                ClaudeStatus::ToolUse => {
+                    let c = PaletteColor::WARM.to_f32_array();
+                    [c[0], c[1], c[2], 0.85]
+                }
+                ClaudeStatus::Idle => {
+                    let c = PaletteColor::COOL.to_f32_array();
+                    [c[0], c[1], c[2], 0.6]
+                }
+                ClaudeStatus::AwaitingInput => {
+                    let c = PaletteColor::ACCENT_COLD.to_f32_array();
+                    let alpha = 0.5 + 0.3 * pulse_t;
+                    [c[0], c[1], c[2], alpha]
+                }
+            };
+
+            // Approximate circle with 8 rectangular segments (octagonal fill).
+            let segments = 8;
+            for i in 0..segments {
+                let angle0 = (i as f32) * std::f32::consts::TAU / segments as f32;
+                let angle1 = ((i + 1) as f32) * std::f32::consts::TAU / segments as f32;
+
+                let x0 = cx + node_radius * angle0.cos();
+                let y0 = cy + node_radius * angle0.sin();
+                let x1 = cx + node_radius * angle1.cos();
+                let y1 = cy + node_radius * angle1.sin();
+
+                // Triangle from center to edge segment.
+                let ndc_cx = (cx / sw) * 2.0 - 1.0;
+                let ndc_cy = 1.0 - (cy / sh) * 2.0;
+                let ndc_x0 = (x0 / sw) * 2.0 - 1.0;
+                let ndc_y0 = 1.0 - (y0 / sh) * 2.0;
+                let ndc_x1 = (x1 / sw) * 2.0 - 1.0;
+                let ndc_y1 = 1.0 - (y1 / sh) * 2.0;
+
+                // Two triangles to fill the segment (we need 6 verts for the
+                // rect pipeline, but for a triangle fan from center we use 3).
+                // Since the rect pipeline expects full quads (6 verts = 2 triangles),
+                // we emit two degenerate triangles forming a pie slice.
+                all_verts.push(ColorVertex { position: [ndc_cx, ndc_cy], color: node_color });
+                all_verts.push(ColorVertex { position: [ndc_x0, ndc_y0], color: node_color });
+                all_verts.push(ColorVertex { position: [ndc_x1, ndc_y1], color: node_color });
+            }
+
+            // ── Context percent gauge ring ──────────────────────────────────
+            let ctx_pct = node.context_percent / 100.0;
+            if ctx_pct > 0.01 {
+                let gauge_radius = node_radius + 4.0;
+                let gauge_thickness = 3.0;
+                let gauge_segments = ((segments as f32 * ctx_pct).ceil() as usize).max(1);
+                let heat = ctx_pct.clamp(0.0, 1.0);
+                let gauge_color_base = thermal_gradient(heat).to_f32_array();
+                let gauge_color = [gauge_color_base[0], gauge_color_base[1], gauge_color_base[2], 0.9];
+
+                for i in 0..gauge_segments {
+                    let total_angle = std::f32::consts::TAU * ctx_pct;
+                    let a0 = -std::f32::consts::FRAC_PI_2
+                        + (i as f32 / gauge_segments as f32) * total_angle;
+                    let a1 = -std::f32::consts::FRAC_PI_2
+                        + ((i + 1) as f32 / gauge_segments as f32) * total_angle;
+
+                    let outer_x0 = cx + gauge_radius * a0.cos();
+                    let outer_y0 = cy + gauge_radius * a0.sin();
+                    let outer_x1 = cx + gauge_radius * a1.cos();
+                    let outer_y1 = cy + gauge_radius * a1.sin();
+
+                    let inner_r = gauge_radius - gauge_thickness;
+                    let inner_x0 = cx + inner_r * a0.cos();
+                    let inner_y0 = cy + inner_r * a0.sin();
+                    let inner_x1 = cx + inner_r * a1.cos();
+                    let inner_y1 = cy + inner_r * a1.sin();
+
+                    // Two triangles for the arc segment strip.
+                    let verts = [
+                        ColorVertex {
+                            position: [(inner_x0 / sw) * 2.0 - 1.0, 1.0 - (inner_y0 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                        ColorVertex {
+                            position: [(outer_x0 / sw) * 2.0 - 1.0, 1.0 - (outer_y0 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                        ColorVertex {
+                            position: [(outer_x1 / sw) * 2.0 - 1.0, 1.0 - (outer_y1 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                        ColorVertex {
+                            position: [(inner_x0 / sw) * 2.0 - 1.0, 1.0 - (inner_y0 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                        ColorVertex {
+                            position: [(outer_x1 / sw) * 2.0 - 1.0, 1.0 - (outer_y1 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                        ColorVertex {
+                            position: [(inner_x1 / sw) * 2.0 - 1.0, 1.0 - (inner_y1 / sh) * 2.0],
+                            color: gauge_color,
+                        },
+                    ];
+                    all_verts.extend_from_slice(&verts);
+                }
+            }
+
+            // ── Token budget bar inside node ────────────────────────────────
+            let bar_w = node_radius * 1.2;
+            let bar_h = 4.0;
+            let bar_x = cx - bar_w / 2.0;
+            let bar_y_pos = cy + 2.0; // slightly below center
+
+            // Background bar.
+            let bar_bg = [bg[0], bg[1], bg[2], 0.5];
+            let bar_bg_verts = pixel_rect_to_ndc(bar_x, bar_y_pos, bar_w, bar_h, sw, sh, bar_bg);
+            all_verts.extend_from_slice(&bar_bg_verts);
+
+            // Filled portion.
+            let fill_w = bar_w * (1.0 - ctx_pct.clamp(0.0, 1.0)); // depleting: full = unused
+            if fill_w > 0.5 {
+                let fill_color = {
+                    let remaining = 1.0 - ctx_pct.clamp(0.0, 1.0);
+                    if remaining > 0.5 {
+                        PaletteColor::WARM.to_f32_array()
+                    } else if remaining > 0.2 {
+                        PaletteColor::HOT.to_f32_array()
+                    } else {
+                        PaletteColor::SEARING.to_f32_array()
+                    }
+                };
+                let fill_color_alpha = [fill_color[0], fill_color[1], fill_color[2], 0.8];
+                let fill_verts = pixel_rect_to_ndc(bar_x, bar_y_pos, fill_w, bar_h, sw, sh, fill_color_alpha);
+                all_verts.extend_from_slice(&fill_verts);
+            }
+
+            // ── Label (session name) ────────────────────────────────────────
+            let label = AgentGraph::node_label(node);
+            let label_color = match node.status {
+                ClaudeStatus::Processing => PaletteColor::TEXT_BRIGHT,
+                ClaudeStatus::ToolUse => PaletteColor::TEXT_BRIGHT,
+                _ => PaletteColor::TEXT,
+            };
+            label_entries.push((cx, cy + node_radius + 8.0, label, label_color));
+
+            // Status/tool sub-label.
+            if let Some(ref tool) = node.current_tool {
+                let sub_label = tool.clone();
+                label_entries.push((cx, cy + node_radius + 22.0, sub_label, PaletteColor::TEXT_MUTED));
+            }
+        }
+
+        // ── Draw all rect/triangle vertices ─────────────────────────────────
+        if !all_verts.is_empty() {
+            let data = bytemuck::cast_slice::<ColorVertex, u8>(&all_verts);
+            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("graph_nodes"),
+                contents: data,
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("graph_nodes_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, vbuf.slice(..));
+                pass.draw(0..all_verts.len() as u32, 0..1);
+            }
+        }
+
+        // ── Draw title text ─────────────────────────────────────────────────
+        // Title + node labels via glyphon.
+        if !label_entries.is_empty() || !nodes.is_empty() {
+            let metrics = Metrics::new(FONT_SIZE * 0.7, LINE_HEIGHT * 0.7);
+            let small_metrics = Metrics::new(FONT_SIZE * 0.6, LINE_HEIGHT * 0.6);
+
+            let mut text_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
+
+            // Title: "AGENT GRAPH" in top-left of the overlay area.
+            {
+                let mut buf = Buffer::new(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(200.0), Some(LINE_HEIGHT));
+                buf.set_text(
+                    &mut self.font_system,
+                    "AGENT GRAPH",
+                    Attrs::new()
+                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .color(GlyphColor::rgba(
+                            (title_color_dim[0] * 255.0) as u8,
+                            (title_color_dim[1] * 255.0) as u8,
+                            (title_color_dim[2] * 255.0) as u8,
+                            (title_color_dim[3] * 255.0) as u8,
+                        )),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                text_buffers.push((buf, 8.0, graph_y + 4.0));
+            }
+
+            // Node labels.
+            for (cx, ly, text, color) in &label_entries {
+                let is_sub = text.len() < 20 && *ly > graph_y + node_radius + 20.0;
+                let m = if is_sub { small_metrics } else { metrics };
+
+                let mut buf = Buffer::new(&mut self.font_system, m);
+                let max_w = 120.0;
+                buf.set_size(&mut self.font_system, Some(max_w), Some(LINE_HEIGHT));
+                buf.set_text(
+                    &mut self.font_system,
+                    text,
+                    Attrs::new()
+                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .color(GlyphColor::rgba(color.r, color.g, color.b, 200)),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+
+                // Center the label horizontally under the node.
+                let text_w = text.len() as f32 * self.cell_width * 0.7;
+                let left = cx - text_w / 2.0;
+                text_buffers.push((buf, left.max(2.0), *ly));
+            }
+
+            self.viewport.update(
+                queue,
+                Resolution {
+                    width: surface_width,
+                    height: surface_height,
+                },
+            );
+
+            let text_areas: Vec<TextArea<'_>> = text_buffers
+                .iter()
+                .map(|(buf, x, y)| TextArea {
+                    buffer: buf,
+                    left: *x,
+                    top: *y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: surface_width as i32,
+                        bottom: surface_height as i32,
+                    },
+                    default_color: GlyphColor::rgba(
+                        PaletteColor::TEXT.r,
+                        PaletteColor::TEXT.g,
+                        PaletteColor::TEXT.b,
+                        200,
+                    ),
+                    custom_glyphs: &[],
+                })
+                .collect();
+
+            if let Err(e) = self.overlay_text_renderer.prepare(
+                device,
+                queue,
+                &mut self.font_system,
+                &mut self.overlay_atlas,
+                &self.viewport,
+                text_areas,
+                &mut self.swash_cache,
+            ) {
+                tracing::warn!("Graph text prepare failed: {}", e);
+                return;
+            }
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("graph_text_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                if let Err(e) = self.overlay_text_renderer.render(
+                    &self.overlay_atlas,
+                    &self.viewport,
+                    &mut pass,
+                ) {
+                    tracing::warn!("Graph text render failed: {}", e);
+                }
+            }
+        }
+    }
+
     /// Render the terminal grid with damage tracking.
     ///
     /// Takes pre-collected `RenderCell` snapshots (only from damaged rows when
@@ -3196,4 +3659,54 @@ fn f32_to_glyph_color(c: [f32; 4]) -> GlyphColor {
         (c[2] * 255.0) as u8,
         (c[3] * 255.0) as u8,
     )
+}
+
+/// Convert a line between two pixel coordinates into a thin rectangle (6 vertices).
+///
+/// The rectangle is `thickness` pixels wide, oriented along the line direction.
+/// Returns vertices in NDC for the rect pipeline.
+fn line_to_rect_verts(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    thickness: f32,
+    screen_w: f32,
+    screen_h: f32,
+    color: [f32; 4],
+) -> [ColorVertex; 6] {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt().max(0.001);
+
+    // Perpendicular unit vector.
+    let nx = -dy / len * thickness * 0.5;
+    let ny = dx / len * thickness * 0.5;
+
+    // Four corners of the thin rectangle in pixel coordinates.
+    let corners = [
+        (x0 + nx, y0 + ny),
+        (x0 - nx, y0 - ny),
+        (x1 + nx, y1 + ny),
+        (x1 - nx, y1 - ny),
+    ];
+
+    // Convert to NDC.
+    let to_ndc = |px: f32, py: f32| -> [f32; 2] {
+        [(px / screen_w) * 2.0 - 1.0, 1.0 - (py / screen_h) * 2.0]
+    };
+
+    let p0 = to_ndc(corners[0].0, corners[0].1);
+    let p1 = to_ndc(corners[1].0, corners[1].1);
+    let p2 = to_ndc(corners[2].0, corners[2].1);
+    let p3 = to_ndc(corners[3].0, corners[3].1);
+
+    [
+        ColorVertex { position: p0, color },
+        ColorVertex { position: p2, color },
+        ColorVertex { position: p1, color },
+        ColorVertex { position: p1, color },
+        ColorVertex { position: p2, color },
+        ColorVertex { position: p3, color },
+    ]
 }

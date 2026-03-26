@@ -673,8 +673,8 @@ fn apply_session_state_to_term(terminal: &Terminal, response: &Response) {
         let current_cols = term.columns();
         let current_rows = term.screen_lines();
         if current_cols != *cols as usize || current_rows != *rows as usize {
-            use crate::terminal::TerminalSize;
-            let size = TerminalSize::new(*cols as usize, *rows as usize);
+            use crate::terminal::ConductorTerminalSize;
+            let size = ConductorTerminalSize::new(*cols as usize, *rows as usize);
             term.resize(size);
         }
 

@@ -1,0 +1,18 @@
+[package]
+name = "thermal-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared terminal primitives for the Thermal ecosystem (OSC 633, input encoding, PTY, terminal size)"
+
+[features]
+default = []
+## Adds an `Arc<AtomicBool>` bell flag to the event listener.
+## Used by thermobile (Android) to poll for bell events from JNI.
+bell_detection = []
+
+[dependencies]
+anyhow = { workspace = true }
+nix = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

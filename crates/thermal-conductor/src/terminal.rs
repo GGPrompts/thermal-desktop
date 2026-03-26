@@ -34,12 +34,37 @@ use tracing::{debug, info};
 use crate::kitty_graphics::{ImageStore, KittyGraphicsParser};
 use crate::osc633::{CommandTracker, Osc633Parser};
 
-// ── Default terminal dimensions ──────────────────────────────────────────────
+// Re-use shared terminal size and default constants from thermal-terminal.
+use thermal_terminal::terminal::TerminalSize;
+use thermal_terminal::terminal::{DEFAULT_COLS, DEFAULT_ROWS};
 
-#[allow(dead_code)]
-const DEFAULT_COLS: usize = 120;
-#[allow(dead_code)]
-const DEFAULT_ROWS: usize = 36;
+// ── Newtype wrapper for Dimensions impl ─────────────────────────────────────
+//
+// alacritty_terminal::grid::Dimensions cannot be implemented directly on
+// TerminalSize here because neither type is local (orphan rule E0117).
+// A newtype wrapper keeps the impl local to thermal-conductor.
+
+pub struct ConductorTerminalSize(pub TerminalSize);
+
+impl ConductorTerminalSize {
+    pub fn new(columns: usize, screen_lines: usize) -> Self {
+        Self(TerminalSize::new(columns, screen_lines))
+    }
+}
+
+impl Dimensions for ConductorTerminalSize {
+    fn total_lines(&self) -> usize {
+        self.0.screen_lines
+    }
+
+    fn screen_lines(&self) -> usize {
+        self.0.screen_lines
+    }
+
+    fn columns(&self) -> usize {
+        self.0.columns
+    }
+}
 
 // ── Event listener ───────────────────────────────────────────────────────────
 
@@ -61,37 +86,6 @@ impl EventListener for ThermalEventListener {
     fn send_event(&self, event: Event) {
         // Best-effort send — if the receiver is gone we silently drop.
         let _ = self.tx.send(event);
-    }
-}
-
-// ── Terminal size ────────────────────────────────────────────────────────────
-
-/// Grid dimensions for `Term::new` and `Term::resize`.
-pub struct TerminalSize {
-    pub columns: usize,
-    pub screen_lines: usize,
-}
-
-impl TerminalSize {
-    pub fn new(columns: usize, screen_lines: usize) -> Self {
-        Self {
-            columns,
-            screen_lines,
-        }
-    }
-}
-
-impl Dimensions for TerminalSize {
-    fn total_lines(&self) -> usize {
-        self.screen_lines
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.screen_lines
-    }
-
-    fn columns(&self) -> usize {
-        self.columns
     }
 }
 
@@ -140,7 +134,7 @@ impl Terminal {
         let listener = ThermalEventListener::new(event_tx);
 
         let config = TermConfig::default();
-        let size = TerminalSize::new(cols, rows);
+        let size = ConductorTerminalSize::new(cols, rows);
         let term = Term::new(config, &size, listener);
 
         Terminal {
@@ -175,7 +169,7 @@ impl Terminal {
     /// `WindowSize` struct suitable for sending to the PTY via
     /// `PtySession::resize`.
     pub fn resize(&self, cols: usize, rows: usize, cell_width: u16, cell_height: u16) {
-        let size = TerminalSize::new(cols, rows);
+        let size = ConductorTerminalSize::new(cols, rows);
         let mut term = self.term.lock();
         term.resize(size);
         debug!(cols, rows, "Terminal grid resized");

@@ -15,6 +15,7 @@ members = [
     "crates/thermal-screensaver",
     "crates/thermal-wallpaper",
     "crates/thermal-voice",
+    "crates/thermal-terminal",
 ]
 
 [workspace.package]

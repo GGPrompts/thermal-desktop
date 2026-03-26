@@ -243,6 +243,8 @@ impl SocketResponse {
 struct Recorder {
     samples: Arc<Mutex<Vec<i16>>>,
     stream: Option<cpal::Stream>,
+    native_rate: Option<u32>,
+    native_channels: Option<u16>,
 }
 
 impl Recorder {
@@ -250,6 +252,8 @@ impl Recorder {
         Self {
             samples: Arc::new(Mutex::new(Vec::new())),
             stream: None,
+            native_rate: None,
+            native_channels: None,
         }
     }
 
@@ -261,11 +265,23 @@ impl Recorder {
 
         info!("recording from: {}", device.name().unwrap_or_default());
 
+        // Use the device's default config instead of forcing 16kHz.
+        // Many devices (e.g. Blue Yeti at 48kHz) don't support 16kHz natively,
+        // and PipeWire may silently fail to deliver samples.
+        let default_config = device.default_input_config()
+            .context("failed to get default input config")?;
+        let native_rate = default_config.sample_rate().0;
+        let native_channels = default_config.channels();
+        info!("native format: {native_rate}Hz, {native_channels}ch");
+
         let config = cpal::StreamConfig {
-            channels: CHANNELS,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            channels: native_channels,
+            sample_rate: cpal::SampleRate(native_rate),
             buffer_size: cpal::BufferSize::Default,
         };
+
+        self.native_rate = Some(native_rate);
+        self.native_channels = Some(native_channels);
 
         let samples = Arc::clone(&self.samples);
         samples.lock().unwrap().clear();
@@ -274,13 +290,15 @@ impl Recorder {
             error!("audio stream error: {e}");
         };
 
+        let channels = native_channels;
         let stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let mut buf = samples.lock().unwrap();
-                for &sample in data {
-                    // Convert f32 [-1.0, 1.0] to i16
-                    let clamped = sample.clamp(-1.0, 1.0);
+                for chunk in data.chunks(channels as usize) {
+                    // Mix to mono by averaging channels
+                    let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                    let clamped = mono.clamp(-1.0, 1.0);
                     buf.push((clamped * 32767.0) as i16);
                 }
             },
@@ -297,7 +315,28 @@ impl Recorder {
     fn stop(&mut self) -> Vec<i16> {
         // Drop the stream to stop recording
         self.stream.take();
-        let samples = self.samples.lock().unwrap().clone();
+        let raw_samples = self.samples.lock().unwrap().clone();
+        let native_rate = self.native_rate.unwrap_or(SAMPLE_RATE);
+
+        // Resample to 16kHz for whisper if the device recorded at a different rate
+        let samples = if native_rate != SAMPLE_RATE {
+            let ratio = SAMPLE_RATE as f64 / native_rate as f64;
+            let new_len = (raw_samples.len() as f64 * ratio) as usize;
+            let mut resampled = Vec::with_capacity(new_len);
+            for i in 0..new_len {
+                let src_idx = i as f64 / ratio;
+                let idx = src_idx as usize;
+                let frac = src_idx - idx as f64;
+                let s0 = raw_samples[idx.min(raw_samples.len() - 1)] as f64;
+                let s1 = raw_samples[(idx + 1).min(raw_samples.len() - 1)] as f64;
+                resampled.push((s0 + frac * (s1 - s0)) as i16);
+            }
+            info!("resampled {native_rate}Hz → {SAMPLE_RATE}Hz ({} → {} samples)", raw_samples.len(), resampled.len());
+            resampled
+        } else {
+            raw_samples
+        };
+
         let duration_secs = samples.len() as f64 / SAMPLE_RATE as f64;
         info!(
             "recording stopped: {duration_secs:.1}s captured ({} samples)",

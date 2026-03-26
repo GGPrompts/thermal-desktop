@@ -593,8 +593,10 @@ fn parse_graphics_body(body: &[u8]) -> Option<GraphicsCommand> {
         (body_str, "")
     };
 
-    let mut cmd = GraphicsCommand::default();
-    cmd.payload = payload_str.as_bytes().to_vec();
+    let mut cmd = GraphicsCommand {
+        payload: payload_str.as_bytes().to_vec(),
+        ..Default::default()
+    };
 
     // Parse key=value pairs.
     for pair in params_str.split(',') {

@@ -34,3 +34,6 @@ rmp-serde = { workspace = true }
 notify = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }

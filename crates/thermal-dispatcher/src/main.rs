@@ -619,6 +619,41 @@ async fn send_tts_via_state_file(text: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// Config file discovery
+// ---------------------------------------------------------------------------
+
+fn find_config_file() -> PathBuf {
+    // Check XDG_CONFIG_HOME first
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let path = PathBuf::from(xdg).join("thermal/trust-tiers.toml");
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // Check ~/.config/thermal/
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home).join(".config/thermal/trust-tiers.toml");
+        if path.exists() {
+            return path;
+        }
+    }
+
+    // Check repo config/ directory (development)
+    let repo_config = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("config/trust-tiers.toml"))
+        .unwrap_or_default();
+    if repo_config.exists() {
+        return repo_config;
+    }
+
+    // Default path (will trigger helpful error message)
+    PathBuf::from("config/trust-tiers.toml")
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -995,39 +1030,4 @@ mod tests {
         assert!(HUD_STATE_FILE.starts_with("/tmp/"));
         assert!(HUD_STATE_FILE.ends_with(".json"));
     }
-}
-
-// ---------------------------------------------------------------------------
-// Config file discovery
-// ---------------------------------------------------------------------------
-
-fn find_config_file() -> PathBuf {
-    // Check XDG_CONFIG_HOME first
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        let path = PathBuf::from(xdg).join("thermal/trust-tiers.toml");
-        if path.exists() {
-            return path;
-        }
-    }
-
-    // Check ~/.config/thermal/
-    if let Ok(home) = std::env::var("HOME") {
-        let path = PathBuf::from(home).join(".config/thermal/trust-tiers.toml");
-        if path.exists() {
-            return path;
-        }
-    }
-
-    // Check repo config/ directory (development)
-    let repo_config = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.join("config/trust-tiers.toml"))
-        .unwrap_or_default();
-    if repo_config.exists() {
-        return repo_config;
-    }
-
-    // Default path (will trigger helpful error message)
-    PathBuf::from("config/trust-tiers.toml")
 }

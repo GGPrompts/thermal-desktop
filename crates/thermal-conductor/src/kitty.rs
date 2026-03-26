@@ -8,7 +8,6 @@
 //!
 //! All methods are async and shell out to `kitty @` via `tokio::process::Command`.
 
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +86,7 @@ struct KittyWindow {
 #[derive(Debug, Deserialize)]
 struct KittyProcess {
     #[serde(default)]
+    #[allow(dead_code)]
     pid: i64,
     #[serde(default)]
     cmdline: Vec<String>,
@@ -309,6 +309,7 @@ impl KittyController {
     // ── Focus ───────────────────────────────────────────────────────────────
 
     /// Focus the kitty window for session `id`.
+    #[allow(dead_code)]
     pub async fn focus_window(&self, id: &str) -> Result<()> {
         validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
@@ -363,8 +364,8 @@ async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static
             .context("failed to open sidecar lock file")?;
 
         // Acquire exclusive lock (blocking).
-        nix::fcntl::flock(lock_file.as_raw_fd(), nix::fcntl::FlockArg::LockExclusive)
-            .context("flock on sidecar lock file failed")?;
+        let _lock = nix::fcntl::Flock::lock(lock_file, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, e)| anyhow::anyhow!("flock on sidecar lock file failed: {e}"))?;
 
         // Read-modify-write under lock.
         let path = sidecar_path();

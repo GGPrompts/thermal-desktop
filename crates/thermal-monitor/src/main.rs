@@ -144,10 +144,10 @@ fn format_activity(s: &ClaudeSessionState) -> String {
     };
 
     // Subagent indicator
-    if let Some(n) = s.subagent_count {
-        if n > 0 {
-            result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
-        }
+    if let Some(n) = s.subagent_count
+        && n > 0
+    {
+        result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
     }
 
     result
@@ -379,10 +379,10 @@ impl App {
     fn clamp_selection(&mut self) {
         if self.display_rows.is_empty() {
             self.table_state.select(None);
-        } else if let Some(i) = self.table_state.selected() {
-            if i >= self.display_rows.len() {
-                self.table_state.select(Some(self.display_rows.len() - 1));
-            }
+        } else if let Some(i) = self.table_state.selected()
+            && i >= self.display_rows.len()
+        {
+            self.table_state.select(Some(self.display_rows.len() - 1));
         }
     }
 
@@ -413,46 +413,46 @@ impl App {
     }
 
     fn attach_selected(&self) {
-        if let Some(i) = self.table_state.selected() {
-            if let Some(row) = self.display_rows.get(i) {
-                // For subagents, attach to the parent session
-                let target = if let Some(ref parent) = row.session.parent_session_id {
-                    parent.as_str()
-                } else {
-                    &row.session.session_id
-                };
-                // Try kitty remote control first, fall back to tmux
-                let _ = Command::new("kitty")
-                    .args([
-                        "@",
-                        "focus-window",
-                        "--match",
-                        &format!("pid:{}", row.session.pid.unwrap_or(0)),
-                    ])
-                    .status()
-                    .or_else(|_| {
-                        Command::new("tmux")
-                            .args(["switch-client", "-t", target])
-                            .status()
-                    });
-            }
+        if let Some(i) = self.table_state.selected()
+            && let Some(row) = self.display_rows.get(i)
+        {
+            // For subagents, attach to the parent session
+            let target = if let Some(ref parent) = row.session.parent_session_id {
+                parent.as_str()
+            } else {
+                &row.session.session_id
+            };
+            // Try kitty remote control first, fall back to tmux
+            let _ = Command::new("kitty")
+                .args([
+                    "@",
+                    "focus-window",
+                    "--match",
+                    &format!("pid:{}", row.session.pid.unwrap_or(0)),
+                ])
+                .status()
+                .or_else(|_| {
+                    Command::new("tmux")
+                        .args(["switch-client", "-t", target])
+                        .status()
+                });
         }
     }
 
     fn toggle_history(&mut self) {
         if self.history_popup.is_some() {
             self.history_popup = None;
-        } else if let Some(i) = self.table_state.selected() {
-            if let Some(row) = self.display_rows.get(i) {
-                // Show history for parent, not subagent
-                let target = row
-                    .session
-                    .parent_session_id
-                    .as_ref()
-                    .unwrap_or(&row.session.session_id)
-                    .clone();
-                self.history_popup = Some(target);
-            }
+        } else if let Some(i) = self.table_state.selected()
+            && let Some(row) = self.display_rows.get(i)
+        {
+            // Show history for parent, not subagent
+            let target = row
+                .session
+                .parent_session_id
+                .as_ref()
+                .unwrap_or(&row.session.session_id)
+                .clone();
+            self.history_popup = Some(target);
         }
     }
 }
@@ -556,7 +556,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             let updated = s
                 .last_updated
                 .as_deref()
-                .map(|ts| relative_time(ts))
+                .map(relative_time)
                 .unwrap_or_else(|| "-".into());
 
             if row.is_subagent {

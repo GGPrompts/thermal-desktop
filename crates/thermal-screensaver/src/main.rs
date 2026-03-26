@@ -664,7 +664,7 @@ impl LayerShellHandler for App {
             .wl_surface()
             .id()
             .as_ptr()
-            .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
+            .cast::<std::ffi::c_void>();
 
         let wgpu_surface = unsafe {
             self.wgpu_instance
@@ -740,15 +740,15 @@ impl SeatHandler for App {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard {
-            if let Err(e) = self.seat_state.get_keyboard(qh, &seat, None) {
-                warn!("Could not get keyboard: {}", e);
-            }
+        if capability == Capability::Keyboard
+            && let Err(e) = self.seat_state.get_keyboard(qh, &seat, None)
+        {
+            warn!("Could not get keyboard: {}", e);
         }
-        if capability == Capability::Pointer {
-            if let Err(e) = self.seat_state.get_pointer(qh, &seat) {
-                warn!("Could not get pointer: {}", e);
-            }
+        if capability == Capability::Pointer
+            && let Err(e) = self.seat_state.get_pointer(qh, &seat)
+        {
+            warn!("Could not get pointer: {}", e);
         }
     }
 

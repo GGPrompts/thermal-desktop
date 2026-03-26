@@ -109,6 +109,7 @@ pub struct NotificationRenderer {
     bind_group_layout: wgpu::BindGroupLayout,
     font_system: FontSystem,
     swash_cache: SwashCache,
+    #[allow(dead_code)]
     cache: Cache,
     text_atlas: TextAtlas,
     viewport: Viewport,
@@ -405,6 +406,7 @@ impl NotificationRenderer {
         self.queue.submit(std::iter::once(encoder.finish()));
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_rect(
         &self,
         encoder: &mut wgpu::CommandEncoder,

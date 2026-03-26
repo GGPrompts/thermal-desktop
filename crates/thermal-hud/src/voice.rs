@@ -105,7 +105,7 @@ impl VoiceStatePoller {
                 let dominated = event.paths.iter().any(|p| {
                     p == &self.state_file
                         || p.file_name()
-                            .map_or(false, |n| n == "thermal-voice-state.json")
+                            .is_some_and(|n| n == "thermal-voice-state.json")
                 });
                 if !dominated {
                     continue;
@@ -142,31 +142,31 @@ impl VoiceStatePoller {
         };
 
         // If there is a result, show it.
-        if let Some(summary) = &state.result {
-            if !summary.is_empty() {
-                if self.result_shown_at.is_none() {
-                    self.result_shown_at = Some(Instant::now());
-                }
-                return HudMode::VoiceActive {
-                    transcript: state.last_transcript.clone(),
-                    state: VoiceState::Result {
-                        summary: summary.clone(),
-                    },
-                };
+        if let Some(summary) = &state.result
+            && !summary.is_empty()
+        {
+            if self.result_shown_at.is_none() {
+                self.result_shown_at = Some(Instant::now());
             }
+            return HudMode::VoiceActive {
+                transcript: state.last_transcript.clone(),
+                state: VoiceState::Result {
+                    summary: summary.clone(),
+                },
+            };
         }
 
         // If there is a pending action, show confirmation.
-        if let Some(action) = &state.action_pending {
-            if !action.is_empty() {
-                self.result_shown_at = None;
-                return HudMode::VoiceActive {
-                    transcript: state.last_transcript.clone(),
-                    state: VoiceState::Confirming {
-                        action: action.clone(),
-                    },
-                };
-            }
+        if let Some(action) = &state.action_pending
+            && !action.is_empty()
+        {
+            self.result_shown_at = None;
+            return HudMode::VoiceActive {
+                transcript: state.last_transcript.clone(),
+                state: VoiceState::Confirming {
+                    action: action.clone(),
+                },
+            };
         }
 
         // If we have a transcript but no action/result, we are transcribing/thinking.

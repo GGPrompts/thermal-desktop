@@ -494,15 +494,15 @@ pub fn run() -> anyhow::Result<()> {
             .expect("Wayland event dispatch failed");
 
         // ── Key repeat ──────────────────────────────────────────────────
-        if let (Some(key), Some(next)) = (&state.repeat_key, state.repeat_next) {
-            if std::time::Instant::now() >= next {
-                let key_clone = key.clone();
-                if let Some(bytes) = input::encode_key(&key_clone, &state.modifiers) {
-                    state.write_session(&bytes);
-                }
-                state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
-                // Don't set dirty — PTY echo will set pty_dirty.
+        if let (Some(key), Some(next)) = (&state.repeat_key, state.repeat_next)
+            && std::time::Instant::now() >= next
+        {
+            let key_clone = key.clone();
+            if let Some(bytes) = input::encode_key(&key_clone, &state.modifiers) {
+                state.write_session(&bytes);
             }
+            state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
+            // Don't set dirty — PTY echo will set pty_dirty.
         }
 
         // Drain terminal events — relay PtyWrite responses back to the PTY.
@@ -564,10 +564,10 @@ pub fn run() -> anyhow::Result<()> {
         if state.configured && state.dirty {
             // If we have a coalescing deadline and it hasn't expired yet,
             // skip this frame to accumulate more PTY output.
-            if let Some(deadline) = state.render_deadline {
-                if std::time::Instant::now() < deadline {
-                    continue;
-                }
+            if let Some(deadline) = state.render_deadline
+                && std::time::Instant::now() < deadline
+            {
+                continue;
             }
             state.render_frame();
             state.dirty = false;
@@ -919,19 +919,19 @@ impl ConductorWindow {
         }
 
         // ── Context heatmap vignette (renders BEFORE grid so text is on top) ──
-        if let Some(ref session) = self.claude_session {
-            if let Some(ctx_pct) = session.context_percent {
-                // Normalize from 0-100 to 0.0-1.0.
-                let normalized = (ctx_pct / 100.0).clamp(0.0, 1.0);
-                self.context_heatmap.render(
-                    normalized,
-                    &self.wgpu.queue,
-                    &mut encoder,
-                    &view,
-                    self.width,
-                    self.height,
-                );
-            }
+        if let Some(ref session) = self.claude_session
+            && let Some(ctx_pct) = session.context_percent
+        {
+            // Normalize from 0-100 to 0.0-1.0.
+            let normalized = (ctx_pct / 100.0).clamp(0.0, 1.0);
+            self.context_heatmap.render(
+                normalized,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
         }
 
         // ── Render terminal grid ─────────────────────────────────────────
@@ -1078,10 +1078,10 @@ impl ConductorWindow {
                 }
 
                 // Skip rows that aren't damaged (partial damage only).
-                if let Some(ref damaged) = damaged_rows {
-                    if !damaged.contains(&row) {
-                        return None;
-                    }
+                if let Some(ref damaged) = damaged_rows
+                    && !damaged.contains(&row)
+                {
+                    return None;
                 }
 
                 // Skip wide char spacers.
@@ -1680,20 +1680,20 @@ fn find_matching_session(
 
     // Try exact match first.
     for session in sessions {
-        if let Some(ref working_dir) = session.working_dir {
-            if working_dir == &pty_cwd {
-                return Some(session.clone());
-            }
+        if let Some(ref working_dir) = session.working_dir
+            && working_dir == &pty_cwd
+        {
+            return Some(session.clone());
         }
     }
 
     // Try prefix match: the PTY cwd may be a subdirectory of the session's
     // working_dir (e.g. PTY in /home/user/project/src, session in /home/user/project).
     for session in sessions {
-        if let Some(ref working_dir) = session.working_dir {
-            if pty_cwd.starts_with(working_dir) {
-                return Some(session.clone());
-            }
+        if let Some(ref working_dir) = session.working_dir
+            && pty_cwd.starts_with(working_dir)
+        {
+            return Some(session.clone());
         }
     }
 
@@ -1878,15 +1878,15 @@ impl SeatHandler for ConductorWindow {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard {
-            if let Some(kb) = self.keyboard.take() {
-                kb.release();
-            }
+        if capability == Capability::Keyboard
+            && let Some(kb) = self.keyboard.take()
+        {
+            kb.release();
         }
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
 
@@ -1908,12 +1908,12 @@ impl KeyboardHandler for ConductorWindow {
     ) {
         // Create a keyboard shortcuts inhibitor so the compositor forwards
         // all key combos (Ctrl+Alt, Super, etc.) to us while focused.
-        if self.shortcuts_inhibitor.is_none() {
-            if let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit_manager, &self.seat) {
-                let inhibitor = manager.inhibit_shortcuts(surface, seat, qh, ());
-                tracing::debug!("Keyboard shortcuts inhibitor created");
-                self.shortcuts_inhibitor = Some(inhibitor);
-            }
+        if self.shortcuts_inhibitor.is_none()
+            && let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit_manager, &self.seat)
+        {
+            let inhibitor = manager.inhibit_shortcuts(surface, seat, qh, ());
+            tracing::debug!("Keyboard shortcuts inhibitor created");
+            self.shortcuts_inhibitor = Some(inhibitor);
         }
     }
 
@@ -1942,12 +1942,12 @@ impl KeyboardHandler for ConductorWindow {
     ) {
         // ── Window close: Ctrl+Shift+Q ─────────────────────────────────
         // keyboard-shortcuts-inhibit eats Super+Q, so we need our own close.
-        if self.modifiers.ctrl && self.modifiers.shift {
-            if matches!(event.keysym, Keysym::Q | Keysym::q) {
-                tracing::info!("Ctrl+Shift+Q: closing window");
-                self.exit = true;
-                return;
-            }
+        if self.modifiers.ctrl && self.modifiers.shift
+            && matches!(event.keysym, Keysym::Q | Keysym::q)
+        {
+            tracing::info!("Ctrl+Shift+Q: closing window");
+            self.exit = true;
+            return;
         }
 
         // ── Clipboard: Ctrl+Shift+C (copy) / Ctrl+Shift+V (paste) ──────
@@ -1968,44 +1968,44 @@ impl KeyboardHandler for ConductorWindow {
         }
 
         // ── Agent timeline toggle: Ctrl+Shift+T ────────────────────────
-        if self.modifiers.ctrl && self.modifiers.shift {
-            if matches!(event.keysym, Keysym::T | Keysym::t) {
-                self.agent_timeline.toggle();
-                // Recalculate terminal grid to account for the timeline bar.
-                let effective_h = if self.agent_timeline.visible {
-                    self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
-                } else {
-                    self.height
-                };
-                let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
-                self.terminal.resize(
-                    cols,
-                    rows,
-                    self.grid_renderer.cell_width as u16,
-                    self.grid_renderer.cell_height as u16,
-                );
-                self.resize_session(cols as u16, rows as u16);
-                self.dirty = true;
-                return;
-            }
+        if self.modifiers.ctrl && self.modifiers.shift
+            && matches!(event.keysym, Keysym::T | Keysym::t)
+        {
+            self.agent_timeline.toggle();
+            // Recalculate terminal grid to account for the timeline bar.
+            let effective_h = if self.agent_timeline.visible {
+                self.height.saturating_sub(TIMELINE_BAR_HEIGHT)
+            } else {
+                self.height
+            };
+            let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
+            self.terminal.resize(
+                cols,
+                rows,
+                self.grid_renderer.cell_width as u16,
+                self.grid_renderer.cell_height as u16,
+            );
+            self.resize_session(cols as u16, rows as u16);
+            self.dirty = true;
+            return;
         }
 
         // ── Cross-pane inject: Ctrl+Shift+Enter ─────────────────────────
         // Sends the current selection to all other thermal-conductor windows.
-        if self.modifiers.ctrl && self.modifiers.shift {
-            if matches!(event.keysym, Keysym::Return | Keysym::KP_Enter) {
-                self.inject_selection();
-                return;
-            }
+        if self.modifiers.ctrl && self.modifiers.shift
+            && matches!(event.keysym, Keysym::Return | Keysym::KP_Enter)
+        {
+            self.inject_selection();
+            return;
         }
 
         // ── Context continuation: Ctrl+Shift+N ──────────────────────────
         // Spawns a new continuation session when the context window is saturated.
-        if self.modifiers.ctrl && self.modifiers.shift {
-            if matches!(event.keysym, Keysym::N | Keysym::n) {
-                self.spawn_continuation();
-                return;
-            }
+        if self.modifiers.ctrl && self.modifiers.shift
+            && matches!(event.keysym, Keysym::N | Keysym::n)
+        {
+            self.spawn_continuation();
+            return;
         }
 
         // ── Scrollback navigation (Shift+PageUp/Down/Home/End) ──────────

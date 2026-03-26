@@ -185,10 +185,9 @@ fn load_audio_state() -> AudioState {
         } else if let Some(val) = line
             .strip_prefix("volume")
             .and_then(|s| s.trim_start().strip_prefix('='))
+            && let Ok(v) = val.trim().parse::<f32>()
         {
-            if let Ok(v) = val.trim().parse::<f32>() {
-                state.volume = v.clamp(0.0, 1.0);
-            }
+            state.volume = v.clamp(0.0, 1.0);
         }
     }
     state
@@ -266,10 +265,10 @@ impl AudioManager {
 
     fn announce(&mut self, session_id: &str, voice: &str, text: &str) -> Result<()> {
         // Debounce check.
-        if let Some(last) = self.last_play.get(session_id) {
-            if last.elapsed().as_millis() < DEBOUNCE_MS {
-                return Ok(());
-            }
+        if let Some(last) = self.last_play.get(session_id)
+            && last.elapsed().as_millis() < DEBOUNCE_MS
+        {
+            return Ok(());
         }
         self.last_play
             .insert(session_id.to_string(), Instant::now());
@@ -544,14 +543,12 @@ fn session_label(session: &ClaudeSessionState) -> String {
     };
 
     // Try to extract project folder name from working_dir
-    if let Some(ref dir) = session.working_dir {
-        if let Some(name) = std::path::Path::new(dir).file_name() {
-            if let Some(s) = name.to_str() {
-                if !s.is_empty() {
-                    return format!("{prefix}{s}");
-                }
-            }
-        }
+    if let Some(ref dir) = session.working_dir
+        && let Some(name) = std::path::Path::new(dir).file_name()
+        && let Some(s) = name.to_str()
+        && !s.is_empty()
+    {
+        return format!("{prefix}{s}");
     }
     if !session.session_id.is_empty() {
         let short = if session.session_id.len() > 8 {
@@ -618,14 +615,12 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&run_dir)?;
     let pidfile = run_dir.join("audio.pid");
     if pidfile.exists() {
-        if let Ok(contents) = fs::read_to_string(&pidfile) {
-            if let Ok(pid) = contents.trim().parse::<u32>() {
-                // Check if that PID is still alive.
-                if Path::new(&format!("/proc/{pid}")).exists() {
-                    eprintln!("thermal-audio already running (pid {pid}). Exiting.");
-                    std::process::exit(0);
-                }
-            }
+        if let Ok(contents) = fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && Path::new(&format!("/proc/{pid}")).exists()
+        {
+            eprintln!("thermal-audio already running (pid {pid}). Exiting.");
+            std::process::exit(0);
         }
         // Stale pidfile — remove it.
         let _ = fs::remove_file(&pidfile);
@@ -1520,10 +1515,10 @@ mod tests {
 
         /// Returns true if the announce should proceed (not debounced).
         fn should_announce(&mut self, session_id: &str) -> bool {
-            if let Some(last) = self.last_play.get(session_id) {
-                if last.elapsed().as_millis() < DEBOUNCE_MS {
-                    return false;
-                }
+            if let Some(last) = self.last_play.get(session_id)
+                && last.elapsed().as_millis() < DEBOUNCE_MS
+            {
+                return false;
             }
             self.last_play
                 .insert(session_id.to_string(), Instant::now());

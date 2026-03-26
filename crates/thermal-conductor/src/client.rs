@@ -199,10 +199,7 @@ impl DaemonClient {
     ///
     /// Returns `true` if the daemon responded within the timeout, `false` otherwise.
     pub async fn is_healthy(&mut self) -> bool {
-        match self.request_with_timeout(Request::Ping).await {
-            Ok(Response::Pong) => true,
-            _ => false,
-        }
+        matches!(self.request_with_timeout(Request::Ping).await, Ok(Response::Pong))
     }
 
     /// Send a request to the daemon.

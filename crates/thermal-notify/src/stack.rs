@@ -97,18 +97,22 @@ impl NotificationStack {
     }
 
     /// How many entries are currently tracked.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.slots.len()
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn card_height(&self) -> f32 {
         self.card_height
     }
 
+    #[allow(dead_code)]
     pub fn gap(&self) -> f32 {
         self.gap
     }

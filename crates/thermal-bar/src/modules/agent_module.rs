@@ -16,6 +16,12 @@ pub struct AgentModule {
     poller: ClaudeStatePoller,
 }
 
+impl Default for AgentModule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AgentModule {
     pub fn new() -> Self {
         // ClaudeStatePoller::new() creates state dirs if needed and sets up

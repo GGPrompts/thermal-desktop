@@ -348,7 +348,7 @@ mod tests {
         let rects = s.render_rects(0.0, 0.0, 50.0);
         for r in &rects {
             for &ch in &r.color {
-                assert!(ch >= 0.0 && ch <= 1.0, "color channel out of range: {ch}");
+                assert!((0.0..=1.0).contains(&ch), "color channel out of range: {ch}");
             }
         }
     }

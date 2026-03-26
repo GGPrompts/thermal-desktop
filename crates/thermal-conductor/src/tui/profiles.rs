@@ -208,42 +208,42 @@ impl ProfilesPage {
 
     /// Copy form fields into the currently selected profile in memory.
     fn apply_form_to_profile(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if let Some(p) = self.profiles.get_mut(i) {
-                p.name = self.name_input.clone();
-                p.cwd = if self.cwd_input.is_empty() {
-                    None
-                } else {
-                    Some(self.cwd_input.clone())
-                };
-                p.command = if self.command_input.is_empty() {
-                    None
-                } else {
-                    Some(self.command_input.clone())
-                };
-                p.count = self.count_input.parse().unwrap_or(1).max(1).min(16);
-                p.git_worktree = self.worktree_enabled;
-                p.icon = if self.icon_input.is_empty() {
-                    None
-                } else {
-                    Some(self.icon_input.clone())
-                };
-                self.dirty = true;
-            }
+        if let Some(i) = self.list_state.selected()
+            && let Some(p) = self.profiles.get_mut(i)
+        {
+            p.name = self.name_input.clone();
+            p.cwd = if self.cwd_input.is_empty() {
+                None
+            } else {
+                Some(self.cwd_input.clone())
+            };
+            p.command = if self.command_input.is_empty() {
+                None
+            } else {
+                Some(self.command_input.clone())
+            };
+            p.count = self.count_input.parse().unwrap_or(1).clamp(1, 16);
+            p.git_worktree = self.worktree_enabled;
+            p.icon = if self.icon_input.is_empty() {
+                None
+            } else {
+                Some(self.icon_input.clone())
+            };
+            self.dirty = true;
         }
     }
 
     /// Load form fields from the currently selected profile.
     fn load_form_from_profile(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if let Some(p) = self.profiles.get(i) {
-                self.name_input = p.name.clone();
-                self.cwd_input = p.cwd.clone().unwrap_or_default();
-                self.command_input = p.command.clone().unwrap_or_default();
-                self.count_input = p.count.to_string();
-                self.worktree_enabled = p.git_worktree;
-                self.icon_input = p.icon.clone().unwrap_or_default();
-            }
+        if let Some(i) = self.list_state.selected()
+            && let Some(p) = self.profiles.get(i)
+        {
+            self.name_input = p.name.clone();
+            self.cwd_input = p.cwd.clone().unwrap_or_default();
+            self.command_input = p.command.clone().unwrap_or_default();
+            self.count_input = p.count.to_string();
+            self.worktree_enabled = p.git_worktree;
+            self.icon_input = p.icon.clone().unwrap_or_default();
         }
         self.status_msg = None;
     }
@@ -355,7 +355,7 @@ impl ProfilesPage {
 
     /// Render the icon picker overlay centered on the screen.
     fn render_icon_picker(&self, f: &mut Frame, area: Rect) {
-        let rows = (ICON_GRID.len() + ICON_GRID_COLS - 1) / ICON_GRID_COLS;
+        let rows = ICON_GRID.len().div_ceil(ICON_GRID_COLS);
         // Each icon cell is 4 chars wide, plus borders + padding
         let picker_w = (ICON_GRID_COLS as u16 * 4) + 4;
         let picker_h = rows as u16 + 4; // +2 for borders, +1 title, +1 hint
@@ -870,7 +870,7 @@ impl TuiPage for ProfilesPage {
                     // The picker grid: each icon cell is 4 chars wide, rows are 1 char tall.
                     // This is best-effort — we check if the click is inside the popup
                     // by recomputing from ICON_GRID dimensions.
-                    let _grid_rows = (ICON_GRID.len() + ICON_GRID_COLS - 1) / ICON_GRID_COLS;
+                    let _grid_rows = ICON_GRID.len().div_ceil(ICON_GRID_COLS);
                     // We don't know the exact terminal size, but we can use a reasonable
                     // fallback. The icon picker is centered, so approximate with 80x24 min.
                     // In practice, clicks that land on icons will work for most terminal sizes.

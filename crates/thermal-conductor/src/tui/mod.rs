@@ -165,14 +165,13 @@ impl App {
             })
             .unwrap_or(false);
 
-        if profiles_changed {
-            if let Some(spawn) = self
+        if profiles_changed
+            && let Some(spawn) = self
                 .pages
                 .get_mut(1)
                 .and_then(|p| p.as_any_mut().downcast_mut::<SpawnPage>())
-            {
-                spawn.needs_reload = true;
-            }
+        {
+            spawn.needs_reload = true;
         }
 
         // Tick all pages so background state stays current.
@@ -367,10 +366,10 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                         }
                     } else {
                         // Scroll events in tab bar area still go to page
-                        if !matches!(mouse.kind, MouseEventKind::Down(_)) {
-                            if let Some(page) = app.pages.get_mut(app.active_tab) {
-                                page.handle_mouse(mouse, &mut app.poller);
-                            }
+                        if !matches!(mouse.kind, MouseEventKind::Down(_))
+                            && let Some(page) = app.pages.get_mut(app.active_tab)
+                        {
+                            page.handle_mouse(mouse, &mut app.poller);
                         }
                     }
                 }
@@ -401,5 +400,5 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
 fn is_text_input_page(app: &App) -> bool {
     app.pages
         .get(app.active_tab)
-        .map_or(false, |page| page.has_text_focus())
+        .is_some_and(|page| page.has_text_focus())
 }

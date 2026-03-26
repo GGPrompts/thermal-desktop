@@ -39,10 +39,10 @@ pub fn default_count() -> u32 {
 
 /// Expand `~/` prefix to $HOME.
 pub fn expand_tilde(path: &str) -> String {
-    if path.starts_with("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{}{}", home, &path[1..]);
-        }
+    if path.starts_with("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return format!("{}{}", home, &path[1..]);
     }
     path.to_string()
 }
@@ -59,10 +59,10 @@ pub fn load_profiles() -> (Option<String>, Vec<Profile>) {
     let candidates = ["config/profiles.toml".to_string(), user_config_path()];
 
     for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Ok(config) = toml::from_str::<ProfileConfig>(&content) {
-                return (config.default_cwd, config.profiles);
-            }
+        if let Ok(content) = std::fs::read_to_string(path)
+            && let Ok(config) = toml::from_str::<ProfileConfig>(&content)
+        {
+            return (config.default_cwd, config.profiles);
         }
     }
 

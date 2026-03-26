@@ -690,7 +690,7 @@ fn strip_trailing_phrase(text: &str, phrase: &str) -> String {
         // Only strip if the phrase is at the end (after trimming punctuation)
         if pos + phrase.len() == trimmed_lower.len() {
             let prefix = &text[..pos];
-            return prefix.trim_end().trim_end_matches(|c: char| c == ',' || c == '.' || c == '-').trim_end().to_string();
+            return prefix.trim_end().trim_end_matches([',', '.', '-']).trim_end().to_string();
         }
     }
     text.to_string()

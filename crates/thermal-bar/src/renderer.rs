@@ -236,7 +236,7 @@ impl Renderer {
             &mut font_system,
             "THERMAL-BAR",
             Attrs::new().family(Family::Monospace),
-            Shaping::Basic,
+            Shaping::Advanced,
         );
 
         Ok(Self {
@@ -312,7 +312,7 @@ impl Renderer {
                     &mut self.font_system,
                     &module.text,
                     Attrs::new().family(Family::Monospace),
-                    Shaping::Basic,
+                    Shaping::Advanced,
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
                 let idx = text_buffers.len();

@@ -150,10 +150,10 @@ fn read_cpu_temp() -> Option<f32> {
         let zone_type_lower = zone_type.trim().to_ascii_lowercase();
         if zone_type_lower.contains("x86_pkg_temp") || zone_type_lower.contains("cpu") {
             let temp_path = format!("{zone}/temp");
-            if let Ok(raw) = std::fs::read_to_string(&temp_path) {
-                if let Ok(millideg) = raw.trim().parse::<i64>() {
-                    return Some(millideg as f32 / 1000.0);
-                }
+            if let Ok(raw) = std::fs::read_to_string(&temp_path)
+                && let Ok(millideg) = raw.trim().parse::<i64>()
+            {
+                return Some(millideg as f32 / 1000.0);
             }
         }
     }
@@ -228,7 +228,7 @@ fn parse_net_totals() -> (u64, u64) {
         }
         let fields: Vec<&str> = line[colon + 1..].split_ascii_whitespace().collect();
         // col 0 = rx_bytes, col 8 = tx_bytes
-        let rx: u64 = fields.get(0).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let rx: u64 = fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
         let tx: u64 = fields.get(8).and_then(|v| v.parse().ok()).unwrap_or(0);
         total_rx = total_rx.saturating_add(rx);
         total_tx = total_tx.saturating_add(tx);
@@ -271,24 +271,24 @@ fn try_amd_temp() -> Option<f32> {
     for entry in std::fs::read_dir("/sys/class/drm/card0/device/hwmon").ok()? {
         let entry = entry.ok()?;
         let path = entry.path().join("temp1_input");
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            if let Ok(millideg) = raw.trim().parse::<i64>() {
-                return Some(millideg as f32 / 1000.0);
-            }
+        if let Ok(raw) = std::fs::read_to_string(&path)
+            && let Ok(millideg) = raw.trim().parse::<i64>()
+        {
+            return Some(millideg as f32 / 1000.0);
         }
     }
     // Try /sys/class/hwmon/hwmon*/name == "amdgpu"
     for i in 0..=8u32 {
         let base = format!("/sys/class/hwmon/hwmon{i}");
         let name_path = format!("{base}/name");
-        if let Ok(name) = std::fs::read_to_string(&name_path) {
-            if name.trim() == "amdgpu" {
-                let temp_path = format!("{base}/temp1_input");
-                if let Ok(raw) = std::fs::read_to_string(&temp_path) {
-                    if let Ok(millideg) = raw.trim().parse::<i64>() {
-                        return Some(millideg as f32 / 1000.0);
-                    }
-                }
+        if let Ok(name) = std::fs::read_to_string(&name_path)
+            && name.trim() == "amdgpu"
+        {
+            let temp_path = format!("{base}/temp1_input");
+            if let Ok(raw) = std::fs::read_to_string(&temp_path)
+                && let Ok(millideg) = raw.trim().parse::<i64>()
+            {
+                return Some(millideg as f32 / 1000.0);
             }
         }
     }
@@ -489,7 +489,7 @@ SwapFree:        8000000 kB
                 continue;
             }
             let fields: Vec<&str> = line[colon + 1..].split_ascii_whitespace().collect();
-            let rx: u64 = fields.get(0).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let rx: u64 = fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
             let tx: u64 = fields.get(8).and_then(|v| v.parse().ok()).unwrap_or(0);
             total_rx = total_rx.saturating_add(rx);
             total_tx = total_tx.saturating_add(tx);

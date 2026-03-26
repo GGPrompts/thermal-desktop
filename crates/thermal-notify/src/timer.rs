@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 use crate::Urgency;
 
 pub struct DismissTimer {
+    #[allow(dead_code)]
     pub id: u32,
     deadline: Instant,
     fade_duration: Duration,
@@ -227,7 +228,7 @@ mod tests {
     fn alpha_is_clamped_to_zero_one_range() {
         let timer = DismissTimer::new(1, 5000).unwrap();
         let a = timer.alpha();
-        assert!(a >= 0.0 && a <= 1.0, "alpha out of range: {a}");
+        assert!((0.0..=1.0).contains(&a), "alpha out of range: {a}");
     }
 
     // ── DismissTimer::is_expired ─────────────────────────────────────────────

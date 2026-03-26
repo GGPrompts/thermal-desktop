@@ -23,6 +23,7 @@ use wayland_client::{
 
 // ── NotifySurface ─────────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub struct NotifySurface {
     pub width: u32,
     pub height: u32,
@@ -214,7 +215,7 @@ impl NotifySurface {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        wgpu_surface.configure(&*device, &surface_config);
+        wgpu_surface.configure(&device, &surface_config);
 
         Ok(Self {
             width,
@@ -235,6 +236,7 @@ impl NotifySurface {
     }
 
     /// Resize the Wayland surface and reconfigure wgpu.
+    #[allow(dead_code)]
     pub fn resize(&mut self, w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
@@ -246,7 +248,7 @@ impl NotifySurface {
         }
         self.surface_config.width = w;
         self.surface_config.height = h;
-        self.surface.configure(&*self.device, &self.surface_config);
+        self.surface.configure(&self.device, &self.surface_config);
     }
 
     /// Render a fully transparent frame to visually hide the surface.
@@ -301,14 +303,17 @@ impl NotifySurface {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn device(&self) -> &wgpu::Device {
         &self.device
     }
 
+    #[allow(dead_code)]
     pub fn queue(&self) -> &wgpu::Queue {
         &self.queue
     }
 
+    #[allow(dead_code)]
     pub fn surface_config(&self) -> &wgpu::SurfaceConfiguration {
         &self.surface_config
     }
@@ -457,10 +462,10 @@ impl SeatHandler for NotifySurfaceState {
         _seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
 
@@ -485,10 +490,10 @@ impl PointerHandler for NotifySurfaceState {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if let PointerEventKind::Press { button, .. } = event.kind {
-                if button == BTN_LEFT {
-                    self.clicked = true;
-                }
+            if let PointerEventKind::Press { button, .. } = event.kind
+                && button == BTN_LEFT
+            {
+                self.clicked = true;
             }
         }
     }

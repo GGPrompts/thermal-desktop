@@ -281,7 +281,7 @@ pub async fn run() -> anyhow::Result<()> {
         .wl_surface()
         .id()
         .as_ptr()
-        .cast::<std::ffi::c_void>() as *mut std::ffi::c_void;
+        .cast::<std::ffi::c_void>();
 
     let mut renderer =
         Renderer::new_from_wayland(display_ptr, surface_ptr, hud.width, HUD_HEIGHT).await?;

@@ -18,10 +18,10 @@ pub fn encode_key(event: &KeyEvent, modifiers: &Modifiers) -> Option<Vec<u8>> {
     // ── Ctrl+letter  ────────────────────────────────────────────────────────
     // Must be checked *before* the utf8 / printable‑text path so that
     // Ctrl+C emits 0x03 rather than the literal 'c'.
-    if modifiers.ctrl {
-        if let Some(byte) = ctrl_keysym_byte(sym) {
-            return Some(vec![byte]);
-        }
+    if modifiers.ctrl
+        && let Some(byte) = ctrl_keysym_byte(sym)
+    {
+        return Some(vec![byte]);
     }
 
     // ── Special / non‑printable keys ────────────────────────────────────────
@@ -38,24 +38,22 @@ pub fn encode_key(event: &KeyEvent, modifiers: &Modifiers) -> Option<Vec<u8>> {
     // When Alt is held (without Ctrl), prepend \x1b to the key byte.
     // This enables shell keybinds like Alt+B (word-back), Alt+F (word-forward),
     // and editor meta-key combos.
-    if modifiers.alt && !modifiers.ctrl {
-        if let Some(ref text) = event.utf8 {
-            if !text.is_empty() {
-                let mut bytes = Vec::with_capacity(1 + text.len());
-                bytes.push(0x1b);
-                bytes.extend_from_slice(text.as_bytes());
-                return Some(bytes);
-            }
-        }
+    if modifiers.alt && !modifiers.ctrl
+        && let Some(ref text) = event.utf8
+        && !text.is_empty()
+    {
+        let mut bytes = Vec::with_capacity(1 + text.len());
+        bytes.push(0x1b);
+        bytes.extend_from_slice(text.as_bytes());
+        return Some(bytes);
     }
 
     // ── Printable text (no Ctrl held) ───────────────────────────────────────
-    if !modifiers.ctrl {
-        if let Some(ref text) = event.utf8 {
-            if !text.is_empty() {
-                return Some(text.as_bytes().to_vec());
-            }
-        }
+    if !modifiers.ctrl
+        && let Some(ref text) = event.utf8
+        && !text.is_empty()
+    {
+        return Some(text.as_bytes().to_vec());
     }
 
     None

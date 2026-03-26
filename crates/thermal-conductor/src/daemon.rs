@@ -550,13 +550,13 @@ impl Daemon {
                     Some(session_arc) => {
                         let session = session_arc.lock();
                         // Apply initial size if provided and no other clients attached.
-                        if let Some((cols, rows)) = initial_size {
-                            if session.attached_count.load(Ordering::Relaxed) == 0 {
-                                session
-                                    .terminal
-                                    .resize(*cols as usize, *rows as usize, 8, 16);
-                                let _ = session.pty.resize(*cols, *rows);
-                            }
+                        if let Some((cols, rows)) = initial_size
+                            && session.attached_count.load(Ordering::Relaxed) == 0
+                        {
+                            session
+                                .terminal
+                                .resize(*cols as usize, *rows as usize, 8, 16);
+                            let _ = session.pty.resize(*cols, *rows);
                         }
                         session.attached_count.fetch_add(1, Ordering::Relaxed);
                         drop(session);
@@ -830,32 +830,32 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
         };
 
         // Handle attach specially — subscribe to the session's broadcast.
-        if let Request::Attach { ref id, .. } = request {
-            if let Some(rx) = daemon.subscribe(id) {
-                update_rx = Some(rx);
-                attached_session = Some(id.clone());
+        if let Request::Attach { ref id, .. } = request
+            && let Some(rx) = daemon.subscribe(id)
+        {
+            update_rx = Some(rx);
+            attached_session = Some(id.clone());
 
-                // Spawn a task to forward broadcasts to the client channel.
-                let client_tx_clone = client_tx.clone();
-                let mut rx = daemon.subscribe(id).unwrap();
-                tokio::spawn(async move {
-                    loop {
-                        match rx.recv().await {
-                            Ok(response) => {
-                                if client_tx_clone.send(response).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Client lagged, skipped {n} updates");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
+            // Spawn a task to forward broadcasts to the client channel.
+            let client_tx_clone = client_tx.clone();
+            let mut rx = daemon.subscribe(id).unwrap();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(response) => {
+                            if client_tx_clone.send(response).await.is_err() {
                                 break;
                             }
                         }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Client lagged, skipped {n} updates");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
                     }
-                });
-            }
+                }
+            });
         }
 
         let response = daemon.handle_request(&request);
@@ -986,22 +986,16 @@ mod tests {
     use std::path::PathBuf;
     use tokio::net::UnixListener;
 
-    /// Create a unique temp socket path for tests. Cleans up on drop via the
-    /// returned `PathBuf` (caller should `std::fs::remove_file` if desired).
-    fn test_socket_path() -> PathBuf {
-        let id: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
-        let pid = std::process::id();
-        PathBuf::from(format!("/tmp/thermal-test-{pid}-{id}.sock"))
-    }
-
     /// Spawn a daemon on a temporary socket, connect a client, spawn a session,
     /// list sessions, verify the session appears, then shut everything down.
     #[tokio::test]
     async fn daemon_spawn_and_list() {
-        let sock_path = test_socket_path();
+        // Use tempfile::tempdir() so the socket lives in a guaranteed-writable
+        // directory (works in sandboxed environments where /tmp may not be
+        // accessible). The `_dir` binding keeps the directory alive for the
+        // duration of the test.
+        let _dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let sock_path = _dir.path().join("test.sock");
 
         let listener = UnixListener::bind(&sock_path).expect("Failed to bind test socket");
 
@@ -1059,7 +1053,6 @@ mod tests {
         let _ = shutdown_tx.send(()).await;
         let _ = daemon_handle.await;
 
-        // Clean up socket file.
-        let _ = std::fs::remove_file(&sock_path);
+        // Socket file is cleaned up when `_dir` is dropped.
     }
 }

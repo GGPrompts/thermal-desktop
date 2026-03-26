@@ -183,8 +183,8 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
     if let Some(pid) = status.pid {
         // Send SIGTERM.
         match signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-            Ok(()) => return Ok(()),
-            Err(e) => return Err(format!("Failed to kill PID {}: {}", pid, e)),
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Failed to kill PID {}: {}", pid, e)),
         }
     } else {
         // No known PID — try pkill as fallback.
@@ -325,10 +325,10 @@ impl ServicesPage {
             return;
         }
         // Only refresh every 2s.
-        if let Some(last) = self.audio_state.last_fetched {
-            if last.elapsed().as_secs() < 2 {
-                return;
-            }
+        if let Some(last) = self.audio_state.last_fetched
+            && last.elapsed().as_secs() < 2
+        {
+            return;
         }
         self.send_audio_command(r#"{"action":"get_status"}"#);
     }
@@ -418,10 +418,10 @@ impl TuiPage for ServicesPage {
         self.refresh_audio_state();
 
         // Clear status message after 4 seconds.
-        if let Some((_, _, when)) = &self.status_msg {
-            if when.elapsed().as_secs() >= 4 {
-                self.status_msg = None;
-            }
+        if let Some((_, _, when)) = &self.status_msg
+            && when.elapsed().as_secs() >= 4
+        {
+            self.status_msg = None;
         }
     }
 

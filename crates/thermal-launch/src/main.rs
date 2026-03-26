@@ -372,6 +372,7 @@ impl ReticlePipeline {
 
         // 4 corners, each has 2 bars (horizontal + vertical) = 8 quads
         // Corners: TL, TR, BR, BL
+        #[allow(clippy::type_complexity)]
         let corners: [(f32, f32, f32, f32, f32, f32, f32, f32); 4] = [
             // Top-left: horiz bar going right, vert bar going down
             (x0, y0, x0 + ARM, y0 + THICK, x0, y0, x0 + THICK, y0 + ARM),
@@ -1054,15 +1055,15 @@ impl SeatHandler for LauncherSurface {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard {
-            if let Some(kb) = self.keyboard.take() {
-                kb.release();
-            }
+        if capability == Capability::Keyboard
+            && let Some(kb) = self.keyboard.take()
+        {
+            kb.release();
         }
-        if capability == Capability::Pointer {
-            if let Some(ptr) = self.pointer.take() {
-                ptr.release();
-            }
+        if capability == Capability::Pointer
+            && let Some(ptr) = self.pointer.take()
+        {
+            ptr.release();
         }
     }
 

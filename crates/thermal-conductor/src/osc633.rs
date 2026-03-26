@@ -183,10 +183,10 @@ impl Osc633Parser {
                 match byte {
                     // BEL terminates an OSC sequence.
                     0x07 => {
-                        if self.confirmed_633 {
-                            if let Some(mark) = parse_633_body(&self.buf) {
-                                marks.push(mark);
-                            }
+                        if self.confirmed_633
+                            && let Some(mark) = parse_633_body(&self.buf)
+                        {
+                            marks.push(mark);
                         }
                         self.reset();
                     }
@@ -198,10 +198,10 @@ impl Osc633Parser {
                     }
                     // `\` after ESC completes ST terminator.
                     0x5C if !self.buf.is_empty() || self.confirmed_633 => {
-                        if self.confirmed_633 {
-                            if let Some(mark) = parse_633_body(&self.buf) {
-                                marks.push(mark);
-                            }
+                        if self.confirmed_633
+                            && let Some(mark) = parse_633_body(&self.buf)
+                        {
+                            marks.push(mark);
                         }
                         self.reset();
                     }
@@ -423,6 +423,7 @@ mod tests {
 
     // ── CommandTracker integration ─────────────────────────────────────────
 
+    #[allow(dead_code)]
     fn run_sequence(seq: &[(&str, usize)]) -> Vec<CommandBlock> {
         let mut tracker = CommandTracker::new();
         let mut parser = Osc633Parser::new();
@@ -512,7 +513,7 @@ mod tests {
 
     #[test]
     fn tracker_no_marks_no_blocks() {
-        let mut tracker = CommandTracker::new();
+        let tracker = CommandTracker::new();
         assert!(tracker.blocks.is_empty());
         assert!(tracker.current_block().is_none());
     }

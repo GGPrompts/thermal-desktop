@@ -130,6 +130,93 @@ pub fn fuzzy_filter<'a>(
     results
 }
 
+/// Parse a single .desktop file. Returns `None` if required fields are missing
+/// or the entry should not be displayed.
+fn parse_desktop_file(path: &std::path::Path) -> Option<DesktopEntry> {
+    let content = fs::read_to_string(path).ok()?;
+
+    let mut in_desktop_entry = false;
+    let mut name: Option<String> = None;
+    let mut exec: Option<String> = None;
+    let mut icon: Option<String> = None;
+    let mut categories: Vec<String> = Vec::new();
+    let mut no_display = false;
+    let mut hidden = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        // Section headers
+        if line.starts_with('[') {
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+
+        if !in_desktop_entry {
+            continue;
+        }
+
+        // Skip comments and empty lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Split on first '='
+        let Some(eq_pos) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq_pos].trim();
+        let value = line[eq_pos + 1..].trim();
+
+        match key {
+            "Name" => {
+                if name.is_none() {
+                    name = Some(value.to_string());
+                }
+            }
+            "Exec" => {
+                if exec.is_none() {
+                    exec = Some(value.to_string());
+                }
+            }
+            "Icon" => {
+                if icon.is_none() {
+                    icon = Some(value.to_string());
+                }
+            }
+            "Categories" => {
+                categories = value
+                    .split(';')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+            "NoDisplay" => {
+                no_display = value.eq_ignore_ascii_case("true");
+            }
+            "Hidden" => {
+                hidden = value.eq_ignore_ascii_case("true");
+            }
+            // Localised Name variants take priority if they exist
+            k if k.starts_with("Name[") => {
+                // Only override if we haven't set a localised version yet — keep first match
+            }
+            _ => {}
+        }
+    }
+
+    if no_display || hidden {
+        return None;
+    }
+
+    Some(DesktopEntry {
+        name: name?,
+        exec: exec?,
+        icon,
+        categories,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,91 +703,4 @@ mod tests {
         let result = parse_desktop_file(std::path::Path::new("/tmp/does_not_exist_xyz.desktop"));
         assert!(result.is_none());
     }
-}
-
-/// Parse a single .desktop file. Returns `None` if required fields are missing
-/// or the entry should not be displayed.
-fn parse_desktop_file(path: &std::path::Path) -> Option<DesktopEntry> {
-    let content = fs::read_to_string(path).ok()?;
-
-    let mut in_desktop_entry = false;
-    let mut name: Option<String> = None;
-    let mut exec: Option<String> = None;
-    let mut icon: Option<String> = None;
-    let mut categories: Vec<String> = Vec::new();
-    let mut no_display = false;
-    let mut hidden = false;
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        // Section headers
-        if line.starts_with('[') {
-            in_desktop_entry = line == "[Desktop Entry]";
-            continue;
-        }
-
-        if !in_desktop_entry {
-            continue;
-        }
-
-        // Skip comments and empty lines
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // Split on first '='
-        let Some(eq_pos) = line.find('=') else {
-            continue;
-        };
-        let key = line[..eq_pos].trim();
-        let value = line[eq_pos + 1..].trim();
-
-        match key {
-            "Name" => {
-                if name.is_none() {
-                    name = Some(value.to_string());
-                }
-            }
-            "Exec" => {
-                if exec.is_none() {
-                    exec = Some(value.to_string());
-                }
-            }
-            "Icon" => {
-                if icon.is_none() {
-                    icon = Some(value.to_string());
-                }
-            }
-            "Categories" => {
-                categories = value
-                    .split(';')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-            "NoDisplay" => {
-                no_display = value.eq_ignore_ascii_case("true");
-            }
-            "Hidden" => {
-                hidden = value.eq_ignore_ascii_case("true");
-            }
-            // Localised Name variants take priority if they exist
-            k if k.starts_with("Name[") => {
-                // Only override if we haven't set a localised version yet — keep first match
-            }
-            _ => {}
-        }
-    }
-
-    if no_display || hidden {
-        return None;
-    }
-
-    Some(DesktopEntry {
-        name: name?,
-        exec: exec?,
-        icon,
-        categories,
-    })
 }

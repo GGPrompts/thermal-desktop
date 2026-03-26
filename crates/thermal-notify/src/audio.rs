@@ -12,6 +12,7 @@ use crate::urgency::Urgency;
 pub struct AudioPlayer {
     tx: Sender<Urgency>,
     /// Global volume 0-100, shared with the audio thread.
+    #[allow(dead_code)]
     volume_pct: Arc<AtomicU8>,
 }
 
@@ -48,11 +49,13 @@ impl AudioPlayer {
     }
 
     /// Set global volume (0-100).
+    #[allow(dead_code)]
     pub fn set_volume(&self, pct: u8) {
         self.volume_pct.store(pct.min(100), Ordering::Relaxed);
     }
 
     /// Get current volume (0-100).
+    #[allow(dead_code)]
     pub fn volume(&self) -> u8 {
         self.volume_pct.load(Ordering::Relaxed)
     }

@@ -113,10 +113,10 @@ impl AgentTimeline {
         }
 
         // Close the previous entry.
-        if let Some(entry) = self.entries.back_mut() {
-            if entry.end_time.is_none() {
-                entry.end_time = Some(now);
-            }
+        if let Some(entry) = self.entries.back_mut()
+            && entry.end_time.is_none()
+        {
+            entry.end_time = Some(now);
         }
 
         // Build a display name.
@@ -150,10 +150,10 @@ impl AgentTimeline {
         let now = Instant::now();
 
         // Close the previous entry.
-        if let Some(entry) = self.entries.back_mut() {
-            if entry.end_time.is_none() {
-                entry.end_time = Some(now);
-            }
+        if let Some(entry) = self.entries.back_mut()
+            && entry.end_time.is_none()
+        {
+            entry.end_time = Some(now);
         }
 
         // Start an idle entry.

@@ -768,7 +768,7 @@ impl Renderer {
 
             VoiceState::Result { summary } => {
                 // Show result summary — dim after RESULT_DIM_SECS.
-                let dimmed = result_age_secs.map_or(false, |age| age >= RESULT_DIM_SECS);
+                let dimmed = result_age_secs.is_some_and(|age| age >= RESULT_DIM_SECS);
                 let text_color = if dimmed {
                     ThermalPalette::TEXT_MUTED
                 } else {

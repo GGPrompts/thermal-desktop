@@ -1360,10 +1360,10 @@ impl SeatHandler for LockApp {
         seat: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard {
-            if let Err(e) = self.seat_state.get_keyboard(qh, &seat, None) {
-                warn!("Could not get keyboard on capability: {}", e);
-            }
+        if capability == Capability::Keyboard
+            && let Err(e) = self.seat_state.get_keyboard(qh, &seat, None)
+        {
+            warn!("Could not get keyboard on capability: {}", e);
         }
     }
 

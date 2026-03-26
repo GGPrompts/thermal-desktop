@@ -4,6 +4,7 @@
 //! via glyphon, mapping ANSI colors to ThermalPalette where they match and
 //! passing truecolor through directly. Renders the cursor as a distinct
 //! visual element (inverted block).
+#![allow(clippy::too_many_arguments)]
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -1047,7 +1048,7 @@ impl GridRenderer {
     /// pattern as the atlas trim in `render_from_cache`. Call once per frame after
     /// rendering; the interval check ensures actual work only runs every ~1000 frames.
     pub fn periodic_image_cleanup(&mut self, image_store: &mut ImageStore, max_visible_row: usize) {
-        if self.frame_count % IMAGE_CLEANUP_INTERVAL == 0 {
+        if self.frame_count.is_multiple_of(IMAGE_CLEANUP_INTERVAL) {
             self.cleanup_image_cache(image_store);
             image_store.cleanup_scrolled(max_visible_row);
         }
@@ -2306,20 +2307,18 @@ impl GridRenderer {
         // ── Collect background rects from all cached rows ───────────────
         let mut bg_rects: Vec<([f32; 4], [f32; 4])> = Vec::new();
 
-        for cached in &self.row_cache {
-            if let Some(row) = cached {
-                for cell in &row.cells {
-                    let bg_color = cell_bg_color(cell);
-                    if let Some(bg) = bg_color {
-                        let x = self.padding_x + cell.col as f32 * self.cell_width;
-                        let y = self.padding_y + cell.row as f32 * self.cell_height;
-                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                            self.cell_width * 2.0
-                        } else {
-                            self.cell_width
-                        };
-                        bg_rects.push(([x, y, w, self.cell_height], bg));
-                    }
+        for row in self.row_cache.iter().flatten() {
+            for cell in &row.cells {
+                let bg_color = cell_bg_color(cell);
+                if let Some(bg) = bg_color {
+                    let x = self.padding_x + cell.col as f32 * self.cell_width;
+                    let y = self.padding_y + cell.row as f32 * self.cell_height;
+                    let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                        self.cell_width * 2.0
+                    } else {
+                        self.cell_width
+                    };
+                    bg_rects.push(([x, y, w, self.cell_height], bg));
                 }
             }
         }
@@ -2371,21 +2370,19 @@ impl GridRenderer {
             let sel_color = PaletteColor::ACCENT_COOL.to_f32_array();
             let sel_highlight = [sel_color[0], sel_color[1], sel_color[2], 0.35];
 
-            for cached in &self.row_cache {
-                if let Some(row) = cached {
-                    for cell in &row.cells {
-                        let grid_line = Line(cell.row as i32 - display_offset as i32);
-                        let point = Point::new(grid_line, Column(cell.col));
-                        if sel.contains(point) {
-                            let x = self.padding_x + cell.col as f32 * self.cell_width;
-                            let y = self.padding_y + cell.row as f32 * self.cell_height;
-                            let w = if cell.flags.contains(Flags::WIDE_CHAR) {
-                                self.cell_width * 2.0
-                            } else {
-                                self.cell_width
-                            };
-                            bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
-                        }
+            for row in self.row_cache.iter().flatten() {
+                for cell in &row.cells {
+                    let grid_line = Line(cell.row as i32 - display_offset as i32);
+                    let point = Point::new(grid_line, Column(cell.col));
+                    if sel.contains(point) {
+                        let x = self.padding_x + cell.col as f32 * self.cell_width;
+                        let y = self.padding_y + cell.row as f32 * self.cell_height;
+                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                            self.cell_width * 2.0
+                        } else {
+                            self.cell_width
+                        };
+                        bg_rects.push(([x, y, w, self.cell_height], sel_highlight));
                     }
                 }
             }
@@ -2584,8 +2581,8 @@ impl GridRenderer {
             .collect();
 
         let has_text = !text_areas.is_empty();
-        if has_text {
-            if let Err(e) = self.text_renderer.prepare(
+        if has_text
+            && let Err(e) = self.text_renderer.prepare(
                 device,
                 queue,
                 &mut self.font_system,
@@ -2593,9 +2590,9 @@ impl GridRenderer {
                 &self.viewport,
                 text_areas,
                 &mut self.swash_cache,
-            ) {
-                tracing::warn!("glyphon prepare failed: {}", e);
-            }
+            )
+        {
+            tracing::warn!("glyphon prepare failed: {}", e);
         }
 
         // ── Render pass: backgrounds + cursor rects ──────────────────────
@@ -2649,7 +2646,7 @@ impl GridRenderer {
 
         // Trim atlas periodically to free unused glyphs (not every frame).
         self.frame_count += 1;
-        if self.frame_count % ATLAS_TRIM_INTERVAL == 0 {
+        if self.frame_count.is_multiple_of(ATLAS_TRIM_INTERVAL) {
             self.atlas.trim();
             self.overlay_atlas.trim();
         }
@@ -2676,7 +2673,7 @@ impl GridRenderer {
         }
 
         // Log rolling average every 100 frames.
-        if self.frame_count % 100 == 0 {
+        if self.frame_count.is_multiple_of(100) {
             let n = self.frame_times_us.len() as u64;
             let avg_us = self.frame_time_sum / n;
             debug!(

@@ -191,7 +191,7 @@ fn read_inject_file(path: &Path, our_session_id: &str) -> InjectFileResult {
 
 /// Check if a path looks like an inject file (`.txt` extension).
 fn is_inject_file(path: &Path) -> bool {
-    path.extension().map_or(false, |ext| ext == "txt")
+    path.extension().is_some_and(|ext| ext == "txt")
 }
 
 /// Remove inject files older than 30 seconds.
@@ -208,13 +208,12 @@ fn cleanup_stale_files(dir: &Path) {
         if !is_inject_file(&path) {
             continue;
         }
-        if let Ok(meta) = path.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified < cutoff {
-                    tracing::debug!(path = %path.display(), "Removing stale inject file");
-                    let _ = std::fs::remove_file(&path);
-                }
-            }
+        if let Ok(meta) = path.metadata()
+            && let Ok(modified) = meta.modified()
+            && modified < cutoff
+        {
+            tracing::debug!(path = %path.display(), "Removing stale inject file");
+            let _ = std::fs::remove_file(&path);
         }
     }
 }

@@ -149,28 +149,28 @@ impl SpawnPage {
         self.default_cwd = default_cwd;
         self.profiles = profiles;
         // Clamp selection
-        if let Some(i) = self.list_state.selected() {
-            if i >= self.profiles.len() {
-                self.list_state.select(if self.profiles.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                });
-            }
+        if let Some(i) = self.list_state.selected()
+            && i >= self.profiles.len()
+        {
+            self.list_state.select(if self.profiles.is_empty() {
+                None
+            } else {
+                Some(0)
+            });
         }
         self.apply_selected_profile();
     }
 
     /// Fill editable fields from the selected profile.
     fn apply_selected_profile(&mut self) {
-        if let Some(i) = self.list_state.selected() {
-            if let Some(p) = self.profiles.get(i) {
-                self.cwd_input = p.cwd.as_deref().map(expand_tilde).unwrap_or_default();
-                self.command_input = p.command.clone().unwrap_or_default();
-                self.count_input = p.count.to_string();
-                self.worktree_enabled = p.git_worktree;
-                self.status_msg = None;
-            }
+        if let Some(i) = self.list_state.selected()
+            && let Some(p) = self.profiles.get(i)
+        {
+            self.cwd_input = p.cwd.as_deref().map(expand_tilde).unwrap_or_default();
+            self.command_input = p.command.clone().unwrap_or_default();
+            self.count_input = p.count.to_string();
+            self.worktree_enabled = p.git_worktree;
+            self.status_msg = None;
         }
     }
 
@@ -192,7 +192,7 @@ impl SpawnPage {
         }
 
         let count: u32 = match self.count_input.parse() {
-            Ok(n) if n >= 1 && n <= 16 => n,
+            Ok(n) if (1..=16).contains(&n) => n,
             _ => {
                 self.status_msg = Some(("Count must be 1-16".into(), true));
                 return;
@@ -247,7 +247,7 @@ impl SpawnPage {
                 .enable_all()
                 .build();
             if let Ok(rt) = rt {
-                let _ = rt.block_on(async {
+                rt.block_on(async {
                     let backend = match crate::backend::detect_backend(backend_pref).await {
                         Ok(b) => b,
                         Err(_) => return,

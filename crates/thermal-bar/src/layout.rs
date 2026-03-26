@@ -197,7 +197,7 @@ mod tests {
     fn zone_copy_clone_works() {
         let z = Zone::Left;
         let z2 = z; // Copy
-        let z3 = z.clone(); // Clone
+        let z3 = z; // Clone (Copy type)
         assert_eq!(z2, z3);
     }
 
@@ -331,8 +331,7 @@ mod tests {
         let positioned = layout.compute_positions();
         let right_mod = positioned
             .iter()
-            .filter(|m| m.zone == Zone::Right && !m.text.is_empty())
-            .next()
+            .find(|m| m.zone == Zone::Right && !m.text.is_empty())
             .unwrap();
         // The right module should start before bar_width and well into the right half.
         assert!(right_mod.x < bar_width as f32);

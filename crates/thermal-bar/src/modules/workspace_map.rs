@@ -128,9 +128,9 @@ impl WorkspaceMapModule {
 
                 let is_active = ws.id == active_id;
                 let color = if is_active {
-                    ThermalPalette::ACCENT_HOT
+                    ThermalPalette::WARM
                 } else {
-                    ThermalPalette::COOL
+                    ThermalPalette::ACCENT_HOT
                 };
 
                 let mut output = ModuleOutput::new(Zone::Center, text, color);
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn default_produces_same_as_new() {
         let a = WorkspaceMapModule::new().render();
-        let b = WorkspaceMapModule::default().render();
+        let b = WorkspaceMapModule.render();
         assert_eq!(a.len(), b.len());
         for (ma, mb) in a.iter().zip(b.iter()) {
             assert_eq!(ma.text, mb.text);

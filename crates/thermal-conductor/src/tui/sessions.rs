@@ -225,10 +225,10 @@ fn format_activity(s: &ClaudeSessionState) -> String {
         format!("{} {}: {}", emoji, label, detail)
     };
 
-    if let Some(n) = s.subagent_count {
-        if n > 0 {
-            result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
-        }
+    if let Some(n) = s.subagent_count
+        && n > 0
+    {
+        result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
     }
 
     result
@@ -471,10 +471,10 @@ impl SessionsPage {
     fn clamp_selection(&mut self) {
         if self.display_rows.is_empty() {
             self.table_state.select(None);
-        } else if let Some(i) = self.table_state.selected() {
-            if i >= self.display_rows.len() {
-                self.table_state.select(Some(self.display_rows.len() - 1));
-            }
+        } else if let Some(i) = self.table_state.selected()
+            && i >= self.display_rows.len()
+        {
+            self.table_state.select(Some(self.display_rows.len() - 1));
         }
     }
 
@@ -505,43 +505,61 @@ impl SessionsPage {
     }
 
     pub fn attach_selected(&self) {
-        if let Some(i) = self.table_state.selected() {
-            if let Some(row) = self.display_rows.get(i) {
-                let target = if let Some(ref parent) = row.session.parent_session_id {
-                    parent.as_str()
-                } else {
-                    &row.session.session_id
-                };
-                let _ = Command::new("kitty")
-                    .args([
-                        "@",
-                        "focus-window",
-                        "--match",
-                        &format!("pid:{}", row.session.pid.unwrap_or(0)),
-                    ])
-                    .status()
-                    .or_else(|_| {
-                        Command::new("tmux")
-                            .args(["switch-client", "-t", target])
-                            .status()
-                    });
+        if let Some(i) = self.table_state.selected()
+            && let Some(row) = self.display_rows.get(i)
+        {
+            // Resolve workspace ID for the selected session.
+            let ws_id = row
+                .session
+                .workspace
+                .or_else(|| {
+                    row.session
+                        .working_dir
+                        .as_deref()
+                        .and_then(|wd| self.workspace_map.get(wd).copied())
+                });
+
+            // Switch to the correct Hyprland workspace first.
+            if let Some(ws) = ws_id {
+                let _ = Command::new("hyprctl")
+                    .args(["dispatch", "workspace", &ws.to_string()])
+                    .status();
             }
+
+            let target = if let Some(ref parent) = row.session.parent_session_id {
+                parent.as_str()
+            } else {
+                &row.session.session_id
+            };
+            let _ = Command::new("kitty")
+                .args([
+                    "@",
+                    "focus-window",
+                    "--match",
+                    &format!("pid:{}", row.session.pid.unwrap_or(0)),
+                ])
+                .status()
+                .or_else(|_| {
+                    Command::new("tmux")
+                        .args(["switch-client", "-t", target])
+                        .status()
+                });
         }
     }
 
     pub fn toggle_history(&mut self) {
         if self.history_popup.is_some() {
             self.history_popup = None;
-        } else if let Some(i) = self.table_state.selected() {
-            if let Some(row) = self.display_rows.get(i) {
-                let target = row
-                    .session
-                    .parent_session_id
-                    .as_ref()
-                    .unwrap_or(&row.session.session_id)
-                    .clone();
-                self.history_popup = Some(target);
-            }
+        } else if let Some(i) = self.table_state.selected()
+            && let Some(row) = self.display_rows.get(i)
+        {
+            let target = row
+                .session
+                .parent_session_id
+                .as_ref()
+                .unwrap_or(&row.session.session_id)
+                .clone();
+            self.history_popup = Some(target);
         }
     }
 
@@ -632,15 +650,12 @@ impl TuiPage for SessionsPage {
             if let Ok(output) = Command::new("pgrep").arg("-x").arg("claude").output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
-                    if let Ok(pid) = line.trim().parse::<u32>() {
-                        // Read this process's cwd from /proc.
-                        if let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) {
-                            if let Some(cwd_str) = cwd.to_str() {
-                                if let Some(ws) = find_workspace_for_pid(pid, &window_pids) {
-                                    self.workspace_map.insert(cwd_str.to_string(), ws);
-                                }
-                            }
-                        }
+                    if let Ok(pid) = line.trim().parse::<u32>()
+                        && let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd"))
+                        && let Some(cwd_str) = cwd.to_str()
+                        && let Some(ws) = find_workspace_for_pid(pid, &window_pids)
+                    {
+                        self.workspace_map.insert(cwd_str.to_string(), ws);
                     }
                 }
             }
@@ -728,7 +743,7 @@ impl TuiPage for SessionsPage {
                 let updated = s
                     .last_updated
                     .as_deref()
-                    .map(|ts| relative_time(ts))
+                    .map(relative_time)
                     .unwrap_or_else(|| "-".into());
 
                 if row.is_subagent {
@@ -926,6 +941,70 @@ impl TuiPage for SessionsPage {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+impl SessionsPage {
+    fn render_history_popup(&self, f: &mut Frame, session_id: &str) {
+        let area = f.area();
+        let popup_w = (area.width as u32 * 60 / 100).min(72) as u16;
+        let popup_h = 16u16.min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(popup_w)) / 2;
+        let y = (area.height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(x, y, popup_w, popup_h);
+
+        f.render_widget(Clear, popup_area);
+
+        let short_id = if session_id.len() > 16 {
+            &session_id[..16]
+        } else {
+            session_id
+        };
+        let title = format!(" History: {} ", short_id);
+
+        let now = Instant::now();
+        let lines: Vec<Line> = self
+            .history
+            .get(session_id)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .rev()
+                    .map(|e| {
+                        let ago = now.duration_since(e.timestamp).as_secs();
+                        let rel = if ago < 60 {
+                            format!("{}s ago", ago)
+                        } else if ago < 3600 {
+                            format!("{}m ago", ago / 60)
+                        } else {
+                            format!("{}h ago", ago / 3600)
+                        };
+                        Line::from(vec![
+                            Span::styled(format!("{:>7}  ", rel), Style::default().fg(TEXT_MUTED)),
+                            Span::styled(&e.text, Style::default().fg(TEXT_BRIGHT)),
+                        ])
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let content = if lines.is_empty() {
+            Paragraph::new("  No history yet.").style(Style::default().fg(TEXT_MUTED).bg(BG))
+        } else {
+            Paragraph::new(lines)
+                .style(Style::default().bg(BG))
+                .wrap(Wrap { trim: true })
+        };
+
+        let popup = content.block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(ACCENT_COLD))
+                .style(Style::default().bg(BG)),
+        );
+
+        f.render_widget(popup, popup_area);
     }
 }
 
@@ -1625,69 +1704,5 @@ mod tests {
         assert_ne!(idle, processing);
         assert_ne!(processing, tool_use);
         assert_ne!(tool_use, awaiting);
-    }
-}
-
-impl SessionsPage {
-    fn render_history_popup(&self, f: &mut Frame, session_id: &str) {
-        let area = f.area();
-        let popup_w = (area.width as u32 * 60 / 100).min(72) as u16;
-        let popup_h = 16u16.min(area.height.saturating_sub(4));
-        let x = (area.width.saturating_sub(popup_w)) / 2;
-        let y = (area.height.saturating_sub(popup_h)) / 2;
-        let popup_area = Rect::new(x, y, popup_w, popup_h);
-
-        f.render_widget(Clear, popup_area);
-
-        let short_id = if session_id.len() > 16 {
-            &session_id[..16]
-        } else {
-            session_id
-        };
-        let title = format!(" History: {} ", short_id);
-
-        let now = Instant::now();
-        let lines: Vec<Line> = self
-            .history
-            .get(session_id)
-            .map(|entries| {
-                entries
-                    .iter()
-                    .rev()
-                    .map(|e| {
-                        let ago = now.duration_since(e.timestamp).as_secs();
-                        let rel = if ago < 60 {
-                            format!("{}s ago", ago)
-                        } else if ago < 3600 {
-                            format!("{}m ago", ago / 60)
-                        } else {
-                            format!("{}h ago", ago / 3600)
-                        };
-                        Line::from(vec![
-                            Span::styled(format!("{:>7}  ", rel), Style::default().fg(TEXT_MUTED)),
-                            Span::styled(&e.text, Style::default().fg(TEXT_BRIGHT)),
-                        ])
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let content = if lines.is_empty() {
-            Paragraph::new("  No history yet.").style(Style::default().fg(TEXT_MUTED).bg(BG))
-        } else {
-            Paragraph::new(lines)
-                .style(Style::default().bg(BG))
-                .wrap(Wrap { trim: true })
-        };
-
-        let popup = content.block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(ACCENT_COLD))
-                .style(Style::default().bg(BG)),
-        );
-
-        f.render_widget(popup, popup_area);
     }
 }

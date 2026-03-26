@@ -31,18 +31,13 @@ const MIC_PROCESSING: &str = "\u{1F525}"; // fire (processing)
 // ---------------------------------------------------------------------------
 
 /// Mic state as written by the voice input daemon.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceState {
+    #[default]
     Muted,
     Listening,
     Processing,
-}
-
-impl Default for VoiceState {
-    fn default() -> Self {
-        Self::Muted
-    }
 }
 
 /// JSON schema for `/tmp/thermal-voice-state.json`.
@@ -297,7 +292,7 @@ mod tests {
             let f = VoiceStateFile { state, label: None };
             let m = render_from_state(f);
             for &ch in &m.color {
-                assert!(ch >= 0.0 && ch <= 1.0, "color channel out of range: {ch}");
+                assert!((0.0..=1.0).contains(&ch), "color channel out of range: {ch}");
             }
         }
     }

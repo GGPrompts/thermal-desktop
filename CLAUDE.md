@@ -14,13 +14,13 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **D-Bus**: zbus 5 (async, tokio, 100% Rust)
 - **File watching**: notify 7
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio)
-- **State exchange**: `/tmp/claude-code-state/*.json` files read by multiple components
-- **Voice pipeline**: cpal + faster-whisper (STT) → Anthropic Haiku API (intent) → tool execution
+- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components
+- **Voice pipeline**: cpal + faster-whisper (STT) → `claude -p` (dispatch) → tool execution
 
 ### Current Architecture (thermal-conductor)
 thermal-conductor has two primary modes and one optional backend:
 
-1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 4 tabs — Sessions (Claude session monitor), Spawn (profile-based session launcher), Profiles (profile editor), Services (daemon management).
+1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 3 tabs — Sessions (multi-agent session monitor for Claude/Codex/Copilot), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management).
 2. **GPU terminal** (`thermal-conductor window`): Standalone wgpu-rendered terminal with alacritty_terminal backend and agent overlay HUD (badge + timeline bar).
 3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Not required when kitty is available.
 
@@ -47,28 +47,29 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 
 | Crate | Status | Description |
 |-------|--------|-------------|
-| **thermal-core** | Production | Shared palette, GPU context factory, ClaudeStatePoller, text rendering, PTY session mgmt |
-| **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Spawn/Profiles/Services) + GPU terminal window. Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
-| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + Claude sessions) |
+| **thermal-core** | Production | Shared palette, GPU context factory, multi-agent StatePoller (Claude/Codex/Copilot), text rendering, PTY session mgmt |
+| **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size (used by thermal-conductor and thermobile) |
+| **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Profiles/Services) + GPU terminal window + agent communication graph (F3). Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
+| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions) |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
 | **thermal-launch** | Prototype | GPU fuzzy-search app launcher overlay |
 | **thermal-notify** | Production | GPU notification daemon implementing org.freedesktop.Notifications via D-Bus |
 | **thermal-audio** | Production | TTS daemon — 12-voice pool, per-agent voices, state transition alerts (edge-tts + Unix socket API) |
-| **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all Claude sessions with color-coded status |
-| **thermal-voice** | Production | Push-to-talk voice input daemon — cpal audio capture, local Whisper STT, Unix socket API |
-| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, calls Haiku API with tool-use, trust-tier gated execution |
+| **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all agent sessions (Claude/Codex/Copilot) with color-coded status |
+| **thermal-voice** | Production | Push-to-talk voice input daemon — cpal audio capture, local Whisper STT, wtype transcript-at-cursor, Unix socket API |
+| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via `claude -p`, trust-tier gated execution |
 | **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — screenshots, click, type, window mgmt (JSON-RPC 2.0 over stdio) |
 | **thermal-hud** | Functional | Layer-shell HUD overlay — Claude session tabs, voice assistant state display |
 | **thermal-screensaver** | Functional | Idle-triggered thermal fluid simulation overlay — reaction-diffusion WGSL shader, ext-idle-notify-v1 |
 | **thermal-wallpaper** | Functional | Animated WGSL thermal shader wallpaper — simplex-noise heat field modulated by real-time system metrics |
 
 ### Key Shared Infrastructure
-- **ClaudeStatePoller** (`thermal-core/src/claude_state.rs`): File-watches `/tmp/claude-code-state/` for Claude session JSON files. Used by thermal-conductor, thermal-bar, thermal-monitor, thermal-audio.
+- **ClaudeStatePoller** (`thermal-core/src/claude_state.rs`): File-watches `/tmp/claude-code-state/`, `/tmp/codex-state/`, and `/tmp/copilot-state/` for agent session JSON files. Infers `agent_type` from directory name. Used by thermal-conductor, thermal-bar, thermal-monitor, thermal-audio.
 - **ThermalPalette** (`thermal-core/src/palette.rs`): 18 thermal color constants with gradient interpolation. Used everywhere.
 - **WgpuContext** (`thermal-core/src/wgpu_ctx.rs`): Shared GPU device/queue factory (queries surface capabilities for format selection).
 - **ThermalTextRenderer** (`thermal-core/src/text.rs`): glyphon wrapper with cached font system.
 - **Pidfile guards**: Daemons (thermal-voice, thermal-dispatcher) use pidfiles in `/run/user/$UID/thermal/` for single-instance enforcement.
-- **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Spawn and Profiles tabs.
+- **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes).
 - **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution.
 
 ## Color Palette

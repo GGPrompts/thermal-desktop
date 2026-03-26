@@ -22,7 +22,7 @@ These launch automatically at login via Hyprland `exec-once`:
 
 | Component | What It Does |
 |-----------|-------------|
-| **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), hotkey cheat sheet (center), Claude sessions + clock (right) |
+| **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), workspace map (center), agent sessions + clock (right) |
 | **thermal-audio** | TTS daemon — announces Claude session state changes (idle, tool use, awaiting input, context warnings) |
 | **codex-state-adapter** | Codex session tracker — mirrors `~/.codex/sessions` into `/tmp/codex-state/` for bar/TUI/audio |
 | **thc daemon** | Optional session daemon — PTY backend fallback when kitty is unavailable |
@@ -31,8 +31,8 @@ These launch automatically at login via Hyprland `exec-once`:
 | Component | How to Launch | What It Does |
 |-----------|--------------|-------------|
 | **thermal-launch** | Super+D | Fuzzy app launcher overlay with thermal components at the top |
-| **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all Claude sessions with subagent nesting, context %, tools |
-| **thermal-conductor** | `thc` or Super+T | Tabbed ratatui TUI dashboard — Sessions (with timeline bars), Spawn, Profiles, Services (with audio mute/volume) |
+| **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all agent sessions (Claude/Codex/Copilot) with subagent nesting, context %, tools |
+| **thermal-conductor** | `thc` or Super+T | Tabbed ratatui TUI dashboard — Sessions (with timeline bars), Profiles (Launch/Edit sub-modes), Services (with audio mute/volume) |
 | **thermal-conductor** | `thermal-conductor window` | GPU-rendered terminal with agent overlays (HUD badge, timeline bar) |
 | **thermal-hud** | `thermal-hud` | Layer-shell overlay showing Claude session tabs or voice assistant state |
 | **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
@@ -43,7 +43,7 @@ These launch automatically at login via Hyprland `exec-once`:
 ### CLI Tools
 ```bash
 # Interactive TUI dashboard (default when no subcommand given)
-thc                            # Launch tabbed TUI (Sessions/Spawn/Profiles/Services)
+thc                            # Launch tabbed TUI (Sessions/Profiles/Services)
 thc tui                        # Same, explicit subcommand
 thc --backend=kitty            # Force kitty backend
 thc --backend=daemon           # Force daemon backend
@@ -66,13 +66,13 @@ thermal-commander              # 20 tools: screenshots, window mgmt, app launch,
 ```
 
 ### Voice Assistant Pipeline
-Push-to-talk voice input with local Whisper transcription:
+Push-to-talk voice input with local Whisper transcription and AI dispatch:
 
 ```
-Super+\ → thermal-voice (cpal mic capture → Whisper STT) → transcript to clipboard + notification
+Super+\ → thermal-voice (cpal mic capture → Whisper STT) → claude -p (dispatch) → tool execution
 ```
 
-Planned: pipe transcript to `claude -p` for AI-powered voice commands (replacing the custom Haiku API dispatcher).
+Also supports typing transcripts at cursor via `wtype` and code word commands.
 
 ```bash
 # Start voice daemon
@@ -82,7 +82,7 @@ thermal-voice &                  # Listens on voice.sock
 ```
 
 ### Spawn Profiles
-The TUI Spawn page loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`):
+The TUI Profiles tab (Launch sub-mode) loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`):
 
 ```toml
 [[profile]]
@@ -114,7 +114,7 @@ Key ones:
 - **Super+Q** — Close window
 - **Super+\\** — Push-to-talk voice input
 - **Super+B** — btop system monitor
-- **Super+T** — TUI Hub (thc — sessions, spawn, services)
+- **Super+T** — TUI Hub (thc — sessions, profiles, services)
 - **Super+N** — Notification center
 - **Print** — Screenshot region select
 
@@ -182,9 +182,15 @@ pkill -9 -x thermal-hud
 ```
 thermal-core (shared library)
   ├── ThermalPalette (18 colors)
-  ├── ClaudeStatePoller (/tmp/claude-code-state/)
+  ├── ClaudeStatePoller (/tmp/claude-code-state/, /tmp/codex-state/, /tmp/copilot-state/)
   ├── WgpuContext (GPU device factory)
   └── ThermalTextRenderer (glyphon + fonts)
+
+thermal-terminal (shared library)
+  ├── OSC 633 shell-integration parser
+  ├── Input encoding (KeyCode → PTY bytes)
+  ├── PtySession (fork/exec + reader thread)
+  └── TerminalSize (alacritty_terminal Dimensions)
 
 thermal-bar ──────────── layer-shell top bar, 1Hz metrics
 thermal-launch ───────── layer-shell overlay launcher
@@ -196,7 +202,7 @@ thermal-voice ────────── push-to-talk STT daemon (cpal + Whi
 thermal-monitor ──────── standalone ratatui TUI dashboard
 thermal-conductor ────── tabbed TUI hub (kitty backend + daemon fallback) + GPU terminal
 thermal-commander ────── MCP server (20 desktop control tools)
-thermal-dispatcher ───── voice command router (planned: replace with claude -p)
+thermal-dispatcher ───── voice command router (dispatches via claude -p)
 thermal-screensaver ──── idle-triggered thermal fluid simulation overlay
 thermal-wallpaper ────── animated WGSL thermal shader wallpaper daemon
 ```
@@ -227,6 +233,8 @@ python3 scripts/generate-theme.py --check  # Verify in sync
 | What | Where |
 |------|-------|
 | Claude session state | `/tmp/claude-code-state/*.json` |
+| Codex session state | `/tmp/codex-state/*.json` |
+| Copilot session state | `/tmp/copilot-state/*.json` |
 | Subagent state | `/tmp/claude-code-state/{session}.agent.{agent_id}.json` |
 | Voice state | `/tmp/thermal-voice-state.json` |
 | HUD state | `/tmp/thermal-hud-state.json` |

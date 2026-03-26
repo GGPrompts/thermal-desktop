@@ -58,7 +58,7 @@
 ## thc TUI (all tabs)
 | Key | Action |
 |-----|--------|
-| 1-4 | Switch tab (Sessions/Spawn/Profiles/Services) |
+| 1-3 | Switch tab (Sessions/Profiles/Services) |
 | Tab | Next tab |
 | Shift+Tab | Previous tab |
 | q / Ctrl+C | Quit |

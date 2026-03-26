@@ -7,9 +7,7 @@
 pub mod profiles;
 pub mod services;
 pub mod sessions;
-pub mod spawn;
 
-use std::any::Any;
 use std::io;
 use std::time::Duration;
 
@@ -35,7 +33,6 @@ use thermal_core::ClaudeStatePoller;
 use self::profiles::ProfilesPage;
 use self::services::ServicesPage;
 use self::sessions::SessionsPage;
-use self::spawn::SpawnPage;
 use crate::backend::BackendPreference;
 
 // ---------------------------------------------------------------------------
@@ -74,7 +71,7 @@ const ACCENT_COLD: Color = palette::ACCENT_COLD;
 // ---------------------------------------------------------------------------
 
 /// Trait for a TUI page/tab. Each page manages its own state and rendering.
-pub trait TuiPage: Any {
+pub trait TuiPage {
     /// Tab title shown in the tab bar.
     fn title(&self) -> &str;
 
@@ -98,9 +95,6 @@ pub trait TuiPage: Any {
     fn has_text_focus(&self) -> bool {
         false
     }
-
-    /// Downcast helper for cross-page communication.
-    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,8 +114,7 @@ impl App {
 
         let pages: Vec<Box<dyn TuiPage>> = vec![
             Box::new(SessionsPage::new()),
-            Box::new(SpawnPage::new(backend_pref)),
-            Box::new(ProfilesPage::new()),
+            Box::new(ProfilesPage::new(backend_pref)),
             Box::new(ServicesPage::new()),
         ];
 
@@ -152,29 +145,6 @@ impl App {
     }
 
     fn tick(&mut self) {
-        // Check if the profiles page signaled a change.
-        // If so, tell the spawn page to reload on its next tick.
-        let profiles_changed = self
-            .pages
-            .get_mut(2)
-            .and_then(|p| p.as_any_mut().downcast_mut::<ProfilesPage>())
-            .map(|pp| {
-                let changed = pp.profiles_changed;
-                pp.profiles_changed = false;
-                changed
-            })
-            .unwrap_or(false);
-
-        if profiles_changed
-            && let Some(spawn) = self
-                .pages
-                .get_mut(1)
-                .and_then(|p| p.as_any_mut().downcast_mut::<SpawnPage>())
-        {
-            spawn.needs_reload = true;
-        }
-
-        // Tick all pages so background state stays current.
         for page in &mut self.pages {
             page.tick(&mut self.poller);
         }
@@ -280,9 +250,6 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                         KeyCode::Char('3') if !is_text_input_page(&app) => {
                             app.set_tab(2);
                         }
-                        KeyCode::Char('4') if !is_text_input_page(&app) => {
-                            app.set_tab(3);
-                        }
                         // Ctrl+C always quits
                         KeyCode::Char('c')
                             if key
@@ -338,7 +305,7 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && mouse.row < 3
                     {
-                        // Tab titles are: "1:Sessions", "2:Spawn", "3:Profiles", "4:Services"
+                        // Tab titles are: "1:Sessions", "2:Profiles", "3:Services"
                         // separated by " | " (3 chars). The Tabs widget has a Block with
                         // Borders::BOTTOM, adding 1 row of border at bottom but the text
                         // is on row 0 (inside the block). The block also has padding from

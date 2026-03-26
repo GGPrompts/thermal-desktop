@@ -3,7 +3,6 @@
 //! Shows thermal daemons (audio, bar, hud, notify, voice) with live status,
 //! start/stop toggling, and restart support.
 
-use std::any::Any;
 use std::fs;
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -706,9 +705,6 @@ impl TuiPage for ServicesPage {
         }
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

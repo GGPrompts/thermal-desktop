@@ -35,25 +35,34 @@ use crate::kitty_graphics::{ImageStore, KittyGraphicsParser};
 use crate::osc633::{CommandTracker, Osc633Parser};
 
 // Re-use shared terminal size and default constants from thermal-terminal.
-pub use thermal_terminal::terminal::TerminalSize;
+use thermal_terminal::terminal::TerminalSize;
 use thermal_terminal::terminal::{DEFAULT_COLS, DEFAULT_ROWS};
 
-// ── Dimensions impl for TerminalSize ─────────────────────────────────────────
+// ── Newtype wrapper for Dimensions impl ─────────────────────────────────────
 //
-// alacritty_terminal::grid::Dimensions is implemented here because
-// thermal-terminal intentionally does not depend on alacritty_terminal.
+// alacritty_terminal::grid::Dimensions cannot be implemented directly on
+// TerminalSize here because neither type is local (orphan rule E0117).
+// A newtype wrapper keeps the impl local to thermal-conductor.
 
-impl Dimensions for TerminalSize {
+pub struct ConductorTerminalSize(pub TerminalSize);
+
+impl ConductorTerminalSize {
+    pub fn new(columns: usize, screen_lines: usize) -> Self {
+        Self(TerminalSize::new(columns, screen_lines))
+    }
+}
+
+impl Dimensions for ConductorTerminalSize {
     fn total_lines(&self) -> usize {
-        self.screen_lines
+        self.0.screen_lines
     }
 
     fn screen_lines(&self) -> usize {
-        self.screen_lines
+        self.0.screen_lines
     }
 
     fn columns(&self) -> usize {
-        self.columns
+        self.0.columns
     }
 }
 
@@ -125,7 +134,7 @@ impl Terminal {
         let listener = ThermalEventListener::new(event_tx);
 
         let config = TermConfig::default();
-        let size = TerminalSize::new(cols, rows);
+        let size = ConductorTerminalSize::new(cols, rows);
         let term = Term::new(config, &size, listener);
 
         Terminal {
@@ -160,7 +169,7 @@ impl Terminal {
     /// `WindowSize` struct suitable for sending to the PTY via
     /// `PtySession::resize`.
     pub fn resize(&self, cols: usize, rows: usize, cell_width: u16, cell_height: u16) {
-        let size = TerminalSize::new(cols, rows);
+        let size = ConductorTerminalSize::new(cols, rows);
         let mut term = self.term.lock();
         term.resize(size);
         debug!(cols, rows, "Terminal grid resized");

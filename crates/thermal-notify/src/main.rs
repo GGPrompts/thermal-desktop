@@ -12,6 +12,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use clap::Parser;
+
 use audio::AudioPlayer;
 use dbus::{NotificationQueue, NotificationServer};
 use renderer::NotificationRenderer;
@@ -22,6 +24,14 @@ use surface::NotifySurface;
 const NOTIF_WIDTH: u32 = 380;
 const NOTIF_HEIGHT: u32 = 100;
 
+#[derive(Parser)]
+#[command(about = "Thermal notification daemon")]
+struct Cli {
+    /// Notification sound volume (0-100)
+    #[arg(long, default_value = "100")]
+    volume: u8,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -31,10 +41,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    tracing::info!("thermal-notify v{} starting", env!("CARGO_PKG_VERSION"));
+    let cli = Cli::parse();
+
+    tracing::info!("thermal-notify v{} starting (volume={})", env!("CARGO_PKG_VERSION"), cli.volume);
 
     // Try to initialise audio; failure is non-fatal
-    let audio: Option<Arc<AudioPlayer>> = match AudioPlayer::new() {
+    let audio: Option<Arc<AudioPlayer>> = match AudioPlayer::new(cli.volume) {
         Ok(a) => {
             tracing::info!("Audio player initialised");
             Some(Arc::new(a))

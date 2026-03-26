@@ -12,6 +12,9 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use time::OffsetDateTime;
+use time::Duration;
+use time::format_description::well_known::Rfc3339;
 
 /// The directory where Claude Code state JSON files are written.
 const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
@@ -21,6 +24,9 @@ const CODEX_STATE_DIR: &str = "/tmp/codex-state";
 
 /// The directory where Copilot state JSON files are written (via hook script).
 const COPILOT_STATE_DIR: &str = "/tmp/copilot-state";
+
+/// Codex archive sessions should disappear after the adapter's stale window.
+const CODEX_MAX_AGE: Duration = Duration::hours(1);
 
 /// Status of a Claude session.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -126,6 +132,96 @@ fn agent_type_for_path(path: &Path) -> Option<String> {
     }
 }
 
+fn status_priority(status: &ClaudeStatus) -> u8 {
+    match status {
+        ClaudeStatus::ToolUse => 3,
+        ClaudeStatus::Processing => 2,
+        ClaudeStatus::AwaitingInput => 1,
+        ClaudeStatus::Idle => 0,
+    }
+}
+
+fn state_supersedes(candidate: &ClaudeSessionState, current: &ClaudeSessionState) -> bool {
+    let candidate_updated = candidate.last_updated.as_deref().unwrap_or("");
+    let current_updated = current.last_updated.as_deref().unwrap_or("");
+
+    if candidate_updated != current_updated {
+        return candidate_updated > current_updated;
+    }
+
+    let candidate_priority = status_priority(&candidate.status);
+    let current_priority = status_priority(&current.status);
+    if candidate_priority != current_priority {
+        return candidate_priority > current_priority;
+    }
+
+    let candidate_detail_score = [
+        candidate.current_tool.is_some(),
+        candidate.details.is_some(),
+        candidate.working_dir.is_some(),
+        candidate.pid.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    let current_detail_score = [
+        current.current_tool.is_some(),
+        current.details.is_some(),
+        current.working_dir.is_some(),
+        current.pid.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+
+    candidate_detail_score > current_detail_score
+}
+
+fn collapse_sessions_by_id(
+    states: impl IntoIterator<Item = ClaudeSessionState>,
+) -> Vec<ClaudeSessionState> {
+    let mut by_id: HashMap<String, ClaudeSessionState> = HashMap::new();
+    let mut anonymous = Vec::new();
+
+    for state in states {
+        if state.session_id.is_empty() {
+            anonymous.push(state);
+            continue;
+        }
+
+        match by_id.entry(state.session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(state);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if state_supersedes(&state, entry.get()) {
+                    entry.insert(state);
+                }
+            }
+        }
+    }
+
+    let mut collapsed: Vec<_> = by_id.into_values().collect();
+    collapsed.extend(anonymous);
+    collapsed
+}
+
+fn codex_state_is_stale(state: &ClaudeSessionState) -> bool {
+    if state.agent_type.as_deref() != Some("codex") {
+        return false;
+    }
+
+    let Some(last_updated) = state.last_updated.as_deref() else {
+        return false;
+    };
+    let Ok(updated_at) = OffsetDateTime::parse(last_updated, &Rfc3339) else {
+        return false;
+    };
+    let age = OffsetDateTime::now_utc() - updated_at;
+
+    age > CODEX_MAX_AGE
+}
+
 /// Watches `/tmp/claude-code-state/` and `/tmp/codex-state/` for agent session
 /// state file changes.
 ///
@@ -224,7 +320,7 @@ impl ClaudeStatePoller {
             }
         }
 
-        self.sessions.values().cloned().collect()
+        collapse_sessions_by_id(self.sessions.values().cloned())
     }
 
     /// Read all `*.json` files in all watched state directories and return
@@ -234,7 +330,7 @@ impl ClaudeStatePoller {
         for dir in &self.state_dirs {
             all.extend(Self::read_all_files(dir));
         }
-        all.into_values().collect()
+        collapse_sessions_by_id(all.into_values())
     }
 
     /// Read all JSON files in a directory into a map.
@@ -261,6 +357,9 @@ impl ClaudeStatePoller {
         // Set agent_type from directory if not already specified in JSON.
         if state.agent_type.is_none() {
             state.agent_type = agent_type_for_path(path);
+        }
+        if codex_state_is_stale(&state) {
+            return None;
         }
         Some(state)
     }
@@ -517,6 +616,73 @@ mod tests {
         let json = r#"{"session_id": "m"}"#;
         let s = parse(json);
         assert!(s.model.is_none());
+    }
+
+    #[test]
+    fn collapse_sessions_prefers_latest_timestamp_for_same_id() {
+        let older = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Idle,
+            last_updated: Some("2026-03-26T21:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        let newer = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::ToolUse,
+            current_tool: Some("Bash".into()),
+            last_updated: Some("2026-03-26T21:00:01Z".into()),
+            ..ClaudeSessionState::default()
+        };
+
+        let collapsed = collapse_sessions_by_id(vec![older, newer]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].status, ClaudeStatus::ToolUse);
+        assert_eq!(collapsed[0].current_tool.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn collapse_sessions_prefers_richer_state_when_timestamps_match() {
+        let sparse = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Processing,
+            last_updated: Some("2026-03-26T21:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        let rich = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Processing,
+            working_dir: Some("/tmp/project".into()),
+            pid: Some(42),
+            last_updated: Some("2026-03-26T21:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+
+        let collapsed = collapse_sessions_by_id(vec![sparse, rich]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].working_dir.as_deref(), Some("/tmp/project"));
+        assert_eq!(collapsed[0].pid, Some(42));
+    }
+
+    #[test]
+    fn stale_codex_state_is_filtered() {
+        let state = ClaudeSessionState {
+            session_id: "old-codex".into(),
+            agent_type: Some("codex".into()),
+            last_updated: Some("2026-03-16T01:44:17.354Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(codex_state_is_stale(&state));
+    }
+
+    #[test]
+    fn non_codex_state_is_not_filtered_by_age() {
+        let state = ClaudeSessionState {
+            session_id: "old-claude".into(),
+            agent_type: Some("claude".into()),
+            last_updated: Some("2026-03-16T01:44:17.354Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(!codex_state_is_stale(&state));
     }
 
     // --- type alias smoke tests ---

@@ -426,6 +426,7 @@ process_line() {
             SOURCE_WORKDIR["$source"]="$(jq -r '.payload.cwd // empty' <<<"$line" 2>/dev/null || true)"
             SESSION_WORKDIR["$session_id"]="${SOURCE_WORKDIR[$source]}"
             SESSION_STATUS["$session_id"]="${SESSION_STATUS[$session_id]:-idle}"
+            unset SESSION_CONTEXT["$session_id"]
             SESSION_LAST_UPDATED["$session_id"]="$timestamp"
             write_state_for_session "$session_id"
             ;;
@@ -441,6 +442,10 @@ process_line() {
                     SESSION_STATUS["$session_id"]="processing"
                     SESSION_TOOL["$session_id"]=""
                     SESSION_DETAILS["$session_id"]="null"
+                    # Clear stale context until Codex emits a fresh token_count
+                    # for the current turn. Otherwise old high-water values can
+                    # trigger warnings immediately at turn start.
+                    unset SESSION_CONTEXT["$session_id"]
                     ;;
                 task_complete)
                     SESSION_STATUS["$session_id"]="idle"
@@ -465,6 +470,8 @@ process_line() {
                     )"
                     if [[ -n "$context_percent" ]] && jq -en --arg pct "$context_percent" '$pct | tonumber | . >= 0 and . <= 100' >/dev/null; then
                         SESSION_CONTEXT["$session_id"]="$context_percent"
+                    else
+                        unset SESSION_CONTEXT["$session_id"]
                     fi
                     ;;
                 *)

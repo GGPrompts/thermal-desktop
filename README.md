@@ -24,6 +24,7 @@ These launch automatically at login via Hyprland `exec-once`:
 |-----------|-------------|
 | **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), hotkey cheat sheet (center), Claude sessions + clock (right) |
 | **thermal-audio** | TTS daemon — announces Claude session state changes (idle, tool use, awaiting input, context warnings) |
+| **codex-state-adapter** | Codex session tracker — mirrors `~/.codex/sessions` into `/tmp/codex-state/` for bar/TUI/audio |
 | **thc daemon** | Optional session daemon — PTY backend fallback when kitty is unavailable |
 
 ### On-Demand
@@ -137,6 +138,15 @@ thermal-audio --test "testing one two three"
 
 # Test the underlying pipeline
 edge-tts --text "hello" --write-media /tmp/test.mp3 && mpv --no-video /tmp/test.mp3
+```
+
+### Codex sessions not appearing
+```bash
+# Check if the adapter is running
+thc                         # Services tab -> codex-state-adapter
+
+# Start it manually if needed
+/home/builder/projects/thermal-desktop/scripts/codex-state-adapter.sh --daemon
 ```
 
 ### thermal-launch won't open (Super+D)

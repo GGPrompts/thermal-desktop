@@ -67,12 +67,16 @@ enum PidSource {
 
 #[derive(Debug, Clone)]
 struct ServiceDef {
-    /// Binary name (also used for pgrep and Command::new).
+    /// Display / process name.
     binary: &'static str,
     /// Human-readable description.
     description: &'static str,
     /// How to find the PID.
     pid_source: PidSource,
+    /// Optional explicit command path for services that are launched via script.
+    command: Option<&'static str>,
+    /// Extra args passed to the command.
+    args: &'static [&'static str],
 }
 
 /// Runtime status of a service.
@@ -87,31 +91,50 @@ const SERVICES: &[ServiceDef] = &[
         binary: "thermal-audio",
         description: "TTS announcements",
         pid_source: PidSource::Pidfile("audio.pid"),
+        command: None,
+        args: &[],
     },
     ServiceDef {
         binary: "thermal-bar",
         description: "Status bar",
         pid_source: PidSource::Pgrep,
+        command: None,
+        args: &[],
     },
     ServiceDef {
         binary: "thermal-hud",
         description: "Overlay HUD",
         pid_source: PidSource::Pgrep,
+        command: None,
+        args: &[],
     },
     ServiceDef {
         binary: "thermal-lock",
         description: "Lock screen",
         pid_source: PidSource::Pgrep,
+        command: None,
+        args: &[],
     },
     ServiceDef {
         binary: "thermal-notify",
         description: "Notification daemon",
         pid_source: PidSource::Pgrep,
+        command: None,
+        args: &[],
+    },
+    ServiceDef {
+        binary: "codex-state-adapter",
+        description: "Codex state tracker",
+        pid_source: PidSource::Pidfile("codex-state-adapter.pid"),
+        command: Some(CODEX_ADAPTER_SCRIPT),
+        args: &["--daemon"],
     },
     ServiceDef {
         binary: "thermal-voice",
         description: "Voice input",
         pid_source: PidSource::Pidfile("voice.pid"),
+        command: None,
+        args: &[],
     },
 ];
 
@@ -126,6 +149,9 @@ fn runtime_dir() -> PathBuf {
         PathBuf::from(format!("/run/user/{}/thermal", getuid()))
     }
 }
+
+const CODEX_ADAPTER_SCRIPT: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/codex-state-adapter.sh");
 
 fn read_pid_from_file(filename: &str) -> Option<u32> {
     let path = runtime_dir().join(filename);
@@ -171,16 +197,19 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
     // Spawn detached — setsid so it outlives the TUI.
-    let result = Command::new("setsid")
+    let program = def.command.unwrap_or(def.binary);
+    let mut command = Command::new("setsid");
+    command
         .arg("--fork")
-        .arg(def.binary)
+        .arg(program)
+        .args(def.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    let result = command.spawn();
     match result {
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("Failed to start {}: {}", def.binary, e)),
+        Err(e) => Err(format!("Failed to start {} ({}): {}", def.binary, program, e)),
     }
 }
 
@@ -690,7 +719,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 6);
+        assert_eq!(SERVICES.len(), 7);
     }
 
     #[test]
@@ -709,8 +738,8 @@ mod tests {
     fn all_binaries_start_with_thermal() {
         for def in SERVICES {
             assert!(
-                def.binary.starts_with("thermal-"),
-                "binary {:?} should start with thermal-",
+                def.binary.starts_with("thermal-") || def.binary == "codex-state-adapter",
+                "binary {:?} should start with thermal- or be the Codex adapter",
                 def.binary
             );
         }
@@ -740,7 +769,14 @@ mod tests {
         assert_eq!(audio.binary, "thermal-audio");
         assert!(matches!(audio.pid_source, PidSource::Pidfile("audio.pid")));
 
-        let voice = &SERVICES[5];
+        let codex = &SERVICES[5];
+        assert_eq!(codex.binary, "codex-state-adapter");
+        assert!(matches!(
+            codex.pid_source,
+            PidSource::Pidfile("codex-state-adapter.pid")
+        ));
+
+        let voice = &SERVICES[6];
         assert_eq!(voice.binary, "thermal-voice");
         assert!(matches!(voice.pid_source, PidSource::Pidfile("voice.pid")));
     }
@@ -754,6 +790,18 @@ mod tests {
                 def.binary
             );
         }
+    }
+
+    #[test]
+    fn codex_adapter_uses_script_launch() {
+        let codex = &SERVICES[5];
+        assert_eq!(codex.binary, "codex-state-adapter");
+        assert_eq!(codex.args, ["--daemon"]);
+        assert!(
+            codex
+                .command
+                .is_some_and(|path| path.ends_with("scripts/codex-state-adapter.sh"))
+        );
     }
 
     #[test]

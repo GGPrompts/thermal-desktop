@@ -99,6 +99,11 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
     },
     ServiceDef {
+        binary: "thermal-lock",
+        description: "Lock screen",
+        pid_source: PidSource::Pgrep,
+    },
+    ServiceDef {
         binary: "thermal-notify",
         description: "Notification daemon",
         pid_source: PidSource::Pgrep,
@@ -685,7 +690,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 5);
+        assert_eq!(SERVICES.len(), 6);
     }
 
     #[test]
@@ -735,14 +740,14 @@ mod tests {
         assert_eq!(audio.binary, "thermal-audio");
         assert!(matches!(audio.pid_source, PidSource::Pidfile("audio.pid")));
 
-        let voice = &SERVICES[4];
+        let voice = &SERVICES[5];
         assert_eq!(voice.binary, "thermal-voice");
         assert!(matches!(voice.pid_source, PidSource::Pidfile("voice.pid")));
     }
 
     #[test]
     fn pgrep_services_use_pgrep_source() {
-        for def in &SERVICES[1..4] {
+        for def in &SERVICES[1..5] {
             assert!(
                 matches!(def.pid_source, PidSource::Pgrep),
                 "{} should use Pgrep source",

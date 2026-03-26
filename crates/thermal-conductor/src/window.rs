@@ -64,7 +64,8 @@ use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
 
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
-use crate::grid_renderer::{ContextHeatmapPipeline, GridRenderer, RenderCell};
+use crate::context_environment::{TerminalContext, detect_context};
+use crate::grid_renderer::{ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell};
 use crate::inject::{self, InjectWatcher};
 use crate::input;
 use crate::protocol::Response;
@@ -199,6 +200,11 @@ pub fn run() -> anyhow::Result<()> {
 
     // ── Context heatmap pipeline ─────────────────────────────────────────────
     let context_heatmap = ContextHeatmapPipeline::new(&device, surface_format);
+
+    // ── Environment effect pipeline ──────────────────────────────────────────
+    let environment_effect = EnvironmentEffectPipeline::new(&device, surface_format);
+    let terminal_context = detect_context();
+    tracing::info!(?terminal_context, "Detected terminal environment context");
 
     // ── Terminal + session (daemon client or standalone PTY) ──────────────────
     // Calculate initial grid size from the renderer's cell metrics.
@@ -401,6 +407,8 @@ pub fn run() -> anyhow::Result<()> {
         },
         grid_renderer,
         context_heatmap,
+        environment_effect,
+        terminal_context,
         terminal,
         session_mode,
         _tokio_rt: tokio_rt,
@@ -743,6 +751,10 @@ struct ConductorWindow {
     grid_renderer: GridRenderer,
     /// Context heatmap vignette — subtle edge glow driven by context_percent.
     context_heatmap: ContextHeatmapPipeline,
+    /// Environment effect — border glow indicating Docker/worktree/SSH context.
+    environment_effect: EnvironmentEffectPipeline,
+    /// Detected terminal execution environment (Docker, worktree, SSH, or main).
+    terminal_context: TerminalContext,
     terminal: Terminal,
     /// Session mode: either daemon client or standalone PTY.
     session_mode: SessionMode,
@@ -933,6 +945,16 @@ impl ConductorWindow {
                 self.height,
             );
         }
+
+        // ── Environment effect (renders BEFORE grid so text is on top) ──
+        self.environment_effect.render(
+            self.terminal_context.as_uniform(),
+            &self.wgpu.queue,
+            &mut encoder,
+            &view,
+            self.width,
+            self.height,
+        );
 
         // ── Render terminal grid ─────────────────────────────────────────
         // Lock the terminal and read renderable content.

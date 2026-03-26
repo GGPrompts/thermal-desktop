@@ -6,6 +6,7 @@
 mod agent_timeline;
 pub(crate) mod backend;
 mod client;
+mod context_environment;
 mod daemon;
 mod grid_renderer;
 mod inject;

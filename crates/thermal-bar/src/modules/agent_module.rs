@@ -4,7 +4,7 @@
 /// and displays per-agent-type summaries in the bar's right zone.
 /// Shows nothing when no sessions are active to avoid clutter.
 ///
-/// Display prefixes: "CLU" for Claude sessions, "COX" for Codex sessions.
+/// Display prefixes: "CLU" for Claude, "COX" for Codex, "COP" for Copilot.
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ThermalPalette};
 
 use crate::layout::{ModuleOutput, Zone};
@@ -45,10 +45,12 @@ impl AgentModule {
         // Partition sessions by agent type.
         let mut claude_sessions: Vec<&ClaudeSessionState> = Vec::new();
         let mut codex_sessions: Vec<&ClaudeSessionState> = Vec::new();
+        let mut copilot_sessions: Vec<&ClaudeSessionState> = Vec::new();
 
         for s in &sessions {
             match s.agent_type.as_deref() {
                 Some("codex") => codex_sessions.push(s),
+                Some("copilot") => copilot_sessions.push(s),
                 _ => claude_sessions.push(s),
             }
         }
@@ -59,6 +61,9 @@ impl AgentModule {
             outputs.push(output);
         }
         if let Some(output) = build_agent_summary("COX", &codex_sessions) {
+            outputs.push(output);
+        }
+        if let Some(output) = build_agent_summary("COP", &copilot_sessions) {
             outputs.push(output);
         }
 

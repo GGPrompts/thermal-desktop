@@ -470,7 +470,8 @@ fn transition_text(
         (ClaudeStatus::Idle, ClaudeStatus::Processing) => {
             Some(format!("{session_label} started working"))
         }
-        (ClaudeStatus::Processing, ClaudeStatus::ToolUse)
+        (ClaudeStatus::Idle, ClaudeStatus::ToolUse)
+        | (ClaudeStatus::Processing, ClaudeStatus::ToolUse)
         | (ClaudeStatus::ToolUse, ClaudeStatus::ToolUse) => {
             let tool = session.current_tool.as_deref().unwrap_or("a tool");
             let detail = tool_detail(tool, session);
@@ -535,10 +536,11 @@ fn basename(path: &str) -> &str {
 
 /// Derive a short human-readable label from a session.
 /// Prefers the project folder name from working_dir, falls back to short session ID.
-/// Prefixes with "Codex" for codex sessions to distinguish in TTS announcements.
+/// Prefixes with agent type for non-Claude sessions to distinguish in TTS.
 fn session_label(session: &ClaudeSessionState) -> String {
     let prefix = match session.agent_type.as_deref() {
         Some("codex") => "Codex ",
+        Some("copilot") => "Copilot ",
         _ => "",
     };
 

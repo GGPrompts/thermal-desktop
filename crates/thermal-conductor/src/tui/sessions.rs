@@ -62,10 +62,18 @@ fn status_color(status: &ClaudeStatus) -> Color {
 }
 
 /// Short label and color for the agent type column.
-fn agent_type_badge(session: &ClaudeSessionState) -> (&'static str, Color) {
+/// Copilot sessions also display the model name when available.
+fn agent_type_badge(session: &ClaudeSessionState) -> (String, Color) {
     match session.agent_type.as_deref() {
-        Some("codex") => ("COX", pal(ThermalPalette::ACCENT_COOL)),
-        _ => ("CLU", pal(ThermalPalette::ACCENT_WARM)),
+        Some("copilot") => {
+            let label = match session.model.as_deref() {
+                Some(m) => format!("COP {m}"),
+                None => "COP".to_string(),
+            };
+            (label, pal(ThermalPalette::ACCENT_HOT))
+        }
+        Some("codex") => ("COX".to_string(), pal(ThermalPalette::ACCENT_COOL)),
+        _ => ("CLU".to_string(), pal(ThermalPalette::ACCENT_WARM)),
     }
 }
 

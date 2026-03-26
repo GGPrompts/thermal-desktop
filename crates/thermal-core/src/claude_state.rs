@@ -1,9 +1,9 @@
-//! ClaudeStatePoller — monitors `/tmp/claude-code-state/` and `/tmp/codex-state/`
-//! for agent session state files using the `notify` crate.
+//! ClaudeStatePoller — monitors `/tmp/claude-code-state/`, `/tmp/codex-state/`,
+//! and `/tmp/copilot-state/` for agent session state files using the `notify` crate.
 //!
-//! Supports both Claude Code and OpenAI Codex sessions. Files in the Claude
-//! state directory get `agent_type = Some("claude")`, files in the Codex state
-//! directory get `agent_type = Some("codex")`.
+//! Supports Claude Code, OpenAI Codex, and GitHub Copilot sessions. Files in
+//! each state directory get `agent_type` inferred from the parent directory
+//! name (`"claude"`, `"codex"`, or `"copilot"`).
 
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
@@ -18,6 +18,9 @@ const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
 
 /// The directory where Codex state JSON files are written (via adapter script).
 const CODEX_STATE_DIR: &str = "/tmp/codex-state";
+
+/// The directory where Copilot state JSON files are written (via hook script).
+const COPILOT_STATE_DIR: &str = "/tmp/copilot-state";
 
 /// Status of a Claude session.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -57,6 +60,7 @@ pub struct ClaudeSessionState {
     pub parent_session_id: Option<String>,
     pub agent_id: Option<String>,
     pub agent_type: Option<String>,
+    pub model: Option<String>,
     pub status: ClaudeStatus,
     pub current_tool: Option<String>,
     pub subagent_count: Option<u32>,
@@ -77,6 +81,7 @@ impl Default for ClaudeSessionState {
             parent_session_id: None,
             agent_id: None,
             agent_type: None,
+            model: None,
             status: ClaudeStatus::Idle,
             current_tool: None,
             subagent_count: Some(0),
@@ -112,7 +117,9 @@ pub type AgentStatus = ClaudeStatus;
 /// Infer the `agent_type` string from a state file's parent directory.
 fn agent_type_for_path(path: &Path) -> Option<String> {
     let parent = path.parent()?.to_str()?;
-    if parent.contains("codex-state") {
+    if parent.contains("copilot-state") {
+        Some("copilot".to_string())
+    } else if parent.contains("codex-state") {
         Some("codex".to_string())
     } else {
         Some("claude".to_string())
@@ -134,13 +141,14 @@ pub struct ClaudeStatePoller {
 }
 
 impl ClaudeStatePoller {
-    /// Create a new poller watching both Claude and Codex state directories.
+    /// Create a new poller watching Claude, Codex, and Copilot state directories.
     /// Creates the directories if they do not exist.
     pub fn new() -> NotifyResult<Self> {
         let claude_dir = PathBuf::from(CLAUDE_STATE_DIR);
         let codex_dir = PathBuf::from(CODEX_STATE_DIR);
+        let copilot_dir = PathBuf::from(COPILOT_STATE_DIR);
 
-        let dirs = vec![claude_dir, codex_dir];
+        let dirs = vec![claude_dir, codex_dir, copilot_dir];
 
         // Ensure state directories exist.
         for dir in &dirs {
@@ -479,6 +487,12 @@ mod tests {
     }
 
     #[test]
+    fn agent_type_copilot_dir() {
+        let path = Path::new("/tmp/copilot-state/session-abc.json");
+        assert_eq!(agent_type_for_path(path), Some("copilot".to_string()));
+    }
+
+    #[test]
     fn agent_type_unknown_dir_defaults_to_claude() {
         let path = Path::new("/tmp/other-state/session.json");
         assert_eq!(agent_type_for_path(path), Some("claude".to_string()));
@@ -489,6 +503,20 @@ mod tests {
         let json = r#"{"session_id": "typed", "agent_type": "codex"}"#;
         let s = parse(json);
         assert_eq!(s.agent_type.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn session_with_model_field() {
+        let json = r#"{"session_id": "m", "model": "gemini-3-pro-preview"}"#;
+        let s = parse(json);
+        assert_eq!(s.model.as_deref(), Some("gemini-3-pro-preview"));
+    }
+
+    #[test]
+    fn session_without_model_field() {
+        let json = r#"{"session_id": "m"}"#;
+        let s = parse(json);
+        assert!(s.model.is_none());
     }
 
     // --- type alias smoke tests ---

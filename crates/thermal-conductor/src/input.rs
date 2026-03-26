@@ -1,139 +1,94 @@
-//! Keyboard event → PTY byte encoding.
+//! Keyboard event -> PTY byte encoding (desktop / SCTK adapter).
 //!
-//! Converts SCTK [`KeyEvent`] + [`Modifiers`] into the byte sequences that a
-//! terminal emulator sends over a PTY.  Covers printable text, control
-//! characters, cursor keys, editing keys, and function keys using standard
-//! xterm escape sequences.
+//! Converts SCTK [`KeyEvent`] + [`Modifiers`] into platform-agnostic
+//! [`thermal_terminal::input::KeyCode`] + [`thermal_terminal::input::Modifiers`]
+//! and delegates to the shared encoding logic.
 
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, Keysym, Modifiers};
 
-/// Encode an SCTK key‑press event into the bytes that should be written to
+/// Encode an SCTK key-press event into the bytes that should be written to
 /// the PTY.
 ///
 /// Returns `None` for keys that have no PTY representation (e.g. bare
 /// modifier presses, Caps Lock, Num Lock, etc.).
 pub fn encode_key(event: &KeyEvent, modifiers: &Modifiers) -> Option<Vec<u8>> {
-    let sym = event.keysym;
+    // Convert SCTK Keysym to our platform-agnostic KeyCode.
+    let key_code = keysym_to_keycode(event.keysym, event.utf8.as_deref())?;
 
-    // ── Ctrl+letter  ────────────────────────────────────────────────────────
-    // Must be checked *before* the utf8 / printable‑text path so that
-    // Ctrl+C emits 0x03 rather than the literal 'c'.
-    if modifiers.ctrl
-        && let Some(byte) = ctrl_keysym_byte(sym)
-    {
-        return Some(vec![byte]);
+    // Convert SCTK Modifiers to our platform-agnostic Modifiers.
+    let mods = thermal_terminal::input::Modifiers {
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+    };
+
+    thermal_terminal::input::encode_key(&key_code, &mods)
+}
+
+/// Convert an SCTK Keysym (+ optional utf8 text) to a platform-agnostic KeyCode.
+///
+/// Returns `None` for keys that have no KeyCode representation (bare modifiers,
+/// unknown keysyms with no utf8 text).
+fn keysym_to_keycode(
+    sym: Keysym,
+    utf8: Option<&str>,
+) -> Option<thermal_terminal::input::KeyCode> {
+    use thermal_terminal::input::KeyCode;
+
+    // Check named keys first.
+    let named = match sym {
+        Keysym::Return    => Some(KeyCode::Enter),
+        Keysym::BackSpace => Some(KeyCode::Backspace),
+        Keysym::Tab       => Some(KeyCode::Tab),
+        Keysym::Escape    => Some(KeyCode::Escape),
+        Keysym::Up        => Some(KeyCode::ArrowUp),
+        Keysym::Down      => Some(KeyCode::ArrowDown),
+        Keysym::Right     => Some(KeyCode::ArrowRight),
+        Keysym::Left      => Some(KeyCode::ArrowLeft),
+        Keysym::Home      => Some(KeyCode::Home),
+        Keysym::End       => Some(KeyCode::End),
+        Keysym::Insert    => Some(KeyCode::Insert),
+        Keysym::Delete    => Some(KeyCode::Delete),
+        Keysym::Page_Up   => Some(KeyCode::PageUp),
+        Keysym::Page_Down => Some(KeyCode::PageDown),
+        Keysym::F1        => Some(KeyCode::F1),
+        Keysym::F2        => Some(KeyCode::F2),
+        Keysym::F3        => Some(KeyCode::F3),
+        Keysym::F4        => Some(KeyCode::F4),
+        Keysym::F5        => Some(KeyCode::F5),
+        Keysym::F6        => Some(KeyCode::F6),
+        Keysym::F7        => Some(KeyCode::F7),
+        Keysym::F8        => Some(KeyCode::F8),
+        Keysym::F9        => Some(KeyCode::F9),
+        Keysym::F10       => Some(KeyCode::F10),
+        Keysym::F11       => Some(KeyCode::F11),
+        Keysym::F12       => Some(KeyCode::F12),
+        _ => None,
+    };
+
+    if named.is_some() {
+        return named;
     }
 
-    // ── Special / non‑printable keys ────────────────────────────────────────
-    if let Some(bytes) = encode_special(sym) {
-        return Some(bytes);
+    // For letter/character keysyms, convert to KeyCode::Char.
+    // First try to get the char from the keysym raw value (ASCII range).
+    let raw: u32 = sym.into();
+    if (0x20..=0x7e).contains(&raw) {
+        return Some(KeyCode::Char(raw as u8 as char));
     }
 
-    // ── Function keys ───────────────────────────────────────────────────────
-    if let Some(bytes) = encode_fkey(sym) {
-        return Some(bytes);
-    }
-
-    // ── Alt/Meta + key → ESC prefix ─────────────────────────────────────────
-    // When Alt is held (without Ctrl), prepend \x1b to the key byte.
-    // This enables shell keybinds like Alt+B (word-back), Alt+F (word-forward),
-    // and editor meta-key combos.
-    if modifiers.alt && !modifiers.ctrl
-        && let Some(ref text) = event.utf8
-        && !text.is_empty()
-    {
-        let mut bytes = Vec::with_capacity(1 + text.len());
-        bytes.push(0x1b);
-        bytes.extend_from_slice(text.as_bytes());
-        return Some(bytes);
-    }
-
-    // ── Printable text (no Ctrl held) ───────────────────────────────────────
-    if !modifiers.ctrl
-        && let Some(ref text) = event.utf8
-        && !text.is_empty()
-    {
-        return Some(text.as_bytes().to_vec());
+    // Fall back to utf8 text from the event.
+    if let Some(text) = utf8 {
+        let mut chars = text.chars();
+        if let Some(ch) = chars.next() {
+            if chars.next().is_none() {
+                // Single character.
+                return Some(KeyCode::Char(ch));
+            }
+        }
     }
 
     None
-}
-
-// ── Ctrl + letter → control byte ────────────────────────────────────────────
-
-/// Map a Keysym that corresponds to a letter (a–z, A–Z) or one of the
-/// special Ctrl‑combos (@, [, \, ], ^, _) to the single control byte
-/// `(ascii_value & 0x1F)`.
-fn ctrl_keysym_byte(sym: Keysym) -> Option<u8> {
-    let raw: u32 = sym.into();
-    // Lowercase a‑z  (Keysym 0x61..=0x7a)
-    if (0x61..=0x7a).contains(&raw) {
-        return Some((raw as u8) & 0x1f);
-    }
-    // Uppercase A‑Z  (Keysym 0x41..=0x5a) — same result after masking
-    if (0x41..=0x5a).contains(&raw) {
-        return Some((raw as u8) & 0x1f);
-    }
-    // Ctrl+@ → NUL (0x00), Ctrl+[ → ESC (0x1b), Ctrl+\ → 0x1c,
-    // Ctrl+] → 0x1d, Ctrl+^ → 0x1e, Ctrl+_ → 0x1f
-    match raw {
-        0x40 => Some(0x00), // @
-        0x5b => Some(0x1b), // [
-        0x5c => Some(0x1c), // backslash
-        0x5d => Some(0x1d), // ]
-        0x5e => Some(0x1e), // ^
-        0x5f => Some(0x1f), // _
-        _ => None,
-    }
-}
-
-// ── Special keys → escape sequences ─────────────────────────────────────────
-
-fn encode_special(sym: Keysym) -> Option<Vec<u8>> {
-    let bytes: &[u8] = match sym {
-        Keysym::Return => b"\r",
-        Keysym::BackSpace => b"\x7f",
-        Keysym::Tab => b"\t",
-        Keysym::Escape => b"\x1b",
-
-        // Cursor movement
-        Keysym::Up => b"\x1b[A",
-        Keysym::Down => b"\x1b[B",
-        Keysym::Right => b"\x1b[C",
-        Keysym::Left => b"\x1b[D",
-
-        // Editing keys
-        Keysym::Home => b"\x1b[H",
-        Keysym::End => b"\x1b[F",
-        Keysym::Insert => b"\x1b[2~",
-        Keysym::Delete => b"\x1b[3~",
-        Keysym::Page_Up => b"\x1b[5~",
-        Keysym::Page_Down => b"\x1b[6~",
-
-        _ => return None,
-    };
-    Some(bytes.to_vec())
-}
-
-// ── Function keys → escape sequences ────────────────────────────────────────
-
-fn encode_fkey(sym: Keysym) -> Option<Vec<u8>> {
-    let seq: &[u8] = match sym {
-        Keysym::F1 => b"\x1bOP",
-        Keysym::F2 => b"\x1bOQ",
-        Keysym::F3 => b"\x1bOR",
-        Keysym::F4 => b"\x1bOS",
-        Keysym::F5 => b"\x1b[15~",
-        Keysym::F6 => b"\x1b[17~",
-        Keysym::F7 => b"\x1b[18~",
-        Keysym::F8 => b"\x1b[19~",
-        Keysym::F9 => b"\x1b[20~",
-        Keysym::F10 => b"\x1b[21~",
-        Keysym::F11 => b"\x1b[23~",
-        Keysym::F12 => b"\x1b[24~",
-        _ => return None,
-    };
-    Some(seq.to_vec())
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -380,35 +335,35 @@ mod tests {
 
     #[test]
     fn alt_b_word_back() {
-        // Alt+B → ESC + 'b' (readline word-back)
+        // Alt+B -> ESC + 'b' (readline word-back)
         let ev = key(Keysym::new(0x62), Some("b"));
         assert_eq!(encode_key(&ev, &alt()), Some(vec![0x1b, b'b']));
     }
 
     #[test]
     fn alt_f_word_forward() {
-        // Alt+F → ESC + 'f' (readline word-forward)
+        // Alt+F -> ESC + 'f' (readline word-forward)
         let ev = key(Keysym::new(0x66), Some("f"));
         assert_eq!(encode_key(&ev, &alt()), Some(vec![0x1b, b'f']));
     }
 
     #[test]
     fn alt_d_kill_word() {
-        // Alt+D → ESC + 'd' (readline kill-word)
+        // Alt+D -> ESC + 'd' (readline kill-word)
         let ev = key(Keysym::new(0x64), Some("d"));
         assert_eq!(encode_key(&ev, &alt()), Some(vec![0x1b, b'd']));
     }
 
     #[test]
     fn alt_dot_last_arg() {
-        // Alt+. → ESC + '.' (readline yank-last-arg)
+        // Alt+. -> ESC + '.' (readline yank-last-arg)
         let ev = key(Keysym::new(0x2e), Some("."));
         assert_eq!(encode_key(&ev, &alt()), Some(vec![0x1b, b'.']));
     }
 
     #[test]
     fn alt_uppercase_b() {
-        // Alt+Shift+B → ESC + 'B'
+        // Alt+Shift+B -> ESC + 'B'
         let ev = key(Keysym::new(0x42), Some("B"));
         let mods = Modifiers {
             alt: true,
@@ -422,7 +377,7 @@ mod tests {
     fn ctrl_alt_does_not_add_esc_prefix() {
         // Ctrl+Alt should NOT use the Alt ESC-prefix path; Ctrl takes priority.
         let ev = key(Keysym::new(0x63), Some("c"));
-        // Ctrl+Alt+C → Ctrl+C (0x03), not ESC+'c'
+        // Ctrl+Alt+C -> Ctrl+C (0x03), not ESC+'c'
         assert_eq!(encode_key(&ev, &ctrl_alt()), Some(vec![0x03]));
     }
 

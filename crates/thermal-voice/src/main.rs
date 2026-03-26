@@ -578,6 +578,135 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
+/// Type text at the current cursor position using wtype (Wayland).
+/// Falls back to `copy_to_clipboard()` if wtype is not available.
+fn type_at_cursor(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    match std::process::Command::new("wtype")
+        .arg("--")
+        .arg(text)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            info!("typed text at cursor via wtype ({} chars)", text.len());
+            true
+        }
+        Ok(status) => {
+            warn!("wtype exited with {status}, falling back to clipboard");
+            copy_to_clipboard(text);
+            false
+        }
+        Err(e) => {
+            warn!("wtype not available ({e}), falling back to clipboard");
+            copy_to_clipboard(text);
+            false
+        }
+    }
+}
+
+/// Send a special key or key-combo via wtype.
+fn wtype_key(key: &str, modifier: Option<&str>) {
+    let mut cmd = std::process::Command::new("wtype");
+    if let Some(m) = modifier {
+        cmd.arg("-M").arg(m).arg("-k").arg(key);
+    } else {
+        cmd.arg("-k").arg(key);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => info!("wtype key: {key}"),
+        Ok(s) => warn!("wtype -k {key} exited with {s}"),
+        Err(e) => warn!("wtype -k {key} failed: {e}"),
+    }
+}
+
+/// A code word detected at the end of a transcript.
+#[derive(Clone, Copy)]
+enum CodeWord {
+    /// "send" / "submit" / "enter" — type text then press Enter
+    Submit,
+    /// "select all" — Ctrl+A
+    SelectAll,
+    /// "undo" — Ctrl+Z
+    Undo,
+    /// "new line" — press Enter (line break, no submit semantics)
+    NewLine,
+    /// "tab" — press Tab
+    Tab,
+}
+
+/// Parse the transcript for a trailing code word.
+/// Returns (cleaned text with code word stripped, optional code word).
+fn parse_code_word(transcript: &str) -> (String, Option<CodeWord>) {
+    // Normalize: trim, strip trailing punctuation for matching purposes
+    let trimmed = transcript.trim();
+    if trimmed.is_empty() {
+        return (String::new(), None);
+    }
+
+    // Build a lowercase version with trailing punctuation stripped for matching
+    let lower = trimmed.to_lowercase();
+    let matchable = lower.trim_end_matches(|c: char| c.is_ascii_punctuation());
+
+    // Two-word code words first (check longest match first)
+    let two_word_codes: &[(&[&str], CodeWord)] = &[
+        (&["select all"], CodeWord::SelectAll),
+        (&["new line", "newline"], CodeWord::NewLine),
+    ];
+    for (phrases, code) in two_word_codes {
+        for phrase in *phrases {
+            if matchable.ends_with(phrase) {
+                let cleaned = strip_trailing_phrase(trimmed, phrase);
+                return (cleaned, Some(*code));
+            }
+        }
+    }
+
+    // Single-word code words — also handle trailing "it" (e.g. "send it")
+    let single_word_codes: &[(&[&str], CodeWord)] = &[
+        (&["send", "submit", "enter", "send it", "submit it"], CodeWord::Submit),
+        (&["undo", "undo that"], CodeWord::Undo),
+        (&["tab"], CodeWord::Tab),
+    ];
+    for (phrases, code) in single_word_codes {
+        for phrase in *phrases {
+            if matchable.ends_with(phrase) {
+                let cleaned = strip_trailing_phrase(trimmed, phrase);
+                return (cleaned, Some(*code));
+            }
+        }
+    }
+
+    (trimmed.to_string(), None)
+}
+
+/// Strip a trailing phrase (case-insensitive) from text.
+/// Trims any leftover whitespace/punctuation between the body and the code word.
+fn strip_trailing_phrase(text: &str, phrase: &str) -> String {
+    let lower = text.to_lowercase();
+    let trimmed_lower = lower.trim_end_matches(|c: char| c.is_ascii_punctuation());
+    if let Some(pos) = trimmed_lower.rfind(phrase) {
+        // Only strip if the phrase is at the end (after trimming punctuation)
+        if pos + phrase.len() == trimmed_lower.len() {
+            let prefix = &text[..pos];
+            return prefix.trim_end().trim_end_matches(|c: char| c == ',' || c == '.' || c == '-').trim_end().to_string();
+        }
+    }
+    text.to_string()
+}
+
+/// Execute a code word action via wtype after text has been typed.
+fn execute_code_word(code: &CodeWord) {
+    match code {
+        CodeWord::Submit => wtype_key("Return", None),
+        CodeWord::SelectAll => wtype_key("a", Some("ctrl")),
+        CodeWord::Undo => wtype_key("z", Some("ctrl")),
+        CodeWord::NewLine => wtype_key("Return", None),
+        CodeWord::Tab => wtype_key("Tab", None),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Single-instance guard (pidfile)
 // ---------------------------------------------------------------------------
@@ -830,13 +959,23 @@ async fn handle_stop(recorder: &mut Recorder, config: &Config) -> SocketResponse
 
     match transcript {
         Ok(Ok(text)) => {
-            copy_to_clipboard(&text);
             info!("transcript: {text}");
 
+            // Parse code words from transcript before typing
+            let (cleaned_text, code_word) = parse_code_word(&text);
+
+            // Type cleaned text at cursor via wtype (clipboard as backup)
+            type_at_cursor(&cleaned_text);
+            copy_to_clipboard(&text);
+
+            // Execute code word action (Enter, Ctrl+A, etc.) after typing
+            if let Some(ref code) = code_word {
+                execute_code_word(code);
+            }
+
             // Fire-and-forget: dispatch to claude -p in the background.
-            // The transcript is already on the clipboard and returned to
-            // the caller; the claude call updates state and sends TTS
-            // independently.
+            // Uses the full original transcript (not cleaned) so the
+            // dispatcher sees the complete intent.
             spawn_claude_dispatch(text.clone());
 
             SocketResponse::with_transcript(text)

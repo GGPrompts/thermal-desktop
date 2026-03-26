@@ -67,7 +67,7 @@ case "$STATE" in
     muted)
         # toggle just finished a stop — output is the transcript or error
         if [ -n "$RESULT" ]; then
-            notify-send -a "thermal-voice" -t 5000 "Transcribed" "$RESULT" 2>/dev/null
+            notify-send -a "thermal-voice" -t 5000 "Typed" "$RESULT" 2>/dev/null
         fi
         ;;
 esac

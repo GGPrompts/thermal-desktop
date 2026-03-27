@@ -34,6 +34,10 @@ const AUDIO_SOCKET_PATH: &str = "/run/user/1000/thermal/audio.sock";
 const HUD_STATE_FILE: &str = "/tmp/thermal-hud-state.json";
 const VOICE_STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 
+/// Maximum number of tool-use iterations before bailing out.
+/// Prevents infinite loops if the model never returns `end_turn`.
+const MAX_TOOL_ITERATIONS: usize = 10;
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -94,6 +98,7 @@ async fn main() -> Result<()> {
         model,
         trust_config,
         tool_schemas,
+        http,
         conversation: Mutex::new(ConversationContext::new()),
     });
 
@@ -119,6 +124,8 @@ struct SharedState {
     model: String,
     trust_config: TrustConfig,
     tool_schemas: Vec<serde_json::Value>,
+    /// Reusable HTTP client (connection pool shared across requests).
+    http: reqwest::Client,
     /// Multi-turn conversational context (persists across dispatch calls).
     conversation: Mutex<ConversationContext>,
 }
@@ -251,7 +258,7 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<String> {
-    let http = reqwest::Client::new();
+    let http = &state.http;
 
     // Classify transcript complexity (logged for observability; single model)
     let complexity = escalation::classify_complexity(transcript);
@@ -274,9 +281,35 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
     };
 
     // Loop: send to model, handle tool calls, feed results back
+    let mut iterations = 0usize;
     loop {
+        iterations += 1;
+        if iterations > MAX_TOOL_ITERATIONS {
+            warn!(
+                iterations = iterations - 1,
+                "hit max tool iterations, returning partial response"
+            );
+            let text = extract_text_response(
+                &messages
+                    .last()
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            let response = if text.is_empty() {
+                "I hit the maximum number of tool calls. Please try again with a simpler request."
+                    .to_string()
+            } else {
+                text
+            };
+            let mut ctx = state.conversation.lock().await;
+            ctx.add_turn(transcript, &response);
+            return Ok(response);
+        }
+
         let response =
-            api::call_ollama(&http, &state.model, &state.tool_schemas, &messages)
+            api::call_ollama(http, &state.model, &state.tool_schemas, &messages)
                 .await
                 .context("Ollama API call failed")?;
 
@@ -316,11 +349,40 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         }
 
         // Process tool calls
-        // First, add the assistant's response to messages
-        messages.push(serde_json::json!({
+        // Build Ollama-native assistant message: plain string content + tool_calls array
+        let text_parts: String = content
+            .iter()
+            .filter_map(|b| {
+                if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    b.get("text").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let tool_calls_ollama: Vec<serde_json::Value> = content
+            .iter()
+            .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+            .map(|b| {
+                serde_json::json!({
+                    "function": {
+                        "name": b.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        "arguments": b.get("input").cloned().unwrap_or(serde_json::json!({})),
+                    }
+                })
+            })
+            .collect();
+
+        let mut assistant_msg = serde_json::json!({
             "role": "assistant",
-            "content": content,
-        }));
+            "content": text_parts,
+        });
+        if !tool_calls_ollama.is_empty() {
+            assistant_msg["tool_calls"] = serde_json::json!(tool_calls_ollama);
+        }
+        messages.push(assistant_msg);
 
         // Collect tool results
         let mut tool_results = Vec::new();
@@ -464,7 +526,11 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
         "type_text" => {
             let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
             let preview = if text.len() > 50 {
-                format!("{}...", &text[..50])
+                let mut end = 50;
+                while end > 0 && !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &text[..end])
             } else {
                 text.to_string()
             };
@@ -511,7 +577,11 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
             // Generic: show tool name + compact args
             let args_str = serde_json::to_string(input).unwrap_or_default();
             let preview = if args_str.len() > 80 {
-                format!("{}...", &args_str[..80])
+                let mut end = 80;
+                while end > 0 && !args_str.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &args_str[..end])
             } else {
                 args_str
             };

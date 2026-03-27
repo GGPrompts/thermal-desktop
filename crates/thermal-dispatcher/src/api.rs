@@ -141,9 +141,54 @@ fn build_ollama_messages(messages: &[Value]) -> Vec<Value> {
         "content": SYSTEM_PROMPT,
     }));
 
-    // Append conversation messages as-is (role/content format is compatible)
+    // Append conversation messages, converting Anthropic-format content arrays
+    // to Ollama's expected format (plain string content + tool_calls field).
     for msg in messages {
-        ollama_messages.push(msg.clone());
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+
+        if role == "assistant" {
+            if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
+                // Anthropic-format content array — convert to Ollama format
+                let text_parts: String = arr
+                    .iter()
+                    .filter_map(|b| {
+                        if b.get("type").and_then(|v| v.as_str()) == Some("text") {
+                            b.get("text").and_then(|v| v.as_str()).map(String::from)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                let tool_calls: Vec<Value> = arr
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
+                    .map(|b| {
+                        serde_json::json!({
+                            "function": {
+                                "name": b.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                                "arguments": b.get("input").cloned().unwrap_or(serde_json::json!({})),
+                            }
+                        })
+                    })
+                    .collect();
+
+                let mut ollama_msg = serde_json::json!({
+                    "role": "assistant",
+                    "content": text_parts,
+                });
+                if !tool_calls.is_empty() {
+                    ollama_msg["tool_calls"] = serde_json::json!(tool_calls);
+                }
+                ollama_messages.push(ollama_msg);
+            } else {
+                // Already a plain string content — pass through
+                ollama_messages.push(msg.clone());
+            }
+        } else {
+            ollama_messages.push(msg.clone());
+        }
     }
 
     ollama_messages
@@ -333,7 +378,17 @@ fn strip_think_blocks(text: &str) -> String {
 }
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        // Find the last char boundary at or before `max` to avoid panicking
+        // on multi-byte UTF-8 sequences.
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +423,24 @@ mod tests {
     #[test]
     fn truncate_empty_string() {
         assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn truncate_multibyte_utf8_does_not_panic() {
+        // "héllo" — 'é' is 2 bytes (0xC3 0xA9), so byte index 2 is mid-char
+        let s = "héllo";
+        let result = truncate(s, 2);
+        // Should back up to byte 1 (before 'é') rather than panicking
+        assert_eq!(result, "h");
+    }
+
+    #[test]
+    fn truncate_emoji_boundary() {
+        // "🔥ab" — fire emoji is 4 bytes
+        let s = "🔥ab";
+        let result = truncate(s, 3);
+        // Should back up to byte 0 (before the emoji)
+        assert_eq!(result, "");
     }
 
     // -----------------------------------------------------------------------
@@ -432,6 +505,38 @@ mod tests {
         assert!(result[0]["content"].as_str().unwrap().contains("Thermal Desktop"));
         assert_eq!(result[1]["role"], "user");
         assert_eq!(result[1]["content"], "hello");
+    }
+
+    #[test]
+    fn build_ollama_messages_converts_assistant_content_arrays() {
+        let msgs = vec![
+            json!({"role": "user", "content": "open firefox"}),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Opening Firefox."},
+                    {"type": "tool_use", "id": "t1", "name": "open_browser", "input": {}}
+                ]
+            }),
+        ];
+        let result = build_ollama_messages(&msgs);
+        assert_eq!(result.len(), 3); // system + user + assistant
+        let assistant = &result[2];
+        assert_eq!(assistant["role"], "assistant");
+        // Content should be a plain string, not an array
+        assert_eq!(assistant["content"], "Opening Firefox.");
+        // tool_calls should be present
+        let tool_calls = assistant["tool_calls"].as_array().expect("should have tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], "open_browser");
+    }
+
+    #[test]
+    fn build_ollama_messages_passes_plain_assistant_through() {
+        let msgs = vec![json!({"role": "assistant", "content": "plain text"})];
+        let result = build_ollama_messages(&msgs);
+        assert_eq!(result[1]["content"], "plain text");
+        assert!(result[1].get("tool_calls").is_none());
     }
 
     // -----------------------------------------------------------------------

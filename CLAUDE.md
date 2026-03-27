@@ -122,6 +122,31 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 - **thermal-conductor GPU window**: Runs in standalone mode only (no connection to kitty or daemon backends); agent overlay HUD is decorative until backend streaming is implemented.
 - **NVIDIA DPMS resume** (therm-uqay): After 1-2hr AFK, terminals could become unresponsive. Mitigated: hypridle now uses brightness 0 instead of DPMS off, `NVD_BACKEND=direct` added, and thermal-wallpaper/bar/screensaver have non-fatal `conn.flush()` + screensaver has 5min watchdog for keyboard grab release.
 
+## Voice Pipeline
+
+### Architecture
+```
+thermal-voice (cpal + whisper-cpp STT)
+    ├─ VAD mode: speech → dispatcher socket → Ollama qwen3:8b → tool execution
+    └─ PTT mode: speech → wtype at cursor + clipboard + dispatcher
+thermal-dispatcher (Ollama qwen3:8b, local, no API key)
+    └─ trust-tier gated tool execution via thermal-commander
+thermal-audio (TTS responses, suppressed during voice input)
+```
+
+### Hotkeys & Mouse Buttons
+| Input | Action | Binding |
+|-------|--------|---------|
+| **Super+\\** | PTT toggle (start/stop recording) | `thermal-voice toggle` |
+| **Mouse back (thumb)** | PTT toggle | `thermal-voice toggle` (mouse:275) |
+| **Mouse forward** | VAD on/off (always-listening) | `thermal-vad-toggle.sh` (mouse:276) |
+
+### Dependencies
+- **whisper-cpp**: Local STT with CUDA. Install via `thermal-os-dotfiles/bin/install-whisper-cpp`.
+- **Ollama**: Local LLM server at localhost:11434. Model: `qwen3:8b` (configurable via `THERMAL_DISPATCHER_MODEL`).
+- **wtype**: Wayland text input for PTT dictation mode.
+- **wl-copy**: Clipboard for PTT transcripts.
+
 ## kitty Configuration Requirements
 The default kitty backend requires kitty to be started with remote control enabled via a Unix socket. The full thermal-themed `kitty.conf` lives in `thermal-os-dotfiles/config/kitty/kitty.conf` and includes the thermal color scheme (mapped from `palette.rs`), tab bar styling, and remote control setup.
 

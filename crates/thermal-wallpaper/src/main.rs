@@ -723,7 +723,11 @@ fn main() -> anyhow::Result<()> {
 
         // Dispatch Wayland events (non-blocking).
         event_queue.dispatch_pending(&mut state)?;
-        conn.flush()?;
+        if let Err(e) = conn.flush() {
+            warn!("Wayland conn.flush() failed (DPMS/idle?): {e}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
+        }
         if let Some(guard) = conn.prepare_read() {
             let _ = guard.read();
             event_queue.dispatch_pending(&mut state)?;

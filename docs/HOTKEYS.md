@@ -46,8 +46,15 @@
 | Super + B | btop (system monitor) |
 | Super + \ | Push-to-talk voice input (start/stop toggle) |
 | Super + . | Emoji picker (bemoji) |
-| Super + N | Notification center (swaync) |
 | Super + / | Cheatsheet |
+
+## Pin (Window Stays on All Workspaces)
+| Key | Action |
+|-----|--------|
+| Super + Y | Pin / unpin window |
+| Super + N | Pin / unpin window |
+| Super + Shift + P | Pin / unpin window |
+| Super + O | Pin / unpin window |
 
 ## Screenshots
 | Key | Action |

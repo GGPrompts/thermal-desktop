@@ -295,6 +295,12 @@ pub fn build_tool_schemas() -> Vec<Value> {
         }),
     ));
 
+    tools.push(tool(
+        "system_metrics",
+        "Get current system resource usage: CPU load, RAM, and GPU utilization/memory. Useful for capacity-aware agent scheduling.",
+        json!({ "type": "object", "properties": {} }),
+    ));
+
     // --- Beads issue tracking ---
 
     tools.push(tool(
@@ -520,6 +526,7 @@ mod tests {
             "clipboard_get",
             "clipboard_set",
             "notify",
+            "system_metrics",
         ] {
             assert!(
                 names.contains(&expected.to_string()),
@@ -707,6 +714,13 @@ mod tests {
     #[test]
     fn list_windows_has_no_required_fields() {
         let t = find_tool("list_windows");
+        let req = required_fields(&t);
+        assert!(req.is_empty());
+    }
+
+    #[test]
+    fn system_metrics_has_no_required_fields() {
+        let t = find_tool("system_metrics");
         let req = required_fields(&t);
         assert!(req.is_empty());
     }

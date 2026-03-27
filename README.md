@@ -38,6 +38,7 @@ These launch automatically at login via Hyprland `exec-once`:
 | **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
 | **thermal-screensaver** | `thermal-screensaver` | Idle-triggered thermal fluid simulation overlay (reaction-diffusion shader) |
 | **thermal-wallpaper** | `thermal-wallpaper` | Animated WGSL thermal shader wallpaper — heat field modulated by system metrics |
+| **thermal-face** | `thermal-face` | GPU-rendered SDF avatar overlay — thermal-palette animated face (200x200, bottom-right) |
 | **thermal-lock** | Disabled (NVIDIA) | Lock screen with WGSL heatmap shader + PAM auth |
 
 ### CLI Tools
@@ -66,17 +67,22 @@ thermal-commander              # 20 tools: screenshots, window mgmt, app launch,
 ```
 
 ### Voice Assistant Pipeline
-Push-to-talk voice input with local Whisper transcription and AI dispatch:
+Voice input with local Whisper transcription and AI dispatch. Supports push-to-talk and always-listening VAD mode:
 
 ```
 Super+\ → thermal-voice (cpal mic capture → Whisper STT) → claude -p (dispatch) → tool execution
+         OR
+thermal-voice listen → VAD detects speech → same pipeline
 ```
 
-Also supports typing transcripts at cursor via `wtype` and code word commands.
+The dispatcher maintains multi-turn conversational context (8-turn rolling window, 2min session timeout) so you can chain commands: "create an issue for X... now assign it to me."
 
 ```bash
-# Start voice daemon
+# Start voice daemon (push-to-talk mode)
 thermal-voice &                  # Listens on voice.sock
+
+# Start voice daemon (always-listening VAD mode)
+thermal-voice listen             # Continuous VAD, auto-records on speech
 
 # Toggle recording: Super+Backslash (auto-starts daemon if needed)
 ```
@@ -198,11 +204,12 @@ thermal-hud ──────────── layer-shell HUD (agent tabs + v
 thermal-lock ─────────── session-lock screen
 thermal-notify ───────── D-Bus notification server
 thermal-audio ────────── TTS daemon (edge-tts + mpv, Unix socket API)
-thermal-voice ────────── push-to-talk STT daemon (cpal + Whisper)
+thermal-voice ────────── voice input daemon (push-to-talk + VAD always-listening)
 thermal-monitor ──────── standalone ratatui TUI dashboard
 thermal-conductor ────── tabbed TUI hub (kitty backend + daemon fallback) + GPU terminal
-thermal-commander ────── MCP server (20 desktop control tools)
-thermal-dispatcher ───── voice command router (dispatches via claude -p)
+thermal-commander ────── MCP server (21 desktop control tools, incl. system_metrics)
+thermal-dispatcher ───── voice command router (dispatches via claude -p, multi-turn context)
+thermal-face ─────────── GPU SDF avatar overlay (thermal palette, auto-blink)
 thermal-screensaver ──── idle-triggered thermal fluid simulation overlay
 thermal-wallpaper ────── animated WGSL thermal shader wallpaper daemon
 ```

@@ -318,7 +318,11 @@ pub async fn run() -> anyhow::Result<()> {
         // Non-blocking dispatch of any pending Wayland events.
         event_queue.dispatch_pending(&mut bar)?;
         // Flush outgoing requests to the compositor.
-        conn.flush()?;
+        if let Err(e) = conn.flush() {
+            tracing::warn!("Wayland conn.flush() failed (DPMS/idle?): {e}");
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         // Read any new events that arrived on the socket (non-blocking).
         if let Some(guard) = conn.prepare_read() {
             let _ = guard.read();

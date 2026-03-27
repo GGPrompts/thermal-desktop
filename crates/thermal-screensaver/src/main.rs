@@ -5,7 +5,7 @@
 
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use raw_window_handle::{
@@ -386,6 +386,9 @@ struct App {
 
     phase: Phase,
     exit: bool,
+
+    /// Tracks last user input (keyboard/pointer) for watchdog timeout.
+    last_input: Instant,
 }
 
 impl App {
@@ -798,6 +801,7 @@ impl KeyboardHandler for App {
         _: KeyEvent,
     ) {
         // Any keypress dismisses the screensaver
+        self.last_input = Instant::now();
         self.begin_dismiss();
     }
 
@@ -839,6 +843,7 @@ impl PointerHandler for App {
                 | PointerEventKind::Release { .. }
                 | PointerEventKind::Motion { .. } => {
                     // Any mouse activity dismisses the screensaver
+                    self.last_input = Instant::now();
                     self.begin_dismiss();
                 }
                 _ => {}
@@ -924,6 +929,7 @@ fn main() {
         surfaces: Vec::new(),
         phase: Phase::WaitingForIdle,
         exit: false,
+        last_input: Instant::now(),
     };
 
     // Roundtrip to discover outputs and seats
@@ -953,7 +959,11 @@ fn main() {
         event_queue
             .dispatch_pending(&mut app)
             .expect("dispatch failed");
-        conn.flush().expect("flush failed");
+        if let Err(e) = conn.flush() {
+            warn!("Wayland conn.flush() failed (DPMS/idle?): {e}");
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
 
         if let Some(guard) = conn.prepare_read() {
             let _ = guard.read();
@@ -963,6 +973,17 @@ fn main() {
         }
 
         if app.exit {
+            break;
+        }
+
+        // Watchdog: if Exclusive keyboard grab held >5 min with no input, exit gracefully
+        // to avoid locking out the user after DPMS/idle transitions.
+        if app.phase == Phase::Active
+            && app.last_input.elapsed() > Duration::from_secs(5 * 60)
+        {
+            warn!(
+                "screensaver watchdog: Exclusive grab held >5 min without input, exiting"
+            );
             break;
         }
 

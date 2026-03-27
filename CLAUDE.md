@@ -16,6 +16,7 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio)
 - **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components
 - **Voice pipeline**: cpal + faster-whisper (STT) → `claude -p` (dispatch) → tool execution
+- **Voice Activity Detection**: Energy-based VAD with hysteresis (silero-vad-rust planned)
 
 ### Current Architecture (thermal-conductor)
 thermal-conductor has two primary modes and one optional backend:
@@ -56,9 +57,10 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-notify** | Production | GPU notification daemon implementing org.freedesktop.Notifications via D-Bus |
 | **thermal-audio** | Production | TTS daemon — 12-voice pool, per-agent voices, state transition alerts (edge-tts + Unix socket API) |
 | **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all agent sessions (Claude/Codex/Copilot) with color-coded status |
-| **thermal-voice** | Production | Push-to-talk voice input daemon — cpal audio capture, local Whisper STT, wtype transcript-at-cursor, Unix socket API |
-| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via `claude -p`, trust-tier gated execution |
-| **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — screenshots, click, type, window mgmt (JSON-RPC 2.0 over stdio) |
+| **thermal-voice** | Production | Voice input daemon — push-to-talk + always-listening VAD mode, cpal audio capture, local Whisper STT, Unix socket API |
+| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via `claude -p`, trust-tier gated execution, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
+| **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — screenshots, click, type, window mgmt, system metrics (JSON-RPC 2.0 over stdio) |
+| **thermal-face** | Prototype | GPU-rendered SDF avatar with thermal palette — animated face in layer-shell overlay, auto-blink, audio-driven mouth sync (planned) |
 | **thermal-hud** | Functional | Layer-shell HUD overlay — Claude session tabs, voice assistant state display |
 | **thermal-screensaver** | Functional | Idle-triggered thermal fluid simulation overlay — reaction-diffusion WGSL shader, ext-idle-notify-v1 |
 | **thermal-wallpaper** | Functional | Animated WGSL thermal shader wallpaper — simplex-noise heat field modulated by real-time system metrics |
@@ -107,6 +109,7 @@ cargo run -p thermal-hud              # Run layer-shell HUD overlay
 cargo run -p thermal-launch           # Run app launcher
 cargo run -p thermal-screensaver      # Run screensaver (idle-triggered)
 cargo run -p thermal-wallpaper        # Run animated wallpaper
+cargo run -p thermal-face             # Run SDF face avatar overlay
 cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU clash)
 ```
 
@@ -114,6 +117,7 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 - **thermal-lock on NVIDIA**: GPU context clash when kitty (OpenGL/Vulkan) and thermal-lock (wgpu) compete for GPU. Surface format fix applied (queries capabilities instead of hardcoding Bgra8UnormSrgb), but still disabled in Hyprland config pending further testing.
 - **thermal-launch**: Functional but fuzzy matching and reticle UI need refinement.
 - **thermal-conductor GPU window**: Runs in standalone mode only (no connection to kitty or daemon backends); agent overlay HUD is decorative until backend streaming is implemented.
+- **NVIDIA DPMS resume** (therm-uqay): After 1-2hr AFK, terminals could become unresponsive. Mitigated: hypridle now uses brightness 0 instead of DPMS off, `NVD_BACKEND=direct` added, and thermal-wallpaper/bar/screensaver have non-fatal `conn.flush()` + screensaver has 5min watchdog for keyboard grab release.
 
 ## kitty Configuration Requirements
 The default kitty backend requires kitty to be started with remote control enabled via a Unix socket. The full thermal-themed `kitty.conf` lives in `thermal-os-dotfiles/config/kitty/kitty.conf` and includes the thermal color scheme (mapped from `palette.rs`), tab bar styling, and remote control setup.

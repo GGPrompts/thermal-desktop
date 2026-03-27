@@ -5,6 +5,7 @@ pub mod hyprland;
 pub mod input;
 pub mod launcher;
 pub mod screenshot;
+pub mod system_metrics;
 pub mod utility;
 
 use anyhow::Result;
@@ -388,6 +389,16 @@ impl ToolRegistry {
                 "required": ["message"]
             }),
             |args| Box::pin(utility::notify(args)),
+        );
+
+        self.register(
+            "system_metrics",
+            "Get current system resource usage: CPU load, RAM, and GPU utilization/memory. Useful for capacity-aware agent scheduling.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+            |args| Box::pin(system_metrics::system_metrics(args)),
         );
     }
 

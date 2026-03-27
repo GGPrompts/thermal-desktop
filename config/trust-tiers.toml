@@ -15,6 +15,7 @@ active_window = "AUTO"
 list_workspaces = "AUTO"
 claude_status = "AUTO"
 clipboard_get = "AUTO"
+system_metrics = "AUTO"
 
 # Desktop interaction — require confirmation
 click = "CONFIRM"

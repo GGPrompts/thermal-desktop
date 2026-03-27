@@ -23,6 +23,7 @@ const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
 
 /// Unicode mic symbols.
 const MIC_MUTED: &str = "\u{1F507}"; // speaker off (muted)
+const MIC_MONITORING: &str = "\u{1F50E}"; // magnifying glass (monitoring/VAD)
 const MIC_LISTENING: &str = "\u{1F3A4}"; // microphone
 const MIC_PROCESSING: &str = "\u{1F525}"; // fire (processing)
 
@@ -36,6 +37,8 @@ const MIC_PROCESSING: &str = "\u{1F525}"; // fire (processing)
 pub enum VoiceState {
     #[default]
     Muted,
+    /// Always-listening idle: VAD is active, waiting for speech.
+    Monitoring,
     Listening,
     Processing,
 }
@@ -118,6 +121,7 @@ impl VoiceModule {
 
         let (icon, label, color) = match state.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
@@ -215,6 +219,7 @@ mod tests {
     fn render_from_state(state_file: VoiceStateFile) -> ModuleOutput {
         let (icon, label, color) = match state_file.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
@@ -283,9 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_voice_state_monitoring() {
+        let json = r#"{"state": "monitoring"}"#;
+        let f: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(f.state, VoiceState::Monitoring);
+    }
+
+    #[test]
+    fn monitoring_output_contains_monitoring_label() {
+        let f = VoiceStateFile {
+            state: VoiceState::Monitoring,
+            label: None,
+        };
+        let m = render_from_state(f);
+        assert!(m.text.contains("monitoring"), "text='{}'", m.text);
+    }
+
+    #[test]
     fn output_color_is_valid_rgba() {
         for state in [
             VoiceState::Muted,
+            VoiceState::Monitoring,
             VoiceState::Listening,
             VoiceState::Processing,
         ] {
@@ -320,6 +343,7 @@ mod tests {
     #[test]
     fn mic_constants_are_non_empty() {
         assert!(!MIC_MUTED.is_empty());
+        assert!(!MIC_MONITORING.is_empty());
         assert!(!MIC_LISTENING.is_empty());
         assert!(!MIC_PROCESSING.is_empty());
     }

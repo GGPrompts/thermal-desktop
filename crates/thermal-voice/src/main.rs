@@ -12,6 +12,9 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
+mod vad;
+use vad::{VadDetector, VadEvent};
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -30,6 +33,14 @@ enum Command {
     Toggle,
     /// Print current daemon state and exit.
     Status,
+    /// Run daemon in always-listening mode with Voice Activity Detection.
+    /// Audio stream runs continuously; VAD detects speech start/stop
+    /// and automatically triggers transcription.
+    Listen {
+        /// RMS energy threshold for speech detection (0.0–1.0, default 0.015).
+        #[arg(long, default_value = "0.015")]
+        threshold: f32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +147,9 @@ const STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 #[serde(rename_all = "snake_case")]
 pub enum VoiceState {
     Muted,
+    /// Always-listening idle: audio capture is running, VAD is active,
+    /// but no speech has been detected yet.
+    Monitoring,
     Listening,
     Processing,
 }
@@ -224,6 +238,7 @@ impl SocketResponse {
     fn state_response(state: VoiceState) -> Self {
         let s = match state {
             VoiceState::Muted => "muted",
+            VoiceState::Monitoring => "monitoring",
             VoiceState::Listening => "listening",
             VoiceState::Processing => "processing",
         };
@@ -1023,7 +1038,7 @@ async fn run_toggle() -> Result<()> {
         .unwrap_or(VoiceState::Muted);
 
     match current_state {
-        VoiceState::Muted => {
+        VoiceState::Muted | VoiceState::Monitoring => {
             let resp = send_to_daemon("start").await?;
             if let Some(err) = resp.error {
                 eprintln!("error: {err}");
@@ -1069,6 +1084,345 @@ async fn run_status() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Always-listening daemon (VAD mode)
+// ---------------------------------------------------------------------------
+
+/// Size of each VAD analysis chunk in milliseconds. Chunk size in samples is
+/// computed at native rate (e.g. 2400 samples at 48kHz).
+const VAD_CHUNK_MS: u32 = 50;
+
+/// Run the daemon in always-listening mode.
+///
+/// The audio stream runs continuously. Audio chunks are fed through the
+/// `VadDetector`. When speech is detected, samples are buffered and then
+/// sent to transcription when speech ends.
+///
+/// Push-to-talk (via socket "start"/"stop" commands) still works as an
+/// override — it bypasses VAD and uses the same Recorder path.
+async fn run_listen_daemon(threshold: f32) -> Result<()> {
+    let threshold = if threshold <= 0.0 || threshold > 1.0 {
+        warn!("VAD threshold {threshold} out of range, clamping to 0.015");
+        0.015
+    } else {
+        threshold
+    };
+
+    let config = load_config();
+
+    // Check model availability (same as run_daemon)
+    let model_path = resolve_model_path(&config);
+    if !model_path.exists() {
+        warn!("Whisper model not found at {}", model_path.display());
+        warn!(
+            "Download it: curl -L -o {} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+            model_path.display(),
+            DEFAULT_MODEL_FILENAME
+        );
+        warn!("The daemon will start but transcription will fail until a model or CLI is available.");
+    }
+
+    // Single-instance guard
+    if let Some(pid) = check_daemon_running() {
+        eprintln!("thermal-voice already running (pid {pid}). Exiting.");
+        std::process::exit(0);
+    }
+
+    write_pidfile()?;
+
+    // Write initial state — Monitoring means VAD is active, waiting for speech
+    write_state(VoiceState::Monitoring, None);
+
+    // Set up socket (same as push-to-talk daemon for override commands)
+    let sock_path = socket_path();
+    if sock_path.exists() {
+        fs::remove_file(&sock_path)
+            .with_context(|| format!("removing stale socket {:?}", sock_path))?;
+    }
+    let listener = UnixListener::bind(&sock_path)
+        .with_context(|| format!("binding socket {:?}", sock_path))?;
+    info!(
+        "thermal-voice listen daemon on {} (VAD threshold={threshold})",
+        sock_path.display()
+    );
+
+    // Channel: socket tasks send commands here
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<DaemonCommand>();
+
+    // Socket acceptor task
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let tx = cmd_tx.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_connection(stream, tx).await {
+                            warn!("connection error: {e}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("socket accept error: {e}");
+                }
+            }
+        }
+    });
+
+    // Set up continuous audio capture with a channel for VAD chunks.
+    // The cpal callback sends f32 chunks to the main loop via a channel.
+    let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel::<Vec<f32>>(64);
+
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .context("no default audio input device found")?;
+    info!("recording from: {}", device.name().unwrap_or_default());
+
+    let default_config = device
+        .default_input_config()
+        .context("failed to get default input config")?;
+    let native_rate = default_config.sample_rate().0;
+    let native_channels = default_config.channels();
+    info!("native format: {native_rate}Hz, {native_channels}ch (listen mode)");
+
+    let stream_config = cpal::StreamConfig {
+        channels: native_channels,
+        sample_rate: cpal::SampleRate(native_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    // Chunk size in mono samples at native rate for ~50ms windows
+    let chunk_size = (native_rate * VAD_CHUNK_MS / 1000) as usize;
+
+    // Accumulation buffer in the cpal callback (shared via Arc<Mutex>)
+    let accumulator: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(chunk_size * 2)));
+    let acc_clone = Arc::clone(&accumulator);
+    let channels = native_channels;
+
+    let err_fn = |e: cpal::StreamError| {
+        error!("audio stream error: {e}");
+    };
+
+    let audio_stream = device.build_input_stream(
+        &stream_config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let Ok(mut acc) = acc_clone.lock() else { return; };
+            // Mix to mono
+            for chunk in data.chunks(channels as usize) {
+                let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
+                acc.push(mono);
+            }
+            // Flush complete chunks through the channel
+            while acc.len() >= chunk_size {
+                let chunk_data: Vec<f32> = acc.drain(..chunk_size).collect();
+                // Best-effort send — if the receiver is behind, drop old audio
+                let _ = audio_tx.try_send(chunk_data);
+            }
+        },
+        err_fn,
+        None,
+    )?;
+
+    audio_stream.play()?;
+    info!("continuous audio capture started (VAD mode)");
+
+    // Main loop — VAD processing + push-to-talk override
+    const MAX_SPEECH_SECS: u32 = 30;
+    let mut vad = VadDetector::new(threshold);
+    let mut speech_buffer: Vec<f32> = Vec::new();
+    let mut ptt_recorder = Recorder::new(); // For push-to-talk override
+    let mut ptt_active = false; // True when push-to-talk is overriding VAD
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            // VAD audio chunks from the continuous stream
+            Some(chunk) = audio_rx.recv() => {
+                // If push-to-talk is active, skip VAD processing
+                if ptt_active {
+                    continue;
+                }
+
+                let event = vad.process_chunk(&chunk);
+                match event {
+                    VadEvent::Silence => {
+                        // Nothing to do — stay in Monitoring
+                    }
+                    VadEvent::SpeechStart => {
+                        info!("VAD: speech detected");
+                        write_state(VoiceState::Listening, Some("vad"));
+                        speech_buffer.clear();
+                        speech_buffer.extend_from_slice(&chunk);
+                    }
+                    VadEvent::SpeechContinue => {
+                        let max_samples = (native_rate * MAX_SPEECH_SECS) as usize;
+                        if speech_buffer.len() >= max_samples {
+                            warn!("VAD: speech buffer exceeded {MAX_SPEECH_SECS}s cap, resetting");
+                            speech_buffer.clear();
+                            vad.reset();
+                            write_state(VoiceState::Monitoring, None);
+                        } else {
+                            speech_buffer.extend_from_slice(&chunk);
+                        }
+                    }
+                    VadEvent::SpeechEnd => {
+                        info!(
+                            "VAD: speech ended ({:.1}s buffered)",
+                            speech_buffer.len() as f64 / native_rate as f64
+                        );
+                        write_state(VoiceState::Processing, Some("transcribing"));
+
+                        // Convert f32 buffer to i16 and resample to 16kHz for whisper
+                        let samples_i16 = resample_f32_to_i16(
+                            &speech_buffer,
+                            native_rate,
+                            SAMPLE_RATE,
+                        );
+
+                        let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
+                        if samples_i16.len() < min_samples {
+                            info!("VAD: audio too short (< 0.3s), ignoring");
+                            write_state(VoiceState::Monitoring, None);
+                            speech_buffer.clear();
+                            vad.reset();
+                            continue;
+                        }
+
+                        // Transcribe in a blocking thread
+                        let config_cmd = config.whisper_command.clone();
+                        let config_model = config.model_path.clone();
+                        let transcript = tokio::task::spawn_blocking(move || {
+                            let cfg = Config {
+                                model_path: config_model,
+                                whisper_command: config_cmd,
+                            };
+                            transcribe(&samples_i16, &cfg)
+                        })
+                        .await;
+
+                        match transcript {
+                            Ok(Ok(text)) => {
+                                info!("VAD transcript: {text}");
+
+                                let (cleaned_text, code_word) = parse_code_word(&text);
+
+                                type_at_cursor(&cleaned_text);
+                                copy_to_clipboard(&text);
+
+                                if let Some(ref code) = code_word {
+                                    execute_code_word(code);
+                                }
+
+                                // Fire-and-forget dispatch
+                                spawn_claude_dispatch(text);
+                            }
+                            Ok(Err(e)) => {
+                                error!("VAD transcription failed: {e}");
+                            }
+                            Err(e) => {
+                                error!("VAD transcription task panicked: {e}");
+                            }
+                        }
+
+                        // Return to monitoring
+                        write_state(VoiceState::Monitoring, None);
+                        speech_buffer.clear();
+                        vad.reset();
+                    }
+                }
+            }
+
+            // Socket commands (push-to-talk override + status queries)
+            Some(daemon_cmd) = cmd_rx.recv() => {
+                let response = match daemon_cmd.action.as_str() {
+                    "start" => {
+                        // Push-to-talk override: pause VAD, start dedicated recorder
+                        if ptt_active {
+                            SocketResponse::ok("already_recording")
+                        } else {
+                            ptt_active = true;
+                            vad.reset();
+                            speech_buffer.clear();
+                            handle_start(&mut ptt_recorder)
+                        }
+                    }
+                    "stop" => {
+                        if ptt_active {
+                            let resp = handle_stop(&mut ptt_recorder, &config).await;
+                            ptt_active = false;
+                            // Return to monitoring after push-to-talk completes
+                            write_state(VoiceState::Monitoring, None);
+                            resp
+                        } else {
+                            SocketResponse::ok("not_recording")
+                        }
+                    }
+                    "status" => {
+                        if ptt_active {
+                            SocketResponse::state_response(VoiceState::Listening)
+                        } else if vad.is_in_speech() {
+                            SocketResponse::state_response(VoiceState::Listening)
+                        } else {
+                            SocketResponse::state_response(VoiceState::Monitoring)
+                        }
+                    }
+                    other => SocketResponse::error(&format!("unknown action: {other}")),
+                };
+                let _ = daemon_cmd.reply.send(response);
+            }
+
+            _ = &mut shutdown => {
+                info!("shutting down listen daemon...");
+                break;
+            }
+        }
+    }
+
+    // Cleanup
+    drop(audio_stream);
+    if ptt_recorder.is_recording() {
+        ptt_recorder.stop();
+    }
+    write_state(VoiceState::Muted, None);
+    let _ = fs::remove_file(&sock_path);
+    cleanup_pidfile();
+    info!("thermal-voice listen daemon stopped");
+    Ok(())
+}
+
+/// Convert f32 audio samples to i16, resampling from `src_rate` to `dst_rate`.
+///
+/// This parallels the resampling in `Recorder::stop()` but operates on f32 input
+/// (from the VAD speech buffer) rather than i16 input (from the push-to-talk recorder).
+/// Kept separate because the two paths handle different source formats.
+fn resample_f32_to_i16(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<i16> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    if src_rate == dst_rate {
+        return samples
+            .iter()
+            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect();
+    }
+
+    let ratio = dst_rate as f64 / src_rate as f64;
+    let new_len = (samples.len() as f64 * ratio) as usize;
+    let mut resampled = Vec::with_capacity(new_len);
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx = src_idx as usize;
+        let frac = src_idx - idx as f64;
+        let s0 = samples[idx.min(samples.len() - 1)] as f64;
+        let s1 = samples[(idx + 1).min(samples.len() - 1)] as f64;
+        let val = s0 + frac * (s1 - s0);
+        resampled.push((val.clamp(-1.0, 1.0) * 32767.0) as i16);
+    }
+    resampled
+}
+
+// ---------------------------------------------------------------------------
 // Entrypoint
 // ---------------------------------------------------------------------------
 
@@ -1087,6 +1441,7 @@ async fn main() -> Result<()> {
         None => run_daemon().await,
         Some(Command::Toggle) => run_toggle().await,
         Some(Command::Status) => run_status().await,
+        Some(Command::Listen { threshold }) => run_listen_daemon(threshold).await,
     }
 }
 
@@ -1142,9 +1497,28 @@ mod tests {
     }
 
     #[test]
+    fn state_serialization_monitoring() {
+        let state = VoiceStateFile {
+            state: VoiceState::Monitoring,
+            label: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"monitoring\""));
+        assert!(!json.contains("label"));
+    }
+
+    #[test]
+    fn state_deserialization_monitoring() {
+        let json = r#"{"state": "monitoring"}"#;
+        let parsed: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.state, VoiceState::Monitoring);
+    }
+
+    #[test]
     fn state_deserialization_roundtrip() {
         for s in [
             VoiceState::Muted,
+            VoiceState::Monitoring,
             VoiceState::Listening,
             VoiceState::Processing,
         ] {
@@ -1310,5 +1684,39 @@ mod tests {
     fn default_model_path_contains_ggml() {
         let path = default_model_path();
         assert!(path.to_str().unwrap().contains("ggml-base.en.bin"));
+    }
+
+    // -- Resampling --
+
+    #[test]
+    fn resample_same_rate() {
+        let samples = vec![0.5f32; 100];
+        let result = resample_f32_to_i16(&samples, 16000, 16000);
+        assert_eq!(result.len(), 100);
+        // 0.5 * 32767 ≈ 16383
+        assert!((result[0] - 16383).abs() <= 1);
+    }
+
+    #[test]
+    fn resample_downsample() {
+        let samples = vec![0.25f32; 4800]; // 100ms at 48kHz
+        let result = resample_f32_to_i16(&samples, 48000, 16000);
+        // Should be ~1600 samples (100ms at 16kHz)
+        assert!((result.len() as i64 - 1600).abs() <= 1);
+    }
+
+    #[test]
+    fn resample_empty() {
+        let result = resample_f32_to_i16(&[], 48000, 16000);
+        assert!(result.is_empty());
+    }
+
+    // -- Monitoring state response --
+
+    #[test]
+    fn response_state_monitoring() {
+        let resp = SocketResponse::state_response(VoiceState::Monitoring);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"monitoring\""));
     }
 }

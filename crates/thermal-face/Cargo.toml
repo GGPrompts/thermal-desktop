@@ -1,0 +1,15 @@
+[package]
+name = "thermal-face"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thermal-core = { path = "../thermal-core" }
+wgpu = { workspace = true }
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+raw-window-handle = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -8,6 +8,7 @@
 
 mod api;
 mod config;
+mod context;
 mod executor;
 mod tools;
 
@@ -16,9 +17,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use config::TrustConfig;
+use context::ConversationContext;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -84,6 +87,7 @@ async fn main() -> Result<()> {
         api_key,
         trust_config,
         tool_schemas,
+        conversation: Mutex::new(ConversationContext::new()),
     });
 
     loop {
@@ -108,6 +112,8 @@ struct SharedState {
     api_key: String,
     trust_config: TrustConfig,
     tool_schemas: Vec<serde_json::Value>,
+    /// Multi-turn conversational context (persists across dispatch calls).
+    conversation: Mutex<ConversationContext>,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,11 +246,17 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
 async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<String> {
     let http = reqwest::Client::new();
 
-    // Initial conversation: user transcript
-    let mut messages = vec![serde_json::json!({
-        "role": "user",
-        "content": transcript,
-    })];
+    // Build messages with conversational history.
+    // Lock the context briefly to build the initial messages, then release.
+    let mut messages = {
+        let mut ctx = state.conversation.lock().await;
+        if ctx.is_expired() {
+            info!("conversation context expired, resetting");
+            ctx.reset();
+        }
+        ctx.touch();
+        ctx.build_messages(transcript)
+    };
 
     // Loop: send to Haiku, handle tool calls, feed results back
     loop {
@@ -267,17 +279,24 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         if stop_reason == "end_turn" || stop_reason == "max_tokens" {
             // Extract final text response
             let text = extract_text_response(&content);
+            // Record the completed turn in conversational context
+            let mut ctx = state.conversation.lock().await;
+            ctx.add_turn(transcript, &text);
             return Ok(text);
         }
 
         if stop_reason != "tool_use" {
             // Unexpected stop reason — return whatever text we have
             let text = extract_text_response(&content);
-            return Ok(if text.is_empty() {
+            let response = if text.is_empty() {
                 format!("Unexpected response (stop_reason={stop_reason})")
             } else {
                 text
-            });
+            };
+            // Record the completed turn in conversational context
+            let mut ctx = state.conversation.lock().await;
+            ctx.add_turn(transcript, &response);
+            return Ok(response);
         }
 
         // Process tool calls

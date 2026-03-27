@@ -14,14 +14,15 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **D-Bus**: zbus 5 (async, tokio, 100% Rust)
 - **File watching**: notify 7
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio)
-- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components
-- **Voice pipeline**: cpal + faster-whisper (STT) → `claude -p` (dispatch) → tool execution
+- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components; `/tmp/thermal-voice-state.json` for voice state + audio level
+- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (local Ollama qwen3:8b) → tool execution
 - **Voice Activity Detection**: Energy-based VAD with hysteresis (silero-vad-rust planned)
+- **LLM dispatch**: Local Ollama (qwen3:8b) — no API key required. Model configurable via `THERMAL_DISPATCHER_MODEL` env var
 
 ### Current Architecture (thermal-conductor)
 thermal-conductor has two primary modes and one optional backend:
 
-1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 3 tabs — Sessions (multi-agent session monitor for Claude/Codex/Copilot), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management).
+1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 3 tabs — Sessions (multi-agent session monitor for Claude/Codex/Copilot), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management with auto-conflict resolution for shared-binary services).
 2. **GPU terminal** (`thermal-conductor window`): Standalone wgpu-rendered terminal with alacritty_terminal backend and agent overlay HUD (badge + timeline bar).
 3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Not required when kitty is available.
 
@@ -51,14 +52,14 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-core** | Production | Shared palette, GPU context factory, multi-agent StatePoller (Claude/Codex/Copilot), text rendering, PTY session mgmt |
 | **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size (used by thermal-conductor and thermobile) |
 | **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Profiles/Services) + GPU terminal window + agent communication graph (F3). Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
-| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions) |
+| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions + voice level meter) |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
 | **thermal-launch** | Prototype | GPU fuzzy-search app launcher overlay |
 | **thermal-notify** | Production | GPU notification daemon implementing org.freedesktop.Notifications via D-Bus |
 | **thermal-audio** | Production | TTS daemon — 12-voice pool, per-agent voices, state transition alerts (edge-tts + Unix socket API) |
 | **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all agent sessions (Claude/Codex/Copilot) with color-coded status |
-| **thermal-voice** | Production | Voice input daemon — push-to-talk + always-listening VAD mode, cpal audio capture, local Whisper STT, Unix socket API |
-| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via `claude -p`, trust-tier gated execution, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
+| **thermal-voice** | Production | Voice input daemon — always-listening VAD mode with PTT override, cpal audio capture, RMS level export, local Whisper STT, Unix socket API |
+| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via local Ollama (qwen3:8b), trust-tier gated execution, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
 | **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — screenshots, click, type, window mgmt, system metrics (JSON-RPC 2.0 over stdio) |
 | **thermal-face** | Prototype | GPU-rendered SDF avatar with thermal palette — animated face in layer-shell overlay, auto-blink, audio-driven mouth sync (planned) |
 | **thermal-hud** | Functional | Layer-shell HUD overlay — Claude session tabs, voice assistant state display |
@@ -70,6 +71,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 - **ThermalPalette** (`thermal-core/src/palette.rs`): 18 thermal color constants with gradient interpolation. Used everywhere.
 - **WgpuContext** (`thermal-core/src/wgpu_ctx.rs`): Shared GPU device/queue factory (queries surface capabilities for format selection).
 - **ThermalTextRenderer** (`thermal-core/src/text.rs`): glyphon wrapper with cached font system.
+- **Voice state** (`/tmp/thermal-voice-state.json`): Written by thermal-voice with `state` (muted/monitoring/listening/processing), optional `label`, and `level` (RMS energy 0.0–1.0, updated ~5Hz). Read by thermal-bar for the voice level meter.
 - **Pidfile guards**: Daemons (thermal-voice, thermal-dispatcher) use pidfiles in `/run/user/$UID/thermal/` for single-instance enforcement.
 - **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes).
 - **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution.
@@ -102,7 +104,8 @@ cargo run -p thermal-conductor -- daemon  # Run session daemon
 cargo run -p thermal-bar              # Run the status bar
 cargo run -p thermal-monitor          # Run standalone TUI dashboard
 cargo run -p thermal-audio            # Run TTS daemon
-cargo run -p thermal-voice            # Run voice input daemon
+cargo run -p thermal-voice            # Run voice input daemon (push-to-talk)
+cargo run -p thermal-voice -- listen  # Run voice input daemon (VAD always-listening + PTT override)
 cargo run -p thermal-dispatcher       # Run voice command router
 cargo run -p thermal-commander        # Run MCP server (stdio)
 cargo run -p thermal-hud              # Run layer-shell HUD overlay

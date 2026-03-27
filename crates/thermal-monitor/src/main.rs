@@ -85,7 +85,8 @@ fn basename(path: &str) -> &str {
 }
 
 /// Build the activity string from session state.
-fn format_activity(s: &ClaudeSessionState) -> String {
+/// `is_subagent`: when true, suppress the subagent count badge (it belongs on the parent row).
+fn format_activity(s: &ClaudeSessionState, is_subagent: bool) -> String {
     // Idle / awaiting
     if s.status == ClaudeStatus::Idle || s.status == ClaudeStatus::AwaitingInput {
         return "\u{2705} Ready".into(); // checkmark
@@ -143,11 +144,13 @@ fn format_activity(s: &ClaudeSessionState) -> String {
         format!("{} {}: {}", emoji, label, detail)
     };
 
-    // Subagent indicator
-    if let Some(n) = s.subagent_count
-        && n > 0
-    {
-        result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
+    // Subagent indicator — only on parent rows
+    if !is_subagent {
+        if let Some(n) = s.subagent_count
+            && n > 0
+        {
+            result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
+        }
     }
 
     result
@@ -356,7 +359,7 @@ impl App {
             };
 
             if changed {
-                let activity = format_activity(s);
+                let activity = format_activity(s, false);
                 let entries = self.history.entry(s.session_id.clone()).or_default();
                 entries.push_back(HistoryEntry {
                     text: activity,
@@ -416,26 +419,24 @@ impl App {
         if let Some(i) = self.table_state.selected()
             && let Some(row) = self.display_rows.get(i)
         {
-            // For subagents, attach to the parent session
-            let target = if let Some(ref parent) = row.session.parent_session_id {
-                parent.as_str()
+            // For subagents, focus the parent session's workspace
+            let session = if let Some(ref parent_id) = row.session.parent_session_id {
+                // Find the parent session to get its workspace
+                self.display_rows
+                    .iter()
+                    .find(|r| r.session.session_id == *parent_id)
+                    .map(|r| &r.session)
+                    .unwrap_or(&row.session)
             } else {
-                &row.session.session_id
+                &row.session
             };
-            // Try kitty remote control first, fall back to tmux
-            let _ = Command::new("kitty")
-                .args([
-                    "@",
-                    "focus-window",
-                    "--match",
-                    &format!("pid:{}", row.session.pid.unwrap_or(0)),
-                ])
-                .status()
-                .or_else(|_| {
-                    Command::new("tmux")
-                        .args(["switch-client", "-t", target])
-                        .status()
-                });
+
+            // Switch to the Hyprland workspace where this session lives
+            if let Some(ws) = session.workspace {
+                let _ = Command::new("hyprctl")
+                    .args(["dispatch", "workspace", &ws.to_string()])
+                    .status();
+            }
         }
     }
 
@@ -537,7 +538,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             let label = status_label(&s.status);
 
             // Activity column
-            let activity = format_activity(s);
+            let activity = format_activity(s, row.is_subagent);
 
             // Context % with threshold colors
             let (ctx_str, ctx_c) = match s.context_percent {

@@ -12,6 +12,7 @@ use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
+mod streaming;
 mod vad;
 use vad::{VadDetector, VadEvent};
 
@@ -40,6 +41,13 @@ enum Command {
         /// RMS energy threshold for speech detection (0.0–1.0, default 0.015).
         #[arg(long, default_value = "0.015")]
         threshold: f32,
+        /// Use WebSocket streaming STT instead of batch transcription.
+        /// Requires a WhisperLiveKit server running at --streaming-url.
+        #[arg(long)]
+        streaming: bool,
+        /// WebSocket URL of the WhisperLiveKit streaming STT server.
+        #[arg(long, default_value = streaming::DEFAULT_STREAMING_URL)]
+        streaming_url: String,
     },
 }
 
@@ -1097,9 +1105,14 @@ const VAD_CHUNK_MS: u32 = 50;
 /// `VadDetector`. When speech is detected, samples are buffered and then
 /// sent to transcription when speech ends.
 ///
+/// When `use_streaming` is true, audio is streamed to a WhisperLiveKit server
+/// via WebSocket instead of batch-transcribed locally. The connection is opened
+/// on SpeechStart, audio chunks are streamed on SpeechContinue, and the
+/// connection is closed on SpeechEnd to collect the final transcript.
+///
 /// Push-to-talk (via socket "start"/"stop" commands) still works as an
 /// override — it bypasses VAD and uses the same Recorder path.
-async fn run_listen_daemon(threshold: f32) -> Result<()> {
+async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &str) -> Result<()> {
     let threshold = if threshold <= 0.0 || threshold > 1.0 {
         warn!("VAD threshold {threshold} out of range, clamping to 0.015");
         0.015
@@ -1109,16 +1122,20 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
 
     let config = load_config();
 
-    // Check model availability (same as run_daemon)
-    let model_path = resolve_model_path(&config);
-    if !model_path.exists() {
-        warn!("Whisper model not found at {}", model_path.display());
-        warn!(
-            "Download it: curl -L -o {} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
-            model_path.display(),
-            DEFAULT_MODEL_FILENAME
-        );
-        warn!("The daemon will start but transcription will fail until a model or CLI is available.");
+    if use_streaming {
+        info!("streaming STT mode enabled — will connect to {streaming_url} on speech detection");
+    } else {
+        // Check model availability only for batch mode (streaming doesn't need a local model)
+        let model_path = resolve_model_path(&config);
+        if !model_path.exists() {
+            warn!("Whisper model not found at {}", model_path.display());
+            warn!(
+                "Download it: curl -L -o {} https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}",
+                model_path.display(),
+                DEFAULT_MODEL_FILENAME
+            );
+            warn!("The daemon will start but transcription will fail until a model or CLI is available.");
+        }
     }
 
     // Single-instance guard
@@ -1231,6 +1248,10 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
     let mut speech_buffer: Vec<f32> = Vec::new();
     let mut ptt_recorder = Recorder::new(); // For push-to-talk override
     let mut ptt_active = false; // True when push-to-talk is overriding VAD
+    // Streaming STT connection — created on SpeechStart, dropped on SpeechEnd.
+    // Only used when `use_streaming` is true.
+    let mut streaming_transcriber: Option<streaming::StreamingTranscriber> = None;
+    let streaming_url_owned = streaming_url.to_owned();
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -1253,16 +1274,54 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
                         write_state(VoiceState::Listening, Some("vad"));
                         speech_buffer.clear();
                         speech_buffer.extend_from_slice(&chunk);
+
+                        // Streaming mode: open WebSocket connection on speech start
+                        if use_streaming {
+                            match streaming::StreamingTranscriber::new(&streaming_url_owned).await {
+                                Ok(mut st) => {
+                                    // Send the initial chunk that triggered speech detection
+                                    // Resample to 16kHz for the server
+                                    let resampled = resample_f32_for_streaming(
+                                        &chunk, native_rate, SAMPLE_RATE,
+                                    );
+                                    if let Err(e) = st.send_audio(&resampled, SAMPLE_RATE).await {
+                                        warn!("failed to send initial audio to streaming STT: {e}");
+                                    }
+                                    streaming_transcriber = Some(st);
+                                }
+                                Err(e) => {
+                                    error!("failed to connect to streaming STT: {e}");
+                                    // Fall through — will batch-transcribe on SpeechEnd
+                                    // if the connection failed
+                                }
+                            }
+                        }
                     }
                     VadEvent::SpeechContinue => {
                         let max_samples = (native_rate * MAX_SPEECH_SECS) as usize;
                         if speech_buffer.len() >= max_samples {
                             warn!("VAD: speech buffer exceeded {MAX_SPEECH_SECS}s cap, resetting");
+                            // Clean up streaming connection if active
+                            if let Some(mut st) = streaming_transcriber.take() {
+                                let _ = st.close().await;
+                            }
                             speech_buffer.clear();
                             vad.reset();
                             write_state(VoiceState::Monitoring, None);
                         } else {
                             speech_buffer.extend_from_slice(&chunk);
+
+                            // Streaming mode: send audio chunk to the server
+                            if let Some(ref mut st) = streaming_transcriber {
+                                let resampled = resample_f32_for_streaming(
+                                    &chunk, native_rate, SAMPLE_RATE,
+                                );
+                                if let Err(e) = st.send_audio(&resampled, SAMPLE_RATE).await {
+                                    warn!("streaming STT send error: {e}");
+                                    // Drop the connection — will fall back to batch on SpeechEnd
+                                    streaming_transcriber = None;
+                                }
+                            }
                         }
                     }
                     VadEvent::SpeechEnd => {
@@ -1272,36 +1331,56 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
                         );
                         write_state(VoiceState::Processing, Some("transcribing"));
 
-                        // Convert f32 buffer to i16 and resample to 16kHz for whisper
-                        let samples_i16 = resample_f32_to_i16(
-                            &speech_buffer,
-                            native_rate,
-                            SAMPLE_RATE,
-                        );
+                        // Choose transcription path: streaming or batch
+                        let transcript_result: Result<String, anyhow::Error> =
+                            if let Some(mut st) = streaming_transcriber.take() {
+                                // Streaming path: close connection and drain final transcripts
+                                info!("streaming STT: closing connection and collecting finals");
+                                if let Err(e) = st.close().await {
+                                    warn!("streaming STT close error: {e}");
+                                }
+                                let text = streaming::drain_final_transcripts(&mut st).await;
+                                if text.is_empty() {
+                                    Err(anyhow::anyhow!("streaming STT returned empty transcript"))
+                                } else {
+                                    Ok(text)
+                                }
+                            } else {
+                                // Batch path: convert and transcribe locally
+                                let samples_i16 = resample_f32_to_i16(
+                                    &speech_buffer,
+                                    native_rate,
+                                    SAMPLE_RATE,
+                                );
 
-                        let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
-                        if samples_i16.len() < min_samples {
-                            info!("VAD: audio too short (< 0.3s), ignoring");
-                            write_state(VoiceState::Monitoring, None);
-                            speech_buffer.clear();
-                            vad.reset();
-                            continue;
-                        }
+                                let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
+                                if samples_i16.len() < min_samples {
+                                    info!("VAD: audio too short (< 0.3s), ignoring");
+                                    write_state(VoiceState::Monitoring, None);
+                                    speech_buffer.clear();
+                                    vad.reset();
+                                    continue;
+                                }
 
-                        // Transcribe in a blocking thread
-                        let config_cmd = config.whisper_command.clone();
-                        let config_model = config.model_path.clone();
-                        let transcript = tokio::task::spawn_blocking(move || {
-                            let cfg = Config {
-                                model_path: config_model,
-                                whisper_command: config_cmd,
+                                let config_cmd = config.whisper_command.clone();
+                                let config_model = config.model_path.clone();
+                                match tokio::task::spawn_blocking(move || {
+                                    let cfg = Config {
+                                        model_path: config_model,
+                                        whisper_command: config_cmd,
+                                    };
+                                    transcribe(&samples_i16, &cfg)
+                                })
+                                .await
+                                {
+                                    Ok(Ok(text)) => Ok(text),
+                                    Ok(Err(e)) => Err(e),
+                                    Err(e) => Err(anyhow::anyhow!("transcription task panicked: {e}")),
+                                }
                             };
-                            transcribe(&samples_i16, &cfg)
-                        })
-                        .await;
 
-                        match transcript {
-                            Ok(Ok(text)) => {
+                        match transcript_result {
+                            Ok(text) => {
                                 info!("VAD transcript: {text}");
 
                                 let (cleaned_text, code_word) = parse_code_word(&text);
@@ -1316,11 +1395,8 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
                                 // Fire-and-forget dispatch
                                 spawn_claude_dispatch(text);
                             }
-                            Ok(Err(e)) => {
-                                error!("VAD transcription failed: {e}");
-                            }
                             Err(e) => {
-                                error!("VAD transcription task panicked: {e}");
+                                error!("VAD transcription failed: {e}");
                             }
                         }
 
@@ -1380,6 +1456,9 @@ async fn run_listen_daemon(threshold: f32) -> Result<()> {
 
     // Cleanup
     drop(audio_stream);
+    if let Some(mut st) = streaming_transcriber.take() {
+        let _ = st.close().await;
+    }
     if ptt_recorder.is_recording() {
         ptt_recorder.stop();
     }
@@ -1422,6 +1501,35 @@ fn resample_f32_to_i16(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<i16
     resampled
 }
 
+/// Resample f32 audio from `src_rate` to `dst_rate`, keeping f32 output.
+///
+/// Used by the streaming path to resample native-rate audio chunks to 16kHz
+/// before sending to the WebSocket server. The server's `send_audio` method
+/// handles the f32-to-i16 PCM conversion.
+fn resample_f32_for_streaming(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    if src_rate == dst_rate {
+        return samples.to_vec();
+    }
+
+    let ratio = dst_rate as f64 / src_rate as f64;
+    let new_len = (samples.len() as f64 * ratio) as usize;
+    let mut resampled = Vec::with_capacity(new_len);
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx = src_idx as usize;
+        let frac = src_idx - idx as f64;
+        let s0 = samples[idx.min(samples.len() - 1)] as f64;
+        let s1 = samples[(idx + 1).min(samples.len() - 1)] as f64;
+        let val = (s0 + frac * (s1 - s0)) as f32;
+        resampled.push(val.clamp(-1.0, 1.0));
+    }
+    resampled
+}
+
 // ---------------------------------------------------------------------------
 // Entrypoint
 // ---------------------------------------------------------------------------
@@ -1441,7 +1549,9 @@ async fn main() -> Result<()> {
         None => run_daemon().await,
         Some(Command::Toggle) => run_toggle().await,
         Some(Command::Status) => run_status().await,
-        Some(Command::Listen { threshold }) => run_listen_daemon(threshold).await,
+        Some(Command::Listen { threshold, streaming, streaming_url }) => {
+            run_listen_daemon(threshold, streaming, &streaming_url).await
+        }
     }
 }
 

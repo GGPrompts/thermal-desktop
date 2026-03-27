@@ -9,6 +9,7 @@
 mod api;
 mod config;
 mod context;
+mod escalation;
 mod executor;
 mod tools;
 
@@ -62,9 +63,9 @@ async fn main() -> Result<()> {
         trust_config.tier_count()
     );
 
-    // Build the tool schema list for the Haiku system prompt
+    // Build the tool schema list for the API system prompt
     let tool_schemas = tools::build_tool_schemas();
-    info!("registered {} tools for Haiku", tool_schemas.len());
+    info!("registered {} tools for dispatch", tool_schemas.len());
 
     // Ensure socket directory exists
     tokio::fs::create_dir_all(SOCKET_DIR)
@@ -246,6 +247,15 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
 async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<String> {
     let http = reqwest::Client::new();
 
+    // Classify transcript complexity and select model
+    let complexity = escalation::classify_complexity(transcript);
+    let model = escalation::model_for(complexity);
+    info!(
+        complexity = ?complexity,
+        model = %model,
+        "classified transcript"
+    );
+
     // Build messages with conversational history.
     // Lock the context briefly to build the initial messages, then release.
     let mut messages = {
@@ -258,11 +268,12 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         ctx.build_messages(transcript)
     };
 
-    // Loop: send to Haiku, handle tool calls, feed results back
+    // Loop: send to model, handle tool calls, feed results back
     loop {
-        let response = api::call_haiku(&http, &state.api_key, &state.tool_schemas, &messages)
-            .await
-            .context("Haiku API call failed")?;
+        let response =
+            api::call_anthropic(&http, &state.api_key, Some(model), &state.tool_schemas, &messages)
+                .await
+                .context("API call failed")?;
 
         // Check stop reason
         let stop_reason = response
@@ -329,6 +340,28 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
             // Classify by trust tier
             let tier = state.trust_config.tier_for(tool_name);
             info!(tool = %tool_name, tier = ?tier, "trust classification");
+
+            // Capacity check: reject spawn_claude if insufficient memory
+            if tool_name == "spawn_claude" {
+                if let Some(available_gb) = escalation::available_memory_gb() {
+                    if available_gb < escalation::MIN_SPAWN_MEMORY_GB {
+                        let msg = format!(
+                            "Not enough memory to spawn another agent. {:.1}GB available, need at least {}GB.",
+                            available_gb,
+                            escalation::MIN_SPAWN_MEMORY_GB as u32,
+                        );
+                        warn!("{msg}");
+                        send_tts(&msg).await;
+                        tool_results.push(serde_json::json!({
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": msg,
+                        }));
+                        continue;
+                    }
+                    info!(available_gb = format!("{:.1}", available_gb), "memory check passed for spawn_claude");
+                }
+            }
 
             let result = match tier {
                 config::TrustTier::Auto => {

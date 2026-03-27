@@ -5,7 +5,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-haiku-4-20250414";
+const DEFAULT_MODEL: &str = "claude-haiku-4-20250414";
 const MAX_TOKENS: u32 = 1024;
 
 /// System prompt that gives Haiku its role as a voice assistant dispatcher.
@@ -26,14 +26,19 @@ Guidelines:
 - For beads issue queries, summarize results conversationally for speech (e.g. "You have 3 ready issues: thermal monitor, voice pipeline, and dispatcher" instead of listing IDs or JSON)."#;
 
 /// Call the Anthropic Messages API with tool definitions.
-pub async fn call_haiku(
+///
+/// `model` overrides the model used for this request (e.g., Haiku for simple
+/// commands, Sonnet for complex ones). Pass `None` to use the default Haiku.
+pub async fn call_anthropic(
     http: &reqwest::Client,
     api_key: &str,
+    model: Option<&str>,
     tools: &[Value],
     messages: &[Value],
 ) -> Result<Value> {
+    let model = model.unwrap_or(DEFAULT_MODEL);
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": model,
         "max_tokens": MAX_TOKENS,
         "system": SYSTEM_PROMPT,
         "tools": tools,
@@ -41,7 +46,7 @@ pub async fn call_haiku(
     });
 
     debug!(
-        model = MODEL,
+        model = model,
         messages = messages.len(),
         tools = tools.len(),
         "calling Anthropic API"
@@ -89,10 +94,11 @@ pub async fn call_haiku(
         .unwrap_or(0);
 
     info!(
+        %model,
         stop_reason = %stop_reason,
         input_tokens = input_tokens,
         output_tokens = output_tokens,
-        "Haiku response"
+        "API response"
     );
 
     Ok(parsed)
@@ -145,7 +151,7 @@ mod tests {
 
     fn build_api_body(tools: &[Value], messages: &[Value]) -> Value {
         serde_json::json!({
-            "model": MODEL,
+            "model": DEFAULT_MODEL,
             "max_tokens": MAX_TOKENS,
             "system": SYSTEM_PROMPT,
             "tools": tools,
@@ -263,7 +269,10 @@ mod tests {
     }
 
     #[test]
-    fn model_constant_is_haiku() {
-        assert!(MODEL.contains("haiku"), "MODEL should be a Haiku model");
+    fn default_model_constant_is_haiku() {
+        assert!(
+            DEFAULT_MODEL.contains("haiku"),
+            "DEFAULT_MODEL should be a Haiku model"
+        );
     }
 }

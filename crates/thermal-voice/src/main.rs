@@ -1050,9 +1050,19 @@ async fn run_toggle() -> Result<()> {
         }
     }
 
-    // Read current state
-    let current_state = read_state_file()
-        .map(|f| f.state)
+    // Ask the daemon for its authoritative state (not the file, which may race
+    // with level meter writes).
+    let status_resp = send_to_daemon("status").await?;
+    let current_state = status_resp
+        .state
+        .as_deref()
+        .and_then(|s| match s {
+            "muted" => Some(VoiceState::Muted),
+            "monitoring" => Some(VoiceState::Monitoring),
+            "listening" => Some(VoiceState::Listening),
+            "processing" => Some(VoiceState::Processing),
+            _ => None,
+        })
         .unwrap_or(VoiceState::Muted);
 
     match current_state {
@@ -1264,6 +1274,8 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
     let streaming_url_owned = streaming_url.to_owned();
     // Throttle level updates to ~5Hz (every 4th chunk at 50ms each = 200ms)
     let mut level_tick: u32 = 0;
+    // Track current voice state locally so level writes don't clobber it
+    let mut current_voice_state = VoiceState::Monitoring;
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -1283,7 +1295,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                     level_tick = 0;
                     // Clamp to 1.0 and round to 3 decimal places to reduce file churn
                     let level = (rms.min(1.0) * 1000.0).round() / 1000.0;
-                    write_state_with_level(VoiceState::Monitoring, None, Some(level));
+                    write_state_with_level(current_voice_state, None, Some(level));
                 }
 
                 let event = vad.process_chunk(&chunk);
@@ -1293,6 +1305,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                     }
                     VadEvent::SpeechStart => {
                         info!("VAD: speech detected");
+                        current_voice_state = VoiceState::Listening;
                         write_state(VoiceState::Listening, Some("vad"));
                         speech_buffer.clear();
                         speech_buffer.extend_from_slice(&chunk);
@@ -1329,6 +1342,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             }
                             speech_buffer.clear();
                             vad.reset();
+                            current_voice_state = VoiceState::Monitoring;
                             write_state(VoiceState::Monitoring, None);
                         } else {
                             speech_buffer.extend_from_slice(&chunk);
@@ -1351,6 +1365,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             "VAD: speech ended ({:.1}s buffered)",
                             speech_buffer.len() as f64 / native_rate as f64
                         );
+                        current_voice_state = VoiceState::Processing;
                         write_state(VoiceState::Processing, Some("transcribing"));
 
                         // Choose transcription path: streaming or batch
@@ -1378,6 +1393,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                                 let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
                                 if samples_i16.len() < min_samples {
                                     info!("VAD: audio too short (< 0.3s), ignoring");
+                                    current_voice_state = VoiceState::Monitoring;
                                     write_state(VoiceState::Monitoring, None);
                                     speech_buffer.clear();
                                     vad.reset();
@@ -1423,6 +1439,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                         }
 
                         // Return to monitoring
+                        current_voice_state = VoiceState::Monitoring;
                         write_state(VoiceState::Monitoring, None);
                         speech_buffer.clear();
                         vad.reset();
@@ -1449,6 +1466,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             let resp = handle_stop(&mut ptt_recorder, &config).await;
                             ptt_active = false;
                             // Return to monitoring after push-to-talk completes
+                            current_voice_state = VoiceState::Monitoring;
                             write_state(VoiceState::Monitoring, None);
                             resp
                         } else {

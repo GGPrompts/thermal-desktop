@@ -515,6 +515,41 @@ fn transcribe(samples: &[i16], config: &Config) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 /// Spawn `claude -p` with the transcript and optionally send the response
+/// Send a transcript to thermal-dispatcher via its Unix socket for command execution.
+/// Used by VAD mode — the dispatcher handles tool routing via local Ollama.
+async fn dispatch_to_dispatcher(transcript: String) {
+    let sock_path = runtime_dir().join("dispatcher.sock");
+    match tokio::net::UnixStream::connect(&sock_path).await {
+        Ok(stream) => {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let (reader, mut writer) = tokio::io::split(stream);
+            let msg = serde_json::json!({"transcript": transcript});
+            let payload = format!("{}\n", msg);
+            if let Err(e) = writer.write_all(payload.as_bytes()).await {
+                error!("failed to write to dispatcher socket: {e}");
+                return;
+            }
+            let _ = writer.shutdown().await;
+            // Read response (fire-and-forget, but log it)
+            let mut response = String::new();
+            let mut buf_reader = tokio::io::BufReader::new(reader);
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                buf_reader.read_line(&mut response),
+            ).await {
+                Ok(Ok(_)) => info!("dispatcher response: {}", response.trim()),
+                Ok(Err(e)) => warn!("failed to read dispatcher response: {e}"),
+                Err(_) => warn!("dispatcher response timed out"),
+            }
+        }
+        Err(e) => {
+            warn!("cannot connect to dispatcher socket at {}: {e}", sock_path.display());
+            warn!("is thermal-dispatcher running? falling back to claude -p");
+            dispatch_to_claude(&transcript).await;
+        }
+    }
+}
+
 /// to thermal-audio for TTS. Runs as a background task — does not block
 /// the socket response so the caller gets the transcript immediately.
 fn spawn_claude_dispatch(transcript: String) {
@@ -1421,17 +1456,9 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             Ok(text) => {
                                 info!("VAD transcript: {text}");
 
-                                let (cleaned_text, code_word) = parse_code_word(&text);
-
-                                type_at_cursor(&cleaned_text);
-                                copy_to_clipboard(&text);
-
-                                if let Some(ref code) = code_word {
-                                    execute_code_word(code);
-                                }
-
-                                // Fire-and-forget dispatch
-                                spawn_claude_dispatch(text);
+                                // VAD mode: send to thermal-dispatcher for command execution
+                                // (PTT mode uses type_at_cursor for dictation instead)
+                                tokio::spawn(dispatch_to_dispatcher(text));
                             }
                             Err(e) => {
                                 error!("VAD transcription failed: {e}");

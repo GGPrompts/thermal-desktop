@@ -1,7 +1,7 @@
 //! thermal-dispatcher: AI voice command dispatcher daemon.
 //!
 //! Listens on a Unix socket for transcript JSON from thermal-voice,
-//! sends transcripts to Claude Haiku via the Anthropic API with tool-use,
+//! sends transcripts to a local LLM via Ollama (qwen3:8b) with tool-use,
 //! classifies tools by trust tier (AUTO/CONFIRM/BLOCK), executes or gates
 //! them accordingly, and sends natural language responses to thermal-audio
 //! for TTS playback.
@@ -49,9 +49,15 @@ async fn main() -> Result<()> {
 
     info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Load API key
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .context("ANTHROPIC_API_KEY environment variable not set")?;
+    // Resolve model name (env var or default)
+    let model = api::resolve_model();
+    info!(model = %model, "using Ollama model");
+
+    // Health check: verify Ollama is running and model is available
+    let http = reqwest::Client::new();
+    api::check_ollama_health(&http, &model)
+        .await
+        .context("Ollama health check failed")?;
 
     // Load trust tier config
     let config_path = find_config_file();
@@ -85,7 +91,7 @@ async fn main() -> Result<()> {
 
     // Shared state wrapped in Arc for concurrent access
     let shared = std::sync::Arc::new(SharedState {
-        api_key,
+        model,
         trust_config,
         tool_schemas,
         conversation: Mutex::new(ConversationContext::new()),
@@ -110,7 +116,7 @@ async fn main() -> Result<()> {
 
 /// State shared across client handler tasks.
 struct SharedState {
-    api_key: String,
+    model: String,
     trust_config: TrustConfig,
     tool_schemas: Vec<serde_json::Value>,
     /// Multi-turn conversational context (persists across dispatch calls).
@@ -193,7 +199,7 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
     })
     .await;
 
-    // Send to Haiku and execute the tool-use loop
+    // Send to Ollama and execute the tool-use loop
     match dispatch_command(&msg.transcript, state).await {
         Ok(response_text) => {
             info!(response = %response_text, "dispatch complete");
@@ -241,18 +247,17 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Core dispatch logic — Haiku tool-use loop
+// Core dispatch logic — Ollama tool-use loop
 // ---------------------------------------------------------------------------
 
 async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<String> {
     let http = reqwest::Client::new();
 
-    // Classify transcript complexity and select model
+    // Classify transcript complexity (logged for observability; single model)
     let complexity = escalation::classify_complexity(transcript);
-    let model = escalation::model_for(complexity);
     info!(
         complexity = ?complexity,
-        model = %model,
+        model = %state.model,
         "classified transcript"
     );
 
@@ -271,11 +276,11 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
     // Loop: send to model, handle tool calls, feed results back
     loop {
         let response =
-            api::call_anthropic(&http, &state.api_key, Some(model), &state.tool_schemas, &messages)
+            api::call_ollama(&http, &state.model, &state.tool_schemas, &messages)
                 .await
-                .context("API call failed")?;
+                .context("Ollama API call failed")?;
 
-        // Check stop reason
+        // Check stop reason (normalised by call_ollama)
         let stop_reason = response
             .get("stop_reason")
             .and_then(|v| v.as_str())
@@ -335,7 +340,7 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
                 .unwrap_or("unknown");
             let tool_input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
 
-            info!(tool = %tool_name, id = %tool_id, "Haiku wants to call tool");
+            info!(tool = %tool_name, id = %tool_id, "model wants to call tool");
 
             // Classify by trust tier
             let tier = state.trust_config.tier_for(tool_name);
@@ -416,11 +421,16 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
             }));
         }
 
-        // Add tool results as a user message
-        messages.push(serde_json::json!({
+        // Add tool results as individual "tool" role messages for Ollama,
+        // wrapped in the Anthropic-compatible format for context building
+        let tool_result_msg = serde_json::json!({
             "role": "user",
             "content": tool_results,
-        }));
+        });
+
+        // Convert to Ollama's tool result format (one "role: tool" message per result)
+        let ollama_results = api::convert_tool_results_for_ollama(&tool_result_msg);
+        messages.extend(ollama_results);
     }
 }
 

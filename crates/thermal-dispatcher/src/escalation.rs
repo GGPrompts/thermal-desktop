@@ -1,11 +1,8 @@
-//! Intelligence escalation — classifies voice transcripts by complexity
-//! to route simple commands to Haiku and complex requests to Sonnet.
-
-/// Model used for simple, fast-path commands (status queries, single tool calls).
-pub const BASE_MODEL: &str = "claude-haiku-4-20250414";
-
-/// Model used for complex, multi-step requests (planning, analysis, code generation).
-pub const ESCALATION_MODEL: &str = "claude-sonnet-4-6-20250514";
+//! Complexity classification for voice transcripts.
+//!
+//! Previously routed between Haiku (simple) and Sonnet (complex). Now uses a
+//! single local model via Ollama, but the classification is retained for
+//! logging and future use (e.g., routing to a larger local model).
 
 /// Minimum available memory (in GB) required to spawn a new agent.
 pub const MIN_SPAWN_MEMORY_GB: f64 = 4.0;
@@ -14,10 +11,8 @@ pub const MIN_SPAWN_MEMORY_GB: f64 = 4.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplexityLevel {
     /// Single tool call, status query, window management, short command.
-    /// Routes to Haiku for speed.
     Simple,
     /// Multi-step request, planning, analysis, code generation.
-    /// Routes to Sonnet for reasoning quality.
     Complex,
 }
 
@@ -77,9 +72,10 @@ const SPAWN_QUALIFIERS: &[&str] = &[
 /// Word count threshold — transcripts above this are likely complex.
 const COMPLEX_WORD_THRESHOLD: usize = 20;
 
-/// Classify a voice transcript by complexity to select the appropriate model.
+/// Classify a voice transcript by complexity.
 ///
-/// Defaults to `Simple` (Haiku fast path) when in doubt.
+/// With a single local model, both levels use the same model, but the
+/// classification is logged for observability and future routing.
 pub fn classify_complexity(transcript: &str) -> ComplexityLevel {
     let lower = transcript.to_lowercase();
     let word_count = transcript.split_whitespace().count();
@@ -108,14 +104,6 @@ pub fn classify_complexity(transcript: &str) -> ComplexityLevel {
 
     // Default: simple (fast path)
     ComplexityLevel::Simple
-}
-
-/// Select the model string for a given complexity level.
-pub fn model_for(level: ComplexityLevel) -> &'static str {
-    match level {
-        ComplexityLevel::Simple => BASE_MODEL,
-        ComplexityLevel::Complex => ESCALATION_MODEL,
-    }
 }
 
 /// Read available memory from /proc/meminfo and return the value in GB.
@@ -333,38 +321,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // model_for
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn simple_routes_to_haiku() {
-        assert_eq!(model_for(ComplexityLevel::Simple), BASE_MODEL);
-        assert!(model_for(ComplexityLevel::Simple).contains("haiku"));
-    }
-
-    #[test]
-    fn complex_routes_to_sonnet() {
-        assert_eq!(model_for(ComplexityLevel::Complex), ESCALATION_MODEL);
-        assert!(model_for(ComplexityLevel::Complex).contains("sonnet"));
-    }
-
-    // -----------------------------------------------------------------------
     // Constants
     // -----------------------------------------------------------------------
 
     #[test]
     fn min_spawn_memory_is_four_gb() {
         assert!((MIN_SPAWN_MEMORY_GB - 4.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn base_model_is_haiku() {
-        assert!(BASE_MODEL.contains("haiku"));
-    }
-
-    #[test]
-    fn escalation_model_is_sonnet() {
-        assert!(ESCALATION_MODEL.contains("sonnet"));
     }
 
     // -----------------------------------------------------------------------

@@ -1,107 +1,333 @@
-//! Anthropic API client for Claude Haiku with tool use.
+//! Ollama API client for local LLM inference via qwen3:8b.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL: &str = "claude-haiku-4-20250414";
-const MAX_TOKENS: u32 = 1024;
+const OLLAMA_BASE_URL: &str = "http://localhost:11434";
+const DEFAULT_MODEL: &str = "qwen3:8b";
 
-/// System prompt that gives Haiku its role as a voice assistant dispatcher.
-const SYSTEM_PROMPT: &str = r#"You are the voice command dispatcher for Thermal Desktop, a custom Linux desktop environment.
+/// System prompt that gives the model its role as a voice assistant dispatcher.
+const SYSTEM_PROMPT: &str = r#"You are the voice assistant for Thermal Desktop, a custom Linux desktop.
+You receive speech-to-text transcripts and use tools to execute commands.
+Respond with brief spoken confirmations for TTS. No markdown, no formatting, plain English only, under 2 sentences.
 
-Your job:
-1. Interpret the user's spoken command (transcribed from speech-to-text).
-2. Use the available tools to fulfill the command.
-3. Respond with a brief, natural spoken confirmation suitable for TTS playback.
+Input is speech-to-text and may contain filler words, hesitations, or transcription errors. Interpret the intent, not literal text.
 
-Guidelines:
-- Be concise — responses will be spoken aloud via TTS.
-- Use tools when the user asks to do something on the desktop (open apps, manage windows, check status, etc.).
-- For ambiguous commands, pick the most likely interpretation.
-- If you cannot fulfill a request, say so briefly.
-- Never use markdown, code blocks, or formatting — plain spoken English only.
-- Keep responses under 2 sentences when possible.
-- For beads issue queries, summarize results conversationally for speech (e.g. "You have 3 ready issues: thermal monitor, voice pipeline, and dispatcher" instead of listing IDs or JSON)."#;
+TOOL GUIDE:
+- "open [app]" → open_app, open_browser, open_terminal, or open_files
+- "what's on screen" / "what do I have open" → screenshot or list_windows
+- "focus [app]" / "switch to [app]" → focus_window
+- "how are my issues" / "what's ready" → beads:list
+- "spawn claude" / "start a session" → spawn_claude
+- "check system" / "how's the machine" → system_metrics
+- For issue queries, summarize conversationally (e.g. "You have 3 ready issues" not JSON or IDs)
 
-/// Call the Anthropic Messages API with tool definitions.
+EXAMPLES:
+
+User: "open Firefox"
+Action: open_browser()
+Response: Opening Firefox.
+
+User: "uh what issues are ready"
+Action: beads:list(status="ready")
+Response: You have 3 ready issues, the voice pipeline, dispatcher chat, and monitor fix.
+
+User: "switch to the terminal"
+Action: focus_window(selector="kitty")
+Response: Switched to the terminal.
+
+User: "um how's the system doing"
+Action: system_metrics()
+Response: CPU is at 34 percent, 12 gigs of RAM used, GPU at 45 percent.
+
+User: "take a screenshot"
+Action: screenshot()
+Response: Got it. You have a terminal and Firefox open, with the terminal focused. /no_think"#;
+
+/// Resolve the model name: env var `THERMAL_DISPATCHER_MODEL` overrides the default.
+pub fn resolve_model() -> String {
+    std::env::var("THERMAL_DISPATCHER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+}
+
+/// Check that Ollama is reachable and the configured model is available.
+pub async fn check_ollama_health(http: &reqwest::Client, model: &str) -> Result<()> {
+    let url = format!("{OLLAMA_BASE_URL}/api/tags");
+    let response = http
+        .get(&url)
+        .send()
+        .await
+        .context("cannot reach Ollama at localhost:11434 — is it running?")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Ollama health check returned HTTP {}",
+            response.status()
+        );
+    }
+
+    let body: Value = response
+        .json()
+        .await
+        .context("parsing Ollama /api/tags response")?;
+
+    // Check if the requested model is available
+    let models = body
+        .get("models")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let model_available = models.iter().any(|m| {
+        m.get("name")
+            .and_then(|v| v.as_str())
+            .map(|name| name == model || name.starts_with(&format!("{model}:")))
+            .unwrap_or(false)
+    });
+
+    if !model_available {
+        let available: Vec<&str> = models
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+            .collect();
+        warn!(
+            model = %model,
+            available = ?available,
+            "configured model not found in Ollama — pull it with: ollama pull {model}"
+        );
+        anyhow::bail!(
+            "model '{}' not found in Ollama. Available: {:?}. Pull with: ollama pull {}",
+            model,
+            available,
+            model
+        );
+    }
+
+    info!(model = %model, "Ollama health check passed");
+    Ok(())
+}
+
+/// Convert Anthropic-style tool schemas to Ollama/OpenAI function-calling format.
 ///
-/// `model` overrides the model used for this request (e.g., Haiku for simple
-/// commands, Sonnet for complex ones). Pass `None` to use the default Haiku.
-pub async fn call_anthropic(
+/// Anthropic: `{"name": "...", "description": "...", "input_schema": {...}}`
+/// Ollama:    `{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}`
+pub fn convert_tools_for_ollama(anthropic_tools: &[Value]) -> Vec<Value> {
+    anthropic_tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": tool.get("name").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                    "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                    "parameters": tool.get("input_schema").cloned().unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
+                }
+            })
+        })
+        .collect()
+}
+
+/// Build Ollama chat messages array from conversation history messages.
+///
+/// Prepends the system prompt as a system message.
+fn build_ollama_messages(messages: &[Value]) -> Vec<Value> {
+    let mut ollama_messages = Vec::with_capacity(messages.len() + 1);
+
+    // System message first
+    ollama_messages.push(serde_json::json!({
+        "role": "system",
+        "content": SYSTEM_PROMPT,
+    }));
+
+    // Append conversation messages as-is (role/content format is compatible)
+    for msg in messages {
+        ollama_messages.push(msg.clone());
+    }
+
+    ollama_messages
+}
+
+/// Call the Ollama chat API with tool definitions.
+///
+/// Returns a normalised response with `stop_reason` and `content` fields
+/// matching the format expected by the dispatch loop in main.rs:
+///
+/// - `stop_reason`: `"end_turn"` or `"tool_use"`
+/// - `content`: array of `{"type": "text", "text": "..."}` and/or
+///   `{"type": "tool_use", "id": "...", "name": "...", "input": {...}}`
+pub async fn call_ollama(
     http: &reqwest::Client,
-    api_key: &str,
-    model: Option<&str>,
+    model: &str,
     tools: &[Value],
     messages: &[Value],
 ) -> Result<Value> {
-    let model = model.unwrap_or(DEFAULT_MODEL);
+    let url = format!("{OLLAMA_BASE_URL}/api/chat");
+    let ollama_tools = convert_tools_for_ollama(tools);
+    let ollama_messages = build_ollama_messages(messages);
+
     let body = serde_json::json!({
         "model": model,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "tools": tools,
-        "messages": messages,
+        "messages": ollama_messages,
+        "tools": ollama_tools,
+        "stream": false,
     });
 
     debug!(
         model = model,
-        messages = messages.len(),
-        tools = tools.len(),
-        "calling Anthropic API"
+        messages = ollama_messages.len(),
+        tools = ollama_tools.len(),
+        "calling Ollama API"
     );
 
     let response = http
-        .post(ANTHROPIC_API_URL)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
+        .post(&url)
         .header("content-type", "application/json")
         .json(&body)
         .send()
         .await
-        .context("HTTP request to Anthropic API failed")?;
+        .context("HTTP request to Ollama API failed")?;
 
     let status = response.status();
     let response_text = response
         .text()
         .await
-        .context("reading Anthropic API response body")?;
+        .context("reading Ollama API response body")?;
 
     if !status.is_success() {
         anyhow::bail!(
-            "Anthropic API returned {}: {}",
+            "Ollama API returned {}: {}",
             status,
             truncate(&response_text, 500)
         );
     }
 
     let parsed: Value =
-        serde_json::from_str(&response_text).context("parsing Anthropic API response JSON")?;
+        serde_json::from_str(&response_text).context("parsing Ollama API response JSON")?;
 
-    let stop_reason = parsed
-        .get("stop_reason")
+    // Log timing info from Ollama
+    let total_duration_ns = parsed.get("total_duration").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_duration_ms = total_duration_ns / 1_000_000;
+    let eval_count = parsed.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // Extract the message object
+    let message = parsed
+        .get("message")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let assistant_text = message
+        .get("content")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let usage = parsed.get("usage");
-    let input_tokens = usage
-        .and_then(|u| u.get("input_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_tokens = usage
-        .and_then(|u| u.get("output_tokens"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+        .unwrap_or("")
+        .to_string();
+
+    // Strip any <think>...</think> blocks from the response (Qwen3 thinking mode leakage)
+    let clean_text = strip_think_blocks(&assistant_text);
+
+    // Normalise into Anthropic-compatible content blocks
+    let mut content_blocks = Vec::new();
+
+    if !clean_text.is_empty() {
+        content_blocks.push(serde_json::json!({
+            "type": "text",
+            "text": clean_text,
+        }));
+    }
+
+    let has_tool_calls = !tool_calls.is_empty();
+
+    for (i, tc) in tool_calls.iter().enumerate() {
+        let function = tc.get("function").cloned().unwrap_or(serde_json::json!({}));
+        let name = function
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        // Ollama returns arguments as an object (already parsed JSON)
+        let arguments = function.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+
+        content_blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": format!("ollama_tool_{i}"),
+            "name": name,
+            "input": arguments,
+        }));
+    }
+
+    let stop_reason = if has_tool_calls { "tool_use" } else { "end_turn" };
 
     info!(
         %model,
         stop_reason = %stop_reason,
-        input_tokens = input_tokens,
-        output_tokens = output_tokens,
-        "API response"
+        duration_ms = total_duration_ms,
+        eval_tokens = eval_count,
+        "Ollama response"
     );
 
-    Ok(parsed)
+    // Return normalised response matching Anthropic format
+    Ok(serde_json::json!({
+        "stop_reason": stop_reason,
+        "content": content_blocks,
+    }))
+}
+
+/// Build Ollama tool result messages from Anthropic-format tool_result blocks.
+///
+/// Anthropic format (user message with content array):
+///   `{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "...", "content": "..."}]}`
+///
+/// Ollama format (one message per tool result):
+///   `{"role": "tool", "content": "..."}`
+///
+/// This is called from the dispatch loop to convert tool result messages.
+pub fn convert_tool_results_for_ollama(user_msg: &Value) -> Vec<Value> {
+    let content = user_msg
+        .get("content")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    content
+        .iter()
+        .filter(|block| {
+            block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+        })
+        .map(|block| {
+            let result_content = block
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            serde_json::json!({
+                "role": "tool",
+                "content": result_content,
+            })
+        })
+        .collect()
+}
+
+/// Strip `<think>...</think>` blocks that Qwen3 may emit even with /no_think.
+fn strip_think_blocks(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<think>") {
+        result.push_str(&remaining[..start]);
+        if let Some(end) = remaining[start..].find("</think>") {
+            remaining = &remaining[start + end + "</think>".len()..];
+        } else {
+            // Unclosed <think> tag — skip everything after it
+            remaining = "";
+            break;
+        }
+    }
+    result.push_str(remaining);
+    result.trim().to_string()
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -143,51 +369,107 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // API message construction: verify body structure
-    //
-    // We test the JSON body that would be sent by constructing it the same way
-    // call_haiku does — without making a real network call.
+    // strip_think_blocks
     // -----------------------------------------------------------------------
 
-    fn build_api_body(tools: &[Value], messages: &[Value]) -> Value {
-        serde_json::json!({
-            "model": DEFAULT_MODEL,
-            "max_tokens": MAX_TOKENS,
-            "system": SYSTEM_PROMPT,
-            "tools": tools,
-            "messages": messages,
-        })
+    #[test]
+    fn strip_think_blocks_no_tags() {
+        assert_eq!(strip_think_blocks("hello world"), "hello world");
     }
 
     #[test]
-    fn api_body_contains_correct_model() {
-        let body = build_api_body(&[], &[]);
+    fn strip_think_blocks_removes_think_section() {
         assert_eq!(
-            body.get("model").and_then(|v| v.as_str()),
-            Some("claude-haiku-4-20250414")
+            strip_think_blocks("<think>reasoning here</think>Opening Firefox now."),
+            "Opening Firefox now."
         );
     }
 
     #[test]
-    fn api_body_contains_max_tokens() {
-        let body = build_api_body(&[], &[]);
-        assert_eq!(body.get("max_tokens").and_then(|v| v.as_u64()), Some(1024));
+    fn strip_think_blocks_multiple() {
+        assert_eq!(
+            strip_think_blocks("<think>a</think>hello <think>b</think>world"),
+            "hello world"
+        );
     }
 
     #[test]
-    fn api_body_contains_system_prompt() {
-        let body = build_api_body(&[], &[]);
-        let system = body.get("system").and_then(|v| v.as_str()).unwrap_or("");
-        assert!(!system.is_empty(), "system prompt must not be empty");
-        assert!(
-            system.contains("Thermal Desktop"),
-            "system prompt should mention Thermal Desktop"
-        );
+    fn strip_think_blocks_unclosed() {
+        assert_eq!(strip_think_blocks("before <think>rest"), "before");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool schema conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn convert_tools_maps_anthropic_to_ollama_format() {
+        let anthropic = vec![json!({
+            "name": "screenshot",
+            "description": "Take a screenshot",
+            "input_schema": {"type": "object", "properties": {}}
+        })];
+        let ollama = convert_tools_for_ollama(&anthropic);
+        assert_eq!(ollama.len(), 1);
+        assert_eq!(ollama[0]["type"], "function");
+        assert_eq!(ollama[0]["function"]["name"], "screenshot");
+        assert_eq!(ollama[0]["function"]["description"], "Take a screenshot");
+        assert_eq!(ollama[0]["function"]["parameters"]["type"], "object");
+    }
+
+    // -----------------------------------------------------------------------
+    // Message building
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_ollama_messages_prepends_system() {
+        let msgs = vec![json!({"role": "user", "content": "hello"})];
+        let result = build_ollama_messages(&msgs);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0]["role"], "system");
+        assert!(result[0]["content"].as_str().unwrap().contains("Thermal Desktop"));
+        assert_eq!(result[1]["role"], "user");
+        assert_eq!(result[1]["content"], "hello");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool result conversion
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn convert_tool_results_maps_correctly() {
+        let user_msg = json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "result text"},
+            ]
+        });
+        let results = convert_tool_results_for_ollama(&user_msg);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["role"], "tool");
+        assert_eq!(results[0]["content"], "result text");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_model
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_model_is_qwen3() {
+        assert_eq!(DEFAULT_MODEL, "qwen3:8b");
+    }
+
+    // -----------------------------------------------------------------------
+    // System prompt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_prompt_contains_thermal_desktop() {
+        assert!(SYSTEM_PROMPT.contains("Thermal Desktop"));
     }
 
     #[test]
     fn system_prompt_instructs_tts_friendly_output() {
-        // The system prompt must guide Haiku towards brief, spoken responses.
         assert!(
             SYSTEM_PROMPT.contains("TTS") || SYSTEM_PROMPT.contains("spoken"),
             "system prompt should reference TTS or spoken output"
@@ -199,80 +481,19 @@ mod tests {
     }
 
     #[test]
-    fn api_body_includes_provided_tools() {
-        let tools = vec![
-            json!({"name": "screenshot", "description": "take a screenshot", "input_schema": {"type": "object", "properties": {}}}),
-        ];
-        let body = build_api_body(&tools, &[]);
-        let tools_arr = body.get("tools").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(tools_arr.len(), 1);
-        assert_eq!(
-            tools_arr[0].get("name").and_then(|v| v.as_str()),
-            Some("screenshot")
-        );
-    }
-
-    #[test]
-    fn api_body_includes_provided_messages() {
-        let messages = vec![json!({"role": "user", "content": "open firefox"})];
-        let body = build_api_body(&[], &messages);
-        let msgs = body.get("messages").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].get("role").and_then(|v| v.as_str()), Some("user"));
-        assert_eq!(
-            msgs[0].get("content").and_then(|v| v.as_str()),
-            Some("open firefox")
-        );
-    }
-
-    #[test]
-    fn user_message_format_matches_anthropic_schema() {
-        // The dispatcher creates user messages like this; verify the structure.
-        let transcript = "open the browser";
-        let msg = json!({
-            "role": "user",
-            "content": transcript,
-        });
-        assert_eq!(msg.get("role").and_then(|v| v.as_str()), Some("user"));
-        assert_eq!(
-            msg.get("content").and_then(|v| v.as_str()),
-            Some("open the browser")
-        );
-    }
-
-    #[test]
-    fn tool_result_message_format() {
-        // The dispatcher builds tool_result messages like this; verify structure.
-        let result_block = json!({
-            "type": "tool_result",
-            "tool_use_id": "toolu_abc123",
-            "content": "window list: firefox, kitty",
-        });
-        assert_eq!(
-            result_block.get("type").and_then(|v| v.as_str()),
-            Some("tool_result")
-        );
-        assert_eq!(
-            result_block.get("tool_use_id").and_then(|v| v.as_str()),
-            Some("toolu_abc123")
-        );
-        assert!(result_block.get("content").is_some());
-    }
-
-    // -----------------------------------------------------------------------
-    // Constants are stable
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn anthropic_api_url_is_correct() {
-        assert_eq!(ANTHROPIC_API_URL, "https://api.anthropic.com/v1/messages");
-    }
-
-    #[test]
-    fn default_model_constant_is_haiku() {
+    fn system_prompt_ends_with_no_think() {
         assert!(
-            DEFAULT_MODEL.contains("haiku"),
-            "DEFAULT_MODEL should be a Haiku model"
+            SYSTEM_PROMPT.ends_with("/no_think"),
+            "system prompt should end with /no_think to disable Qwen3 thinking mode"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ollama URL
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ollama_base_url_is_localhost() {
+        assert_eq!(OLLAMA_BASE_URL, "http://localhost:11434");
     }
 }

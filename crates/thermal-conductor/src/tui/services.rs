@@ -138,7 +138,7 @@ const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         binary: "thermal-dispatcher",
         description: "Voice command router",
-        pid_source: PidSource::Pidfile("dispatcher.pid"),
+        pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
     },
@@ -172,7 +172,14 @@ fn read_pid_from_file(filename: &str) -> Option<u32> {
 }
 
 fn pgrep_pid(binary: &str) -> Option<u32> {
-    let output = Command::new("pgrep").arg("-x").arg(binary).output().ok()?;
+    // pgrep -x truncates at 15 chars on Linux. Use -f (full command line)
+    // with an anchored pattern for long binary names.
+    let (flag, pattern) = if binary.len() > 15 {
+        ("-f", format!("(^|/){binary}$"))
+    } else {
+        ("-x", binary.to_string())
+    };
+    let output = Command::new("pgrep").arg(flag).arg(&pattern).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -260,7 +267,12 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
         }
     } else {
         // No known PID — try pkill as fallback.
-        let result = Command::new("pkill").arg("-x").arg(def.binary).status();
+        let (flag, pattern) = if def.binary.len() > 15 {
+            ("-f", format!("(^|/){}", def.binary))
+        } else {
+            ("-x", def.binary.to_string())
+        };
+        let result = Command::new("pkill").arg(flag).arg(&pattern).status();
         match result {
             Ok(s) if s.success() => Ok(()),
             Ok(_) => Err(format!("{} not running", def.binary)),

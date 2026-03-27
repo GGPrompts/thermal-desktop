@@ -167,12 +167,20 @@ pub struct VoiceStateFile {
     pub state: VoiceState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Current RMS audio level (0.0–1.0), written by VAD loop for visual meters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<f32>,
 }
 
 fn write_state(state: VoiceState, label: Option<&str>) {
+    write_state_with_level(state, label, None);
+}
+
+fn write_state_with_level(state: VoiceState, label: Option<&str>, level: Option<f32>) {
     let file = VoiceStateFile {
         state,
         label: label.map(String::from),
+        level,
     };
     let json = match serde_json::to_string_pretty(&file) {
         Ok(j) => j,
@@ -1252,6 +1260,8 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
     // Only used when `use_streaming` is true.
     let mut streaming_transcriber: Option<streaming::StreamingTranscriber> = None;
     let streaming_url_owned = streaming_url.to_owned();
+    // Throttle level updates to ~5Hz (every 4th chunk at 50ms each = 200ms)
+    let mut level_tick: u32 = 0;
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -1262,6 +1272,21 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                 // If push-to-talk is active, skip VAD processing
                 if ptt_active {
                     continue;
+                }
+
+                // Compute RMS level and write throttled updates for the bar meter
+                let rms = vad::rms_energy(&chunk);
+                level_tick += 1;
+                if level_tick >= 4 {
+                    level_tick = 0;
+                    let current_state = read_state_file();
+                    let (state, label) = match &current_state {
+                        Some(f) => (f.state, f.label.as_deref()),
+                        None => (VoiceState::Monitoring, None),
+                    };
+                    // Clamp to 1.0 and round to 3 decimal places to reduce file churn
+                    let level = (rms.min(1.0) * 1000.0).round() / 1000.0;
+                    write_state_with_level(state, label, Some(level));
                 }
 
                 let event = vad.process_chunk(&chunk);
@@ -1570,6 +1595,7 @@ mod tests {
         let state = VoiceStateFile {
             state: VoiceState::Muted,
             label: None,
+            level: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"muted\""));
@@ -1581,6 +1607,7 @@ mod tests {
         let state = VoiceStateFile {
             state: VoiceState::Listening,
             label: None,
+            level: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"listening\""));
@@ -1591,6 +1618,7 @@ mod tests {
         let state = VoiceStateFile {
             state: VoiceState::Processing,
             label: None,
+            level: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"processing\""));
@@ -1601,6 +1629,7 @@ mod tests {
         let state = VoiceStateFile {
             state: VoiceState::Listening,
             label: Some("whisper".to_string()),
+            level: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"whisper\""));
@@ -1611,6 +1640,7 @@ mod tests {
         let state = VoiceStateFile {
             state: VoiceState::Monitoring,
             label: None,
+            level: None,
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("\"monitoring\""));
@@ -1635,6 +1665,7 @@ mod tests {
             let original = VoiceStateFile {
                 state: s,
                 label: Some("test".to_string()),
+                level: None,
             };
             let json = serde_json::to_string(&original).unwrap();
             let parsed: VoiceStateFile = serde_json::from_str(&json).unwrap();

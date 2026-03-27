@@ -113,7 +113,7 @@ impl VadDetector {
 }
 
 /// Compute the Root Mean Square energy of an audio buffer.
-fn rms_energy(samples: &[f32]) -> f32 {
+pub fn rms_energy(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }

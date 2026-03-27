@@ -457,6 +457,22 @@ fn socket_path() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Voice state check — suppress TTS while mic is active
+// ---------------------------------------------------------------------------
+
+const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
+
+/// Returns true if thermal-voice is actively listening or processing (PTT/VAD),
+/// so we can suppress TTS announcements that would interfere with recording.
+fn is_voice_active() -> bool {
+    let Ok(data) = std::fs::read_to_string(VOICE_STATE_PATH) else {
+        return false;
+    };
+    // Quick check without full deserialization
+    data.contains("\"listening\"") || data.contains("\"processing\"")
+}
+
+// ---------------------------------------------------------------------------
 // State transition announcements
 // ---------------------------------------------------------------------------
 
@@ -715,11 +731,14 @@ async fn main() -> Result<()> {
                         if let Some(text) = transition_text(&label, &prev, &session.status, session) {
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
                             let is_muted = audio_state.lock().unwrap().muted;
-                            if !is_muted {
+                            let voice_active = is_voice_active();
+                            if !is_muted && !voice_active {
                                 let voice = voices.assign(&session.session_id);
                                 if let Err(e) = audio.announce(&session.session_id, voice, &text) {
                                     warn!("announce failed: {e}");
                                 }
+                            } else if voice_active {
+                                info!("suppressed announcement (voice active): {text}");
                             }
                         }
                         prev_states.insert(session.session_id.clone(), session.status.clone());
@@ -736,7 +755,7 @@ async fn main() -> Result<()> {
                             let text = format!("{urgency}, {label} at {pct}% context");
                             info!("[{}] context alert: {text}", session.session_id);
                             let is_muted = audio_state.lock().unwrap().muted;
-                            if !is_muted {
+                            if !is_muted && !is_voice_active() {
                                 let voice = voices.assign(&session.session_id);
                                 if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
                                     warn!("context announce failed: {e}");

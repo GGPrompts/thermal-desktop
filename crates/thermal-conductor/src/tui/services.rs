@@ -203,7 +203,16 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
     // Spawn detached — setsid so it outlives the TUI.
+    // Capture stderr to a temp file so we can report early crashes.
     let program = def.command.unwrap_or(def.binary);
+
+    let stderr_file = tempfile::NamedTempFile::new()
+        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let stderr_fd = stderr_file
+        .as_file()
+        .try_clone()
+        .map_err(|e| format!("Failed to clone stderr fd: {e}"))?;
+
     let mut command = Command::new("setsid");
     command
         .arg("--fork")
@@ -211,10 +220,33 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
         .args(def.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::from(stderr_fd));
     let result = command.spawn();
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            // Give the process a moment to crash on startup errors.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Check if it actually stayed alive.
+            let status = get_service_status(def);
+            if status.running {
+                Ok(())
+            } else {
+                // Read stderr from the temp file for the error message.
+                let stderr_output = fs::read_to_string(stderr_file.path()).unwrap_or_default();
+                let hint = if stderr_output.is_empty() {
+                    format!("{} exited immediately (check logs)", def.binary)
+                } else {
+                    // Take the last non-empty line as the most useful error.
+                    let last_line = stderr_output
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("unknown error");
+                    format!("{}: {}", def.binary, last_line)
+                };
+                Err(hint)
+            }
+        }
         Err(e) => Err(format!("Failed to start {} ({}): {}", def.binary, program, e)),
     }
 }
@@ -722,7 +754,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 7);
+        assert_eq!(SERVICES.len(), 8);
     }
 
     #[test]

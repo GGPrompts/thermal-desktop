@@ -130,10 +130,17 @@ const SERVICES: &[ServiceDef] = &[
     },
     ServiceDef {
         binary: "thermal-voice",
-        description: "Voice input",
+        description: "Voice PTT (push-to-talk)",
         pid_source: PidSource::Pidfile("voice.pid"),
         command: None,
         args: &[],
+    },
+    ServiceDef {
+        binary: "thermal-voice",
+        description: "Voice VAD (always listening)",
+        pid_source: PidSource::Pidfile("voice.pid"),
+        command: None,
+        args: &["listen"],
     },
     ServiceDef {
         binary: "thermal-dispatcher",
@@ -339,6 +346,15 @@ impl ServicesPage {
                 }
             }
         } else {
+            // If another service shares the same binary, stop it first
+            // (e.g. switching between voice PTT and voice VAD modes).
+            for (i, other) in SERVICES.iter().enumerate() {
+                if i != self.selected && other.binary == def.binary && self.statuses[i].running {
+                    let _ = stop_service(other, &self.statuses[i]);
+                    // Brief pause for the process to exit and release the pidfile/socket.
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+            }
             match start_service(def) {
                 Ok(()) => {
                     self.status_msg =
@@ -766,7 +782,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 8);
+        assert_eq!(SERVICES.len(), 9);
     }
 
     #[test]

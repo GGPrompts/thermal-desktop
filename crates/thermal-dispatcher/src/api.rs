@@ -43,7 +43,9 @@ Response: CPU is at 34 percent, 12 gigs of RAM used, GPU at 45 percent.
 
 User: "take a screenshot"
 Action: screenshot()
-Response: Got it. You have a terminal and Firefox open, with the terminal focused. /no_think"#;
+Response: Got it. You have a terminal and Firefox open, with the terminal focused.
+
+THINKING: Do NOT use <think> blocks unless the user explicitly says "think" or "think about". Respond directly. /no_think"#;
 
 /// Resolve the model name: env var `THERMAL_DISPATCHER_MODEL` overrides the default.
 pub fn resolve_model() -> String {

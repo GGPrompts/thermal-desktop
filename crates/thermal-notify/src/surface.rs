@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat,
     output::{OutputHandler, OutputState},
@@ -35,6 +35,8 @@ pub struct NotifySurface {
     queue_handle: QueueHandle<NotifySurfaceState>,
     state: NotifySurfaceState,
     wl_surface: wl_surface::WlSurface,
+    /// Empty input region — set when idle so clicks pass through to windows below.
+    empty_region: Region,
 
     // wgpu — device and queue are Arc so they can be shared with the renderer
     instance: wgpu::Instance,
@@ -46,13 +48,6 @@ pub struct NotifySurface {
 }
 
 impl NotifySurface {
-    /// Check and clear the "clicked" flag. Returns true if user clicked the surface.
-    pub fn take_click(&mut self) -> bool {
-        let clicked = self.state.clicked;
-        self.state.clicked = false;
-        clicked
-    }
-
     /// Request a Wayland frame callback.
     ///
     /// Call this immediately before `SurfaceTexture::present()` to tell the
@@ -123,6 +118,12 @@ impl NotifySurface {
         layer_surface.set_margin(16, 16, 0, 0); // top, right, bottom, left
         layer_surface.set_exclusive_zone(-1); // don't reserve space
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+
+        // Create an empty input region — when applied, pointer events pass through.
+        let empty_region = Region::new(&init_state.compositor_state)
+            .context("failed to create empty wl_region")?;
+        // Start with passthrough since no notification is visible yet.
+        wl_surface.set_input_region(Some(empty_region.wl_region()));
         wl_surface.commit();
 
         init_state.layer_surface = Some(layer_surface.clone());
@@ -220,12 +221,13 @@ impl NotifySurface {
         Ok(Self {
             width,
             height,
-            visible: true,
+            visible: false,
             conn,
             event_queue,
             queue_handle: qh,
             state,
             wl_surface,
+            empty_region,
             instance,
             surface: wgpu_surface,
             adapter,

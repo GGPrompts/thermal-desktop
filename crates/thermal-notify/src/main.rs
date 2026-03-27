@@ -104,12 +104,6 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!("Wayland dispatch error: {e}");
             }
 
-            // Check for click-to-dismiss
-            if notify_surface.take_click() {
-                tracing::debug!("Click-to-dismiss triggered");
-                stack.dismiss_front();
-            }
-
             // Drain the incoming notification queue into the stack
             {
                 let mut q = queue_clone.lock().unwrap_or_else(|e| e.into_inner());

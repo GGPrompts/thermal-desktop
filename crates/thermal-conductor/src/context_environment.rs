@@ -53,31 +53,24 @@ fn is_ssh() -> bool {
 
 /// Check if the current working directory is inside a git worktree.
 ///
-/// Runs `git worktree list` and checks if there are multiple worktrees
-/// (the first is always the main working tree). If the current directory
-/// is in a non-primary worktree, this returns true.
-///
-/// Falls back to checking the `.git` file (worktrees have a `.git` *file*
-/// pointing to the main repo's `.git/worktrees/<name>` directory, while
-/// normal repos have a `.git` *directory*).
+/// Uses `git rev-parse --git-dir` which returns a path containing
+/// `/worktrees/` when inside a linked worktree (e.g. `.git/worktrees/foo`),
+/// versus plain `.git` for the main working tree. This works from any
+/// subdirectory depth within the worktree.
 fn is_git_worktree() -> bool {
-    // Fast path: check if `.git` is a file (worktree indicator) rather
-    // than a directory.
-    let git_path = Path::new(".git");
-    if git_path.is_file() {
-        return true;
-    }
-
-    // Slower path: run `git worktree list` and check for multiple entries.
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
+    // Fast path: `git rev-parse --git-common-dir` returns a path different
+    // from `--git-dir` when inside a worktree. This works from any subdirectory.
+    if let Ok(git_dir) = std::process::Command::new("git")
+        .args(["rev-parse", "--git-dir"])
         .output()
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Each worktree block starts with "worktree " line.
-            let worktree_count = stdout.lines().filter(|l| l.starts_with("worktree ")).count();
-            return worktree_count > 1;
+        if git_dir.status.success() {
+            let git_dir_str = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
+            // In a worktree, --git-dir points to `.git/worktrees/<name>` (contains "/worktrees/").
+            // In a normal repo, it's just `.git` or an absolute path to the `.git` directory.
+            if git_dir_str.contains("/worktrees/") {
+                return true;
+            }
         }
     }
 

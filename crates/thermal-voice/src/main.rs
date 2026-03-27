@@ -151,9 +151,10 @@ const STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 // State file (matches thermal-bar voice module schema)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VoiceState {
+    #[default]
     Muted,
     /// Always-listening idle: audio capture is running, VAD is active,
     /// but no speech has been detected yet.
@@ -162,7 +163,8 @@ pub enum VoiceState {
     Processing,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct VoiceStateFile {
     pub state: VoiceState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1279,14 +1281,9 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                 level_tick += 1;
                 if level_tick >= 4 {
                     level_tick = 0;
-                    let current_state = read_state_file();
-                    let (state, label) = match &current_state {
-                        Some(f) => (f.state, f.label.as_deref()),
-                        None => (VoiceState::Monitoring, None),
-                    };
                     // Clamp to 1.0 and round to 3 decimal places to reduce file churn
                     let level = (rms.min(1.0) * 1000.0).round() / 1000.0;
-                    write_state_with_level(state, label, Some(level));
+                    write_state_with_level(VoiceState::Monitoring, None, Some(level));
                 }
 
                 let event = vad.process_chunk(&chunk);

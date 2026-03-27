@@ -135,6 +135,13 @@ const SERVICES: &[ServiceDef] = &[
         command: None,
         args: &[],
     },
+    ServiceDef {
+        binary: "thermal-dispatcher",
+        description: "Voice command router",
+        pid_source: PidSource::Pidfile("dispatcher.pid"),
+        command: None,
+        args: &[],
+    },
 ];
 
 // ---------------------------------------------------------------------------

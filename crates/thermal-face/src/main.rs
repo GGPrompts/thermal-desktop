@@ -138,7 +138,7 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     // Map to -1..1 normalized coordinates (square aspect)
     let resolution = vec2<f32>(200.0, 200.0);
     let uv = frag_coord.xy / resolution;
-    let p = (uv - 0.5) * 2.0;
+    let p = vec2<f32>((uv.x - 0.5) * 2.0, (0.5 - uv.y) * 2.0); // flip Y for screen coords
 
     let time = u.time;
     let mouth_open = u.mouth_open;

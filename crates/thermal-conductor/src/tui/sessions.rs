@@ -539,19 +539,23 @@ impl SessionsPage {
             } else {
                 &row.session.session_id
             };
-            let _ = Command::new("kitty")
+            let kitty_ok = Command::new("kitty")
                 .args([
                     "@",
                     "focus-window",
                     "--match",
                     &format!("pid:{}", row.session.pid.unwrap_or(0)),
                 ])
-                .status()
-                .or_else(|_| {
-                    Command::new("tmux")
-                        .args(["switch-client", "-t", target])
-                        .status()
-                });
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if !kitty_ok {
+                // kitty focus failed (window gone or PID stale) — try tmux fallback
+                let _ = Command::new("tmux")
+                    .args(["switch-client", "-t", target])
+                    .status();
+            }
         }
     }
 

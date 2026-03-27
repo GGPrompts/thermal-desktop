@@ -130,14 +130,7 @@ const SERVICES: &[ServiceDef] = &[
     },
     ServiceDef {
         binary: "thermal-voice",
-        description: "Voice PTT (push-to-talk)",
-        pid_source: PidSource::Pidfile("voice.pid"),
-        command: None,
-        args: &[],
-    },
-    ServiceDef {
-        binary: "thermal-voice",
-        description: "Voice VAD (always listening)",
+        description: "Voice input (VAD + PTT)",
         pid_source: PidSource::Pidfile("voice.pid"),
         command: None,
         args: &["listen"],
@@ -200,37 +193,9 @@ fn is_pid_alive(pid: u32) -> bool {
     signal::kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
-/// Read /proc/<pid>/cmdline to get the full command line arguments.
-fn read_cmdline(pid: u32) -> Option<Vec<String>> {
-    let path = format!("/proc/{pid}/cmdline");
-    let data = fs::read_to_string(&path).ok()?;
-    // cmdline is NUL-separated
-    Some(data.split('\0').filter(|s| !s.is_empty()).map(String::from).collect())
-}
-
 fn get_service_status(def: &ServiceDef) -> ServiceStatus {
     let pid = match &def.pid_source {
-        PidSource::Pidfile(filename) => {
-            let pid = read_pid_from_file(filename);
-            // If this service has specific args, verify the running process
-            // was started with those args (e.g. "listen" for VAD mode).
-            // This prevents shared-pidfile services from both showing "running".
-            if !def.args.is_empty() {
-                pid.filter(|&p| {
-                    read_cmdline(p).is_some_and(|args| {
-                        def.args.iter().all(|expected| args.iter().any(|a| a == expected))
-                    })
-                })
-            } else if pid.is_some() {
-                // No-args service: only show running if the process was NOT started
-                // with extra args (i.e. it's the plain daemon, not a variant).
-                pid.filter(|&p| {
-                    read_cmdline(p).is_some_and(|args| args.len() <= 1)
-                })
-            } else {
-                pid
-            }
-        }
+        PidSource::Pidfile(filename) => read_pid_from_file(filename),
         PidSource::Pgrep => pgrep_pid(def.binary),
     };
     ServiceStatus {
@@ -810,7 +775,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 9);
+        assert_eq!(SERVICES.len(), 8);
     }
 
     #[test]

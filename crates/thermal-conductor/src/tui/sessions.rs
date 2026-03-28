@@ -1160,8 +1160,17 @@ impl SessionsPage {
 
         let (session_id, cwd) = match selected {
             Some((id, cwd)) if !cwd.is_empty() => (id, cwd),
+            Some((id, _)) => {
+                // Session selected but no working_dir — show diagnostic.
+                self.preview_content = vec![
+                    format!("(no working_dir for session {})", &id[..id.len().min(12)]),
+                ];
+                self.last_preview_session = Some(id);
+                return;
+            }
             _ => {
-                self.preview_content.clear();
+                self.preview_content =
+                    vec!["(select a session with arrow keys)".to_string()];
                 self.last_preview_session = None;
                 return;
             }

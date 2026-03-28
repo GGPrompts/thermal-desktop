@@ -1,49 +1,47 @@
-//! Screenshot tool — captures the screen via `grim`.
+//! Capture pane tool — captures terminal content via `kitty @ get-text`.
 
 use anyhow::{Context, Result};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::Value;
 use tokio::process::Command;
 
 use crate::mcp::{ContentBlock, ToolResult};
 
-/// Take a screenshot, optionally of a specific region.
+/// Capture terminal pane content via kitty remote control.
 ///
 /// Arguments:
-/// - `region` (optional): geometry string "X,Y WxH" for partial capture
-pub async fn screenshot(args: Value) -> Result<ToolResult> {
-    let path = "/tmp/thermal-commander-screenshot.png";
+/// - `window_id` (optional): kitty window ID to capture a specific pane
+pub async fn capture_pane(args: Value) -> Result<ToolResult> {
+    let mut cmd = Command::new("kitty");
+    cmd.arg("@")
+        .arg("--to")
+        .arg("unix:/tmp/kitty-thc")
+        .arg("get-text")
+        .arg("--extent=screen")
+        .arg("--ansi");
 
-    let mut cmd = Command::new("grim");
-
-    if let Some(region) = args.get("region").and_then(|v| v.as_str()) {
-        cmd.arg("-g").arg(region);
+    if let Some(window_id) = args.get("window_id").and_then(|v| v.as_str()) {
+        cmd.arg("--match").arg(format!("id:{window_id}"));
     }
-
-    cmd.arg(path);
 
     let output = cmd
         .output()
         .await
-        .context("failed to run grim — is it installed?")?;
+        .context("failed to run kitty @ get-text — is kitty running with remote control enabled?")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok(ToolResult::error(format!("grim failed: {stderr}")));
+        return Ok(ToolResult::error(format!(
+            "kitty @ get-text failed: {stderr}"
+        )));
     }
 
-    let png_bytes = tokio::fs::read(path)
-        .await
-        .context("failed to read screenshot file")?;
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
 
-    let b64 = BASE64.encode(&png_bytes);
+    if text.is_empty() {
+        return Ok(ToolResult::error(
+            "kitty @ get-text returned empty output — is the pane visible?",
+        ));
+    }
 
-    // Clean up
-    let _ = tokio::fs::remove_file(path).await;
-
-    Ok(ToolResult::success(vec![ContentBlock::image(
-        b64,
-        "image/png",
-    )]))
+    Ok(ToolResult::success(vec![ContentBlock::text(text)]))
 }

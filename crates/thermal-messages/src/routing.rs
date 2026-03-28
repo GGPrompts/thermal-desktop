@@ -118,6 +118,26 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
+/// Resolve a binary name to its full path, checking common locations
+/// that may not be in the daemon's PATH (e.g. ~/.local/bin).
+fn resolve_binary(name: &str) -> String {
+    let extra_dirs = [
+        dirs_home().join(".local/bin"),
+        dirs_home().join(".cargo/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+
+    for dir in &extra_dirs {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+
+    // Fall back to bare name (rely on PATH)
+    name.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Backend enum (avoids async-trait dependency)
 // ---------------------------------------------------------------------------
@@ -214,7 +234,7 @@ async fn dispatch_system(msg: &Message, trust_config: &TrustConfig) -> Result<Me
 async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String> {
     info!(tool = %tool_name, "executing via thermal-commander");
 
-    let mut child = Command::new("thermal-commander")
+    let mut child = Command::new(resolve_binary("thermal-commander"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -337,7 +357,7 @@ fn parse_mcp_response(response_line: &str) -> Result<String> {
 async fn dispatch_claude(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to claude");
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(resolve_binary("claude"));
     cmd.arg("-p")
         .arg(&msg.content)
         .arg("--output-format")
@@ -391,7 +411,7 @@ async fn dispatch_claude(msg: &Message) -> Result<Message> {
 async fn dispatch_codex(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to codex");
 
-    let output = Command::new("codex")
+    let output = Command::new(resolve_binary("codex"))
         .arg("--quiet")
         .arg(&msg.content)
         .output()
@@ -420,7 +440,7 @@ async fn dispatch_codex(msg: &Message) -> Result<Message> {
 async fn dispatch_planner(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to planner");
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(resolve_binary("claude"));
     cmd.arg("-p")
         .arg(&msg.content)
         .arg("--output-format")

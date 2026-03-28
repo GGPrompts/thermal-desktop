@@ -103,6 +103,74 @@ impl Default for ClaudeSessionState {
     }
 }
 
+impl ClaudeSessionState {
+    /// Return a short, human-friendly display name derived from the `model` field.
+    ///
+    /// Mapping rules (checked in order via substring match):
+    /// - Claude family: "opus" / "sonnet" / "haiku"
+    /// - GPT family: strips "gpt-" prefix and dashes (e.g. "gpt-5.4-mini" → "gpt5.4mini")
+    /// - Gemini family: strips "gemini-" prefix and trailing preview tags
+    ///   (e.g. "gemini-3-pro-preview" → "gemini3pro")
+    /// - o-series (OpenAI reasoning): keeps as-is but strips leading "o" prefix
+    ///   handling (e.g. "o3-pro" → "o3pro", "o4-mini" → "o4mini")
+    /// - Unknown models: returned trimmed as-is
+    /// - `None` model: falls back to `agent_type`, or "unknown"
+    pub fn model_display_name(&self) -> String {
+        let Some(raw) = self.model.as_deref() else {
+            // No model field — fall back to agent_type
+            return self
+                .agent_type
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string();
+        };
+
+        let m = raw.trim();
+        if m.is_empty() {
+            return self
+                .agent_type
+                .as_deref()
+                .unwrap_or("unknown")
+                .to_string();
+        }
+
+        // --- Claude family (substring match handles version suffixes) ---
+        if m.contains("opus") {
+            return "opus".to_string();
+        }
+        if m.contains("sonnet") {
+            return "sonnet".to_string();
+        }
+        if m.contains("haiku") {
+            return "haiku".to_string();
+        }
+
+        // --- OpenAI o-series reasoning models (o3, o3-pro, o4-mini, etc.) ---
+        // Must come before GPT to avoid false matches.
+        if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
+            return m.replace('-', "");
+        }
+
+        // --- GPT family ---
+        if m.starts_with("gpt-") || m.starts_with("gpt4") || m.starts_with("gpt5") {
+            // Strip "gpt-" prefix, then remove dashes
+            let stripped = m.strip_prefix("gpt-").unwrap_or(m);
+            return format!("gpt{}", stripped.replace('-', ""));
+        }
+
+        // --- Gemini family ---
+        if m.starts_with("gemini") {
+            let stripped = m.strip_prefix("gemini-").unwrap_or(m);
+            // Remove "-preview" suffix and dashes
+            let clean = stripped.replace("-preview", "").replace('-', "");
+            return format!("gemini{}", clean);
+        }
+
+        // --- Unknown: return trimmed raw string ---
+        m.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Generalized type aliases — new code can use these cleaner names.
 // ---------------------------------------------------------------------------
@@ -683,6 +751,94 @@ mod tests {
             ..ClaudeSessionState::default()
         };
         assert!(!codex_state_is_stale(&state));
+    }
+
+    // --- model_display_name ---
+
+    /// Helper: build a session with the given model and agent_type.
+    fn session_with_model(model: Option<&str>, agent_type: Option<&str>) -> ClaudeSessionState {
+        ClaudeSessionState {
+            model: model.map(|s| s.to_string()),
+            agent_type: agent_type.map(|s| s.to_string()),
+            ..ClaudeSessionState::default()
+        }
+    }
+
+    #[test]
+    fn display_name_opus_variants() {
+        assert_eq!(session_with_model(Some("claude-opus-4-6"), None).model_display_name(), "opus");
+        assert_eq!(session_with_model(Some("claude-opus-4-20250115"), None).model_display_name(), "opus");
+        assert_eq!(session_with_model(Some("opus-4-6"), None).model_display_name(), "opus");
+    }
+
+    #[test]
+    fn display_name_sonnet_variants() {
+        assert_eq!(session_with_model(Some("claude-sonnet-4-6"), None).model_display_name(), "sonnet");
+        assert_eq!(session_with_model(Some("claude-sonnet-4-20250514"), None).model_display_name(), "sonnet");
+        assert_eq!(session_with_model(Some("sonnet-4-6"), None).model_display_name(), "sonnet");
+    }
+
+    #[test]
+    fn display_name_haiku_variants() {
+        assert_eq!(session_with_model(Some("claude-haiku-4-5"), None).model_display_name(), "haiku");
+        assert_eq!(session_with_model(Some("claude-haiku-4-20250514"), None).model_display_name(), "haiku");
+        assert_eq!(session_with_model(Some("haiku-3-5"), None).model_display_name(), "haiku");
+    }
+
+    #[test]
+    fn display_name_gpt_variants() {
+        assert_eq!(session_with_model(Some("gpt-5.4"), None).model_display_name(), "gpt5.4");
+        assert_eq!(session_with_model(Some("gpt-5.4-mini"), None).model_display_name(), "gpt5.4mini");
+        assert_eq!(session_with_model(Some("gpt-4o"), None).model_display_name(), "gpt4o");
+        assert_eq!(session_with_model(Some("gpt-4o-mini"), None).model_display_name(), "gpt4omini");
+        assert_eq!(session_with_model(Some("gpt-4-turbo"), None).model_display_name(), "gpt4turbo");
+    }
+
+    #[test]
+    fn display_name_o_series() {
+        assert_eq!(session_with_model(Some("o3-pro"), None).model_display_name(), "o3pro");
+        assert_eq!(session_with_model(Some("o4-mini"), None).model_display_name(), "o4mini");
+        assert_eq!(session_with_model(Some("o3"), None).model_display_name(), "o3");
+        assert_eq!(session_with_model(Some("o1-preview"), None).model_display_name(), "o1preview");
+    }
+
+    #[test]
+    fn display_name_gemini_variants() {
+        assert_eq!(session_with_model(Some("gemini-3-pro-preview"), None).model_display_name(), "gemini3pro");
+        assert_eq!(session_with_model(Some("gemini-2.5-flash"), None).model_display_name(), "gemini2.5flash");
+        assert_eq!(session_with_model(Some("gemini-2.5-pro-preview"), None).model_display_name(), "gemini2.5pro");
+    }
+
+    #[test]
+    fn display_name_unknown_model() {
+        assert_eq!(session_with_model(Some("llama-3-70b"), None).model_display_name(), "llama-3-70b");
+        assert_eq!(session_with_model(Some("qwen3:8b"), None).model_display_name(), "qwen3:8b");
+        assert_eq!(session_with_model(Some("mistral-large"), None).model_display_name(), "mistral-large");
+    }
+
+    #[test]
+    fn display_name_none_falls_back_to_agent_type() {
+        assert_eq!(session_with_model(None, Some("claude")).model_display_name(), "claude");
+        assert_eq!(session_with_model(None, Some("codex")).model_display_name(), "codex");
+        assert_eq!(session_with_model(None, Some("copilot")).model_display_name(), "copilot");
+    }
+
+    #[test]
+    fn display_name_none_model_none_agent_type() {
+        assert_eq!(session_with_model(None, None).model_display_name(), "unknown");
+    }
+
+    #[test]
+    fn display_name_empty_string_falls_back() {
+        assert_eq!(session_with_model(Some(""), Some("claude")).model_display_name(), "claude");
+        assert_eq!(session_with_model(Some("  "), Some("codex")).model_display_name(), "codex");
+        assert_eq!(session_with_model(Some(""), None).model_display_name(), "unknown");
+    }
+
+    #[test]
+    fn display_name_whitespace_trimmed() {
+        assert_eq!(session_with_model(Some("  claude-opus-4-6  "), None).model_display_name(), "opus");
+        assert_eq!(session_with_model(Some(" gpt-5.4 "), None).model_display_name(), "gpt5.4");
     }
 
     // --- type alias smoke tests ---

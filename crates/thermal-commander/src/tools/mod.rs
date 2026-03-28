@@ -54,18 +54,18 @@ impl ToolRegistry {
 
     fn register_all(&mut self) {
         self.register(
-            "screenshot",
-            "Take a screenshot of the screen. Returns the image as base64-encoded PNG. Optionally capture a specific region.",
+            "capture_pane",
+            "Capture terminal pane content via kitty remote control. Returns the screen text with ANSI escape codes.",
             json!({
                 "type": "object",
                 "properties": {
-                    "region": {
+                    "window_id": {
                         "type": "string",
-                        "description": "Region to capture as \"X,Y WxH\" (e.g. \"100,200 800x600\"). Omit for full screen."
+                        "description": "Kitty window ID to capture a specific pane. Omit to capture the active pane."
                     }
                 }
             }),
-            |args| Box::pin(screenshot::screenshot(args)),
+            |args| Box::pin(screenshot::capture_pane(args)),
         );
 
         self.register(

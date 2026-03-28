@@ -4,7 +4,7 @@
 //! kitty attach, and a history popup overlay.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write as _;
+use std::io::{BufRead, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::time::Instant;
@@ -372,6 +372,115 @@ fn messages_socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/run/user/{uid}/thermal/messages.sock"))
 }
 
+// ---------------------------------------------------------------------------
+// Bus connection (subscriber) — mirrors chat.rs BusConnection
+// ---------------------------------------------------------------------------
+
+/// Non-blocking connection to the messages daemon.
+struct BusConnection {
+    reader: BufReader<UnixStream>,
+    /// Buffer for partial line reads.
+    line_buf: String,
+}
+
+impl BusConnection {
+    /// Attempt to connect and send a Subscribe message.
+    fn connect(since_seq: u64) -> Option<Self> {
+        let path = messages_socket_path();
+        let stream = UnixStream::connect(&path).ok()?;
+        stream.set_nonblocking(true).ok()?;
+
+        // Build subscribe message.
+        let subscribe = Message {
+            seq: 0,
+            ts: 0,
+            from: AgentId::new("user", "tui"),
+            to: AgentId::new("daemon", "bus"),
+            context_id: None,
+            project: None,
+            content: String::new(),
+            msg_type: MessageType::Subscribe {
+                since_seq: if since_seq > 0 { Some(since_seq) } else { None },
+            },
+            metadata: Default::default(),
+        };
+
+        let mut json = serde_json::to_string(&subscribe).ok()?;
+        json.push('\n');
+
+        // Briefly set blocking for the subscribe write.
+        stream.set_nonblocking(false).ok()?;
+        let mut write_stream = stream.try_clone().ok()?;
+        write_stream.write_all(json.as_bytes()).ok()?;
+        stream.set_nonblocking(true).ok()?;
+
+        Some(Self {
+            reader: BufReader::new(stream),
+            line_buf: String::new(),
+        })
+    }
+
+    /// Try to read any available messages (non-blocking).
+    fn poll(&mut self) -> Vec<Message> {
+        let mut msgs = Vec::new();
+        loop {
+            self.line_buf.clear();
+            match self.reader.read_line(&mut self.line_buf) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let trimmed = self.line_buf.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if let Ok(msg) = serde_json::from_str::<Message>(trimmed) {
+                        msgs.push(msg);
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => break, // Connection lost
+            }
+        }
+        msgs
+    }
+}
+
+// ---------------------------------------------------------------------------
+// @-mention parsing
+// ---------------------------------------------------------------------------
+
+/// Valid target agent types for @-mentions.
+const VALID_MENTION_TARGETS: &[&str] = &[
+    "system", "claude", "codex", "planner", "user", "dispatcher",
+];
+
+/// Parse an @-mention from chat input text.
+///
+/// If the text starts with or contains `@target` (where target is a valid agent
+/// type), extracts the target and returns the remaining content with the
+/// @mention stripped.
+///
+/// Returns `(Option<AgentId>, cleaned_content)`.
+fn parse_at_mention(text: &str) -> (Option<AgentId>, String) {
+    let trimmed = text.trim();
+    // Look for @word at the beginning of the text.
+    if let Some(rest) = trimmed.strip_prefix('@') {
+        // Extract the mention word (up to first whitespace).
+        let (mention, content) = match rest.find(char::is_whitespace) {
+            Some(pos) => (&rest[..pos], rest[pos..].trim_start()),
+            None => (rest, ""),
+        };
+        let mention_lower = mention.to_lowercase();
+        if VALID_MENTION_TARGETS.contains(&mention_lower.as_str()) {
+            return (
+                Some(AgentId::new(mention_lower, "default")),
+                content.to_string(),
+            );
+        }
+    }
+    // No valid @-mention found.
+    (None, trimmed.to_string())
+}
+
 /// Send text to a kitty window matching the given PID via `kitty @ send-text`.
 /// This is a synchronous helper for use in the TUI event loop.
 fn kitty_send_text(pid: u32, text: &str) -> bool {
@@ -384,8 +493,11 @@ fn kitty_send_text(pid: u32, text: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Send a message to the dispatcher via messages.sock.
-fn send_to_message_bus(text: &str) -> bool {
+/// Send a message to the message bus via messages.sock.
+///
+/// If `target` is provided, routes to that specific agent. Otherwise sends as
+/// broadcast to `("*", "broadcast")`.
+fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool {
     let path = messages_socket_path();
     let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
@@ -418,11 +530,16 @@ fn send_to_message_bus(text: &str) -> bool {
         return false;
     }
 
+    let to = match target {
+        Some(id) => id.clone(),
+        None => AgentId::new("*", "broadcast"),
+    };
+
     let msg = Message {
         seq: 0,
         ts: 0,
         from: AgentId::new("user", "tui"),
-        to: AgentId::new("*", "broadcast"),
+        to,
         context_id: None,
         project: None,
         content: text.to_string(),
@@ -480,6 +597,14 @@ pub struct SessionsPage {
     chat_messages: VecDeque<ChatEntry>,
     /// Status message with error flag and timestamp.
     chat_status: Option<(String, bool, Instant)>,
+
+    // -- Bus subscriber --
+    /// Connection to messages.sock for receiving messages.
+    bus_connection: Option<BusConnection>,
+    /// Highest seen sequence number (for replay on reconnect).
+    last_bus_seq: u64,
+    /// Last connection attempt time (for retry throttling).
+    last_bus_connect_attempt: Option<Instant>,
 }
 
 impl SessionsPage {
@@ -501,6 +626,9 @@ impl SessionsPage {
             chat_focused: false,
             chat_messages: VecDeque::new(),
             chat_status: None,
+            bus_connection: None,
+            last_bus_seq: 0,
+            last_bus_connect_attempt: None,
         }
     }
 
@@ -773,6 +901,61 @@ impl SessionsPage {
         self.selected_set.clear();
     }
 
+    // -- Bus subscriber --
+
+    /// Attempt to connect to the message bus (throttled to every 3 seconds).
+    fn try_bus_connect(&mut self) {
+        if let Some(last) = self.last_bus_connect_attempt {
+            if last.elapsed().as_secs() < 3 {
+                return;
+            }
+        }
+        self.last_bus_connect_attempt = Some(Instant::now());
+
+        if let Some(conn) = BusConnection::connect(self.last_bus_seq) {
+            self.bus_connection = Some(conn);
+        }
+    }
+
+    /// Poll the bus connection for incoming messages and add them to chat_messages.
+    fn poll_bus_messages(&mut self) {
+        let msgs = if let Some(ref mut conn) = self.bus_connection {
+            let msgs = conn.poll();
+            if msgs.is_empty() {
+                return;
+            }
+            msgs
+        } else {
+            return;
+        };
+
+        for msg in msgs {
+            if msg.seq > self.last_bus_seq {
+                self.last_bus_seq = msg.seq;
+            }
+            // Skip subscribe/ack control messages.
+            match &msg.msg_type {
+                MessageType::Subscribe { .. } | MessageType::Ack { .. } => continue,
+                _ => {}
+            }
+            // Filter out our own messages (user/tui) to avoid echo.
+            if msg.from.agent_type == "user" && msg.from.key == "tui" {
+                continue;
+            }
+            let entry = ChatEntry {
+                from_label: format!("{}/{}", msg.from.agent_type, msg.from.key),
+                content: msg.content.clone(),
+                timestamp: Instant::now(),
+            };
+            self.chat_messages.push_back(entry);
+        }
+
+        // Trim chat messages.
+        while self.chat_messages.len() > MAX_RECENT_MESSAGES {
+            self.chat_messages.pop_front();
+        }
+    }
+
     // -- Chat input --
 
     fn send_chat_input(&mut self) {
@@ -809,11 +992,25 @@ impl SessionsPage {
         };
 
         if selected_pids.is_empty() {
-            // No session selected — send to dispatcher via messages.sock.
-            let ok = send_to_message_bus(&text);
+            // No session selected — send to message bus.
+            // Parse @-mention for targeted routing.
+            let (mention_target, cleaned_content) = parse_at_mention(&text);
+            let (from_label, ok) = if let Some(ref target) = mention_target {
+                let label = format!("you \u{2192} @{}", target);
+                let ok = send_to_message_bus(&cleaned_content, Some(target));
+                (label, ok)
+            } else {
+                let ok = send_to_message_bus(&text, None);
+                ("you \u{2192} bus".to_string(), ok)
+            };
+            let display_content = if mention_target.is_some() {
+                cleaned_content.clone()
+            } else {
+                text.clone()
+            };
             let entry = ChatEntry {
-                from_label: "you \u{2192} bus".into(),
-                content: text.clone(),
+                from_label,
+                content: display_content,
                 timestamp: Instant::now(),
             };
             self.chat_messages.push_back(entry);
@@ -913,6 +1110,12 @@ impl TuiPage for SessionsPage {
             }
             self.last_workspace_refresh = Instant::now();
         }
+
+        // Poll bus for incoming messages.
+        if self.bus_connection.is_none() {
+            self.try_bus_connect();
+        }
+        self.poll_bus_messages();
 
         // Clear chat status after 4 seconds.
         if let Some((_, _, when)) = &self.chat_status {
@@ -2108,6 +2311,9 @@ mod tests {
             chat_focused: false,
             chat_messages: VecDeque::new(),
             chat_status: None,
+            bus_connection: None,
+            last_bus_seq: 0,
+            last_bus_connect_attempt: None,
         }
     }
 
@@ -2308,5 +2514,73 @@ mod tests {
         let (_, c3) = agent_type_badge(&copilot);
         assert_ne!(c1, c2);
         assert_ne!(c2, c3);
+    }
+
+    // ── parse_at_mention ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_at_mention_dispatcher_with_content() {
+        let (target, content) = parse_at_mention("@dispatcher make a workspace");
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "dispatcher");
+        assert_eq!(target.key, "default");
+        assert_eq!(content, "make a workspace");
+    }
+
+    #[test]
+    fn parse_at_mention_claude_target() {
+        let (target, content) = parse_at_mention("@claude hello world");
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "claude");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn parse_at_mention_case_insensitive() {
+        let (target, content) = parse_at_mention("@Dispatcher do something");
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "dispatcher");
+        assert_eq!(content, "do something");
+    }
+
+    #[test]
+    fn parse_at_mention_no_mention_returns_none() {
+        let (target, content) = parse_at_mention("hello world");
+        assert!(target.is_none());
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn parse_at_mention_invalid_target_returns_none() {
+        let (target, content) = parse_at_mention("@foobar do stuff");
+        assert!(target.is_none());
+        assert_eq!(content, "@foobar do stuff");
+    }
+
+    #[test]
+    fn parse_at_mention_only_target_no_content() {
+        let (target, content) = parse_at_mention("@system");
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "system");
+        assert_eq!(content, "");
+    }
+
+    #[test]
+    fn parse_at_mention_all_valid_targets() {
+        for name in VALID_MENTION_TARGETS {
+            let input = format!("@{} test", name);
+            let (target, content) = parse_at_mention(&input);
+            assert!(target.is_some(), "should parse @{name}");
+            assert_eq!(target.unwrap().agent_type, *name);
+            assert_eq!(content, "test");
+        }
+    }
+
+    #[test]
+    fn parse_at_mention_with_leading_whitespace() {
+        let (target, content) = parse_at_mention("  @planner plan the feature");
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "planner");
+        assert_eq!(content, "plan the feature");
     }
 }

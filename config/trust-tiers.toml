@@ -31,7 +31,8 @@ open_terminal = "CONFIRM"
 clipboard_set = "CONFIRM"
 notify = "CONFIRM"
 
-# Agent orchestration — require confirmation
+# Agent orchestration
+send_message = "AUTO"
 spawn_claude = "CONFIRM"
 
 # Destructive operations — blocked entirely

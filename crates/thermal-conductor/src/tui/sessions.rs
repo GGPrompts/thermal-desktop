@@ -2104,22 +2104,16 @@ impl TuiPage for SessionsPage {
             KeyCode::Char('r') => self.force_refresh(poller),
             KeyCode::Char('s') => self.save_session_as_profile(),
             KeyCode::PageUp => {
-                // Scroll preview up by half the visible height (estimate ~10 lines).
+                // Scroll preview up by ~10 lines.
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);
-                // Ensure we show at least the first line.
-                if self.preview_scroll < 1 && !self.preview_content.is_empty() {
-                    self.preview_scroll = self.preview_content.len().min(1);
-                }
             }
             KeyCode::PageDown => {
-                // Scroll preview down by half the visible height.
+                // Scroll preview down by ~10 lines.
                 self.preview_scroll = (self.preview_scroll + 10).min(self.preview_content.len());
             }
             KeyCode::Home => {
                 // Jump to top of preview.
-                if !self.preview_content.is_empty() {
-                    self.preview_scroll = self.preview_content.len().min(1);
-                }
+                self.preview_scroll = 0;
             }
             KeyCode::End => {
                 // Jump to bottom of preview.

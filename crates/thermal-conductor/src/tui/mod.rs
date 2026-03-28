@@ -4,6 +4,7 @@
 //! - **Sessions** — live Claude session monitoring (absorbed from thermal-monitor)
 //! - **Spawn** — interactive form to spawn new therminal sessions
 
+pub mod chat;
 pub mod profiles;
 pub mod services;
 pub mod sessions;
@@ -30,6 +31,7 @@ use ratatui::{
 
 use thermal_core::ClaudeStatePoller;
 
+use self::chat::ChatPage;
 use self::profiles::ProfilesPage;
 use self::services::ServicesPage;
 use self::sessions::SessionsPage;
@@ -116,6 +118,7 @@ impl App {
             Box::new(SessionsPage::new()),
             Box::new(ProfilesPage::new(backend_pref)),
             Box::new(ServicesPage::new()),
+            Box::new(ChatPage::new()),
         ];
 
         Ok(Self {
@@ -249,6 +252,9 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                         }
                         KeyCode::Char('3') if !is_text_input_page(&app) => {
                             app.set_tab(2);
+                        }
+                        KeyCode::Char('4') if !is_text_input_page(&app) => {
+                            app.set_tab(3);
                         }
                         // Ctrl+C always quits
                         KeyCode::Char('c')

@@ -6,6 +6,8 @@
 use serde_json::{Value, json};
 
 /// Build the complete list of tool schemas for the Anthropic API.
+/// Retained for reference and testing — production uses `build_slim_tool_schemas()`.
+#[cfg(test)]
 pub fn build_tool_schemas() -> Vec<Value> {
     let mut tools = Vec::new();
 
@@ -430,6 +432,92 @@ pub fn build_tool_schemas() -> Vec<Value> {
     tools
 }
 
+/// Build a slim tool schema list (~6 tools) optimised for small models (qwen3:8b).
+///
+/// Instead of exposing 28 individual tools, we collapse most actions into a
+/// `send_message` routing tool.  The small model acts as an intent parser,
+/// not a tool orchestrator — complex actions are forwarded to specialised
+/// agents (@planner, @claude, @codex, @system) via the message bus.
+pub fn build_slim_tool_schemas() -> Vec<Value> {
+    vec![
+        tool(
+            "send_message",
+            "Route a request to another agent or system service. Targets: @planner (issues/tasks), @claude (coding questions), @codex (coding tasks), @system (desktop control, notifications).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Target: @planner, @claude, @codex, or @system"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The message or request to send"
+                    }
+                },
+                "required": ["to", "content"]
+            }),
+        ),
+        tool(
+            "open_app",
+            "Launch an application by command name (e.g. \"firefox\", \"obs\", \"spotify\", \"nautilus\", \"kitty\").",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Command to execute (e.g. \"firefox\", \"kitty\", \"obs\")"
+                    }
+                },
+                "required": ["command"]
+            }),
+        ),
+        tool(
+            "focus_window",
+            "Switch focus to a window by class name or title substring (e.g. \"kitty\", \"Firefox\", \"obs\").",
+            json!({
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "Window class name or title substring"
+                    }
+                },
+                "required": ["selector"]
+            }),
+        ),
+        tool(
+            "screenshot",
+            "Take a screenshot of the screen. Returns a text description of what is visible.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "system_metrics",
+            "Get current CPU, RAM, and GPU usage.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "clipboard",
+            "Get or set clipboard contents.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["get", "set"],
+                        "description": "\"get\" to read clipboard, \"set\" to write"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text to copy (only for action=\"set\")"
+                    }
+                },
+                "required": ["action"]
+            }),
+        ),
+    ]
+}
+
 /// Helper to create a tool schema in Anthropic's format.
 fn tool(name: &str, description: &str, input_schema: Value) -> Value {
     json!({
@@ -798,6 +886,153 @@ mod tests {
     #[test]
     fn tool_schemas_round_trip_json() {
         let tools = build_tool_schemas();
+        let serialized = serde_json::to_string(&tools).expect("serialization failed");
+        let deserialized: Vec<Value> =
+            serde_json::from_str(&serialized).expect("deserialization failed");
+        assert_eq!(tools.len(), deserialized.len());
+    }
+
+    // -----------------------------------------------------------------------
+    // Slim tool schema tests
+    // -----------------------------------------------------------------------
+
+    fn slim_tool_names() -> Vec<String> {
+        build_slim_tool_schemas()
+            .into_iter()
+            .filter_map(|t| t.get("name").and_then(|v| v.as_str()).map(String::from))
+            .collect()
+    }
+
+    fn find_slim_tool(name: &str) -> Value {
+        build_slim_tool_schemas()
+            .into_iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name))
+            .unwrap_or_else(|| panic!("slim tool '{name}' not found"))
+    }
+
+    #[test]
+    fn slim_schemas_have_6_tools() {
+        let tools = build_slim_tool_schemas();
+        assert_eq!(tools.len(), 6, "slim schema should have exactly 6 tools");
+    }
+
+    #[test]
+    fn slim_schemas_contain_expected_tools() {
+        let names = slim_tool_names();
+        for expected in &[
+            "send_message",
+            "open_app",
+            "focus_window",
+            "screenshot",
+            "system_metrics",
+            "clipboard",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "slim schema missing tool: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn slim_every_tool_has_name_description_input_schema() {
+        let tools = build_slim_tool_schemas();
+        for t in &tools {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(!name.is_empty(), "slim tool has no name: {t}");
+            assert!(
+                t.get("description").and_then(|v| v.as_str()).is_some(),
+                "slim tool '{name}' missing description"
+            );
+            assert!(
+                t.get("input_schema").is_some(),
+                "slim tool '{name}' missing input_schema"
+            );
+        }
+    }
+
+    #[test]
+    fn slim_input_schema_has_type_object() {
+        let tools = build_slim_tool_schemas();
+        for t in &tools {
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let schema_type = t
+                .get("input_schema")
+                .and_then(|s| s.get("type"))
+                .and_then(|v| v.as_str());
+            assert_eq!(
+                schema_type,
+                Some("object"),
+                "slim tool '{name}' input_schema.type should be \"object\""
+            );
+        }
+    }
+
+    #[test]
+    fn slim_send_message_requires_to_and_content() {
+        let t = find_slim_tool("send_message");
+        let req = required_fields(&t);
+        assert!(req.contains(&"to".to_string()), "send_message should require 'to'");
+        assert!(req.contains(&"content".to_string()), "send_message should require 'content'");
+    }
+
+    #[test]
+    fn slim_open_app_requires_command() {
+        let t = find_slim_tool("open_app");
+        let req = required_fields(&t);
+        assert!(req.contains(&"command".to_string()));
+    }
+
+    #[test]
+    fn slim_focus_window_requires_selector() {
+        let t = find_slim_tool("focus_window");
+        let req = required_fields(&t);
+        assert!(req.contains(&"selector".to_string()));
+    }
+
+    #[test]
+    fn slim_clipboard_requires_action() {
+        let t = find_slim_tool("clipboard");
+        let req = required_fields(&t);
+        assert!(req.contains(&"action".to_string()));
+    }
+
+    #[test]
+    fn slim_clipboard_action_enum_has_get_and_set() {
+        let t = find_slim_tool("clipboard");
+        let enum_vals = t
+            .get("input_schema")
+            .and_then(|s| s.get("properties"))
+            .and_then(|p| p.get("action"))
+            .and_then(|a| a.get("enum"))
+            .and_then(|e| e.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(enum_vals.contains(&"get".to_string()));
+        assert!(enum_vals.contains(&"set".to_string()));
+    }
+
+    #[test]
+    fn slim_screenshot_has_no_required_fields() {
+        let t = find_slim_tool("screenshot");
+        let req = required_fields(&t);
+        assert!(req.is_empty());
+    }
+
+    #[test]
+    fn slim_system_metrics_has_no_required_fields() {
+        let t = find_slim_tool("system_metrics");
+        let req = required_fields(&t);
+        assert!(req.is_empty());
+    }
+
+    #[test]
+    fn slim_schemas_round_trip_json() {
+        let tools = build_slim_tool_schemas();
         let serialized = serde_json::to_string(&tools).expect("serialization failed");
         let deserialized: Vec<Value> =
             serde_json::from_str(&serialized).expect("deserialization failed");

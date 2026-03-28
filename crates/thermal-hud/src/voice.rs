@@ -46,13 +46,16 @@ pub enum VoiceState {
 }
 
 /// Raw JSON shape written by the voice assistant process.
+/// Must match the schema from thermal-voice: `{ state, label, level }`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 struct VoiceStateFile {
-    listening: bool,
-    last_transcript: String,
-    action_pending: Option<String>,
-    result: Option<String>,
+    /// Voice daemon state: "muted", "monitoring", "listening", "processing", "wake_word".
+    state: String,
+    /// Optional label (e.g. "whisper", "dictating").
+    label: Option<String>,
+    /// Current RMS audio level (0.0–1.0) from VAD.
+    level: Option<f32>,
 }
 
 /// Watches `/tmp/thermal-voice-state.json` for changes and derives the
@@ -136,60 +139,41 @@ impl VoiceStatePoller {
 
     /// Derive the HUD mode from the current raw state.
     fn derive_mode(&mut self) -> HudMode {
-        let state = match &self.current {
+        let raw = match &self.current {
             Some(s) => s,
             None => return HudMode::AgentTabs,
         };
 
-        // If there is a result, show it.
-        if let Some(summary) = &state.result
-            && !summary.is_empty()
-        {
-            if self.result_shown_at.is_none() {
-                self.result_shown_at = Some(Instant::now());
+        let label = raw.label.clone().unwrap_or_default();
+
+        match raw.state.as_str() {
+            "listening" => {
+                self.result_shown_at = None;
+                HudMode::VoiceActive {
+                    transcript: label,
+                    state: VoiceState::Listening,
+                }
             }
-            return HudMode::VoiceActive {
-                transcript: state.last_transcript.clone(),
-                state: VoiceState::Result {
-                    summary: summary.clone(),
-                },
-            };
+            "processing" => {
+                self.result_shown_at = None;
+                HudMode::VoiceActive {
+                    transcript: label,
+                    state: VoiceState::Transcribing,
+                }
+            }
+            "monitoring" | "wake_word" => {
+                self.result_shown_at = None;
+                HudMode::VoiceActive {
+                    transcript: String::new(),
+                    state: VoiceState::Listening,
+                }
+            }
+            // "muted" or unknown — fall back to agent tabs.
+            _ => {
+                self.result_shown_at = None;
+                HudMode::AgentTabs
+            }
         }
-
-        // If there is a pending action, show confirmation.
-        if let Some(action) = &state.action_pending
-            && !action.is_empty()
-        {
-            self.result_shown_at = None;
-            return HudMode::VoiceActive {
-                transcript: state.last_transcript.clone(),
-                state: VoiceState::Confirming {
-                    action: action.clone(),
-                },
-            };
-        }
-
-        // If we have a transcript but no action/result, we are transcribing/thinking.
-        if !state.last_transcript.is_empty() {
-            self.result_shown_at = None;
-            return HudMode::VoiceActive {
-                transcript: state.last_transcript.clone(),
-                state: VoiceState::Thinking,
-            };
-        }
-
-        // If actively listening with no transcript yet.
-        if state.listening {
-            self.result_shown_at = None;
-            return HudMode::VoiceActive {
-                transcript: String::new(),
-                state: VoiceState::Listening,
-            };
-        }
-
-        // Voice state file exists but nothing active — fall back to tabs.
-        self.result_shown_at = None;
-        HudMode::AgentTabs
     }
 
     /// Parse the voice state JSON file.

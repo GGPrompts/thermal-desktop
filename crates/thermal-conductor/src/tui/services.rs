@@ -142,6 +142,13 @@ const SERVICES: &[ServiceDef] = &[
         command: None,
         args: &[],
     },
+    ServiceDef {
+        binary: "thermal-messages",
+        description: "Agent message bus",
+        pid_source: PidSource::Pidfile("messages.pid"),
+        command: None,
+        args: &[],
+    },
 ];
 
 // ---------------------------------------------------------------------------

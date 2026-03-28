@@ -13,8 +13,12 @@ use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
 mod streaming;
+mod transcript_filter;
 mod vad;
+mod wakeword;
+use transcript_filter::{filter_transcript, FilterResult};
 use vad::{VadDetector, VadEvent};
+use wakeword::WakeWordDetector;
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -48,6 +52,11 @@ enum Command {
         /// WebSocket URL of the WhisperLiveKit streaming STT server.
         #[arg(long, default_value = streaming::DEFAULT_STREAMING_URL)]
         streaming_url: String,
+        /// Disable wake word detection (revert to pure VAD mode).
+        /// By default, listen mode requires the wake word "Alfred" before
+        /// capturing speech for transcription.
+        #[arg(long)]
+        no_wake_word: bool,
     },
 }
 
@@ -159,6 +168,9 @@ pub enum VoiceState {
     /// Always-listening idle: audio capture is running, VAD is active,
     /// but no speech has been detected yet.
     Monitoring,
+    /// Wake word mode: listening for the wake word ("Alfred") before
+    /// activating speech capture.
+    WakeWord,
     Listening,
     Processing,
 }
@@ -257,6 +269,7 @@ impl SocketResponse {
         let s = match state {
             VoiceState::Muted => "muted",
             VoiceState::Monitoring => "monitoring",
+            VoiceState::WakeWord => "wake_word",
             VoiceState::Listening => "listening",
             VoiceState::Processing => "processing",
         };
@@ -534,12 +547,15 @@ async fn dispatch_to_dispatcher(transcript: String) {
             let mut response = String::new();
             let mut buf_reader = tokio::io::BufReader::new(reader);
             match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(120),
                 buf_reader.read_line(&mut response),
             ).await {
                 Ok(Ok(_)) => info!("dispatcher response: {}", response.trim()),
                 Ok(Err(e)) => warn!("failed to read dispatcher response: {e}"),
-                Err(_) => warn!("dispatcher response timed out"),
+                Err(_) => {
+                    warn!("dispatcher response timed out after 120s, falling back to claude -p (risk of double-execution)");
+                    dispatch_to_claude(&transcript).await;
+                }
             }
         }
         Err(e) => {
@@ -611,7 +627,7 @@ async fn send_to_audio(text: &str) {
     match tokio::net::UnixStream::connect(&audio_sock).await {
         Ok(stream) => {
             let msg = serde_json::json!({
-                "action": "speak",
+                "action": "tts",
                 "text": text,
             });
             let (_, mut writer) = stream.into_split();
@@ -629,6 +645,24 @@ async fn send_to_audio(text: &str) {
             );
         }
     }
+}
+
+/// Check if thermal-audio TTS is currently speaking.
+///
+/// Reads the thermal-audio state file to detect active playback. Used for
+/// echo suppression — we skip wake word detection and VAD while TTS is
+/// playing to avoid the speaker's own output triggering false detections.
+fn is_tts_speaking() -> bool {
+    let state_path = "/tmp/thermal-audio-state.json";
+    if let Ok(contents) = std::fs::read_to_string(state_path) {
+        // The audio state file contains {"state":"speaking"} or {"state":"idle"}
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(state) = value.get("state").and_then(|s| s.as_str()) {
+                return state == "speaking" || state == "playing";
+            }
+        }
+    }
+    false
 }
 
 fn copy_to_clipboard(text: &str) {
@@ -1046,6 +1080,7 @@ async fn handle_stop(recorder: &mut Recorder, config: &Config) -> SocketResponse
             // dispatcher sees the complete intent.
             spawn_claude_dispatch(text.clone());
 
+            write_state(VoiceState::Muted, None);
             SocketResponse::with_transcript(text)
         }
         Ok(Err(e)) => {
@@ -1094,6 +1129,7 @@ async fn run_toggle() -> Result<()> {
         .and_then(|s| match s {
             "muted" => Some(VoiceState::Muted),
             "monitoring" => Some(VoiceState::Monitoring),
+            "wake_word" => Some(VoiceState::WakeWord),
             "listening" => Some(VoiceState::Listening),
             "processing" => Some(VoiceState::Processing),
             _ => None,
@@ -1101,7 +1137,7 @@ async fn run_toggle() -> Result<()> {
         .unwrap_or(VoiceState::Muted);
 
     match current_state {
-        VoiceState::Muted | VoiceState::Monitoring => {
+        VoiceState::Muted | VoiceState::Monitoring | VoiceState::WakeWord => {
             let resp = send_to_daemon("start").await?;
             if let Some(err) = resp.error {
                 eprintln!("error: {err}");
@@ -1156,9 +1192,13 @@ const VAD_CHUNK_MS: u32 = 50;
 
 /// Run the daemon in always-listening mode.
 ///
-/// The audio stream runs continuously. Audio chunks are fed through the
-/// `VadDetector`. When speech is detected, samples are buffered and then
-/// sent to transcription when speech ends.
+/// The audio stream runs continuously. In wake word mode (default), audio is
+/// first fed to the Rustpotter wake word detector. On detection of "Alfred",
+/// the system transitions to VAD-based speech capture. When speech ends,
+/// the transcript is filtered and dispatched.
+///
+/// With `--no-wake-word`, audio chunks go directly through the VAD detector
+/// (legacy behavior, noise-prone).
 ///
 /// When `use_streaming` is true, audio is streamed to a WhisperLiveKit server
 /// via WebSocket instead of batch-transcribed locally. The connection is opened
@@ -1166,8 +1206,13 @@ const VAD_CHUNK_MS: u32 = 50;
 /// connection is closed on SpeechEnd to collect the final transcript.
 ///
 /// Push-to-talk (via socket "start"/"stop" commands) still works as an
-/// override — it bypasses VAD and uses the same Recorder path.
-async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &str) -> Result<()> {
+/// override — it bypasses both wake word and VAD.
+async fn run_listen_daemon(
+    threshold: f32,
+    use_streaming: bool,
+    streaming_url: &str,
+    use_wake_word: bool,
+) -> Result<()> {
     let threshold = if threshold <= 0.0 || threshold > 1.0 {
         warn!("VAD threshold {threshold} out of range, clamping to 0.015");
         0.015
@@ -1201,8 +1246,37 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
 
     write_pidfile()?;
 
-    // Write initial state — Monitoring means VAD is active, waiting for speech
-    write_state(VoiceState::Monitoring, None);
+    // Initialize wake word detector if enabled
+    let mut wake_word_detector: Option<WakeWordDetector> = if use_wake_word {
+        match WakeWordDetector::new(SAMPLE_RATE) {
+            Ok(det) => {
+                if det.is_loaded() {
+                    info!("wake word detection enabled (say 'Alfred' to activate)");
+                    Some(det)
+                } else {
+                    warn!("wake word model not loaded — falling back to pure VAD mode");
+                    warn!("see logs above for instructions on creating a wake word model");
+                    None
+                }
+            }
+            Err(e) => {
+                error!("failed to create wake word detector: {e}");
+                warn!("falling back to pure VAD mode");
+                None
+            }
+        }
+    } else {
+        info!("wake word detection disabled (--no-wake-word)");
+        None
+    };
+
+    // Write initial state — WakeWord if detector loaded, otherwise Monitoring
+    let initial_state = if wake_word_detector.is_some() {
+        VoiceState::WakeWord
+    } else {
+        VoiceState::Monitoring
+    };
+    write_state(initial_state, None);
 
     // Set up socket (same as push-to-talk daemon for override commands)
     let sock_path = socket_path();
@@ -1213,8 +1287,9 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!(
-        "thermal-voice listen daemon on {} (VAD threshold={threshold})",
-        sock_path.display()
+        "thermal-voice listen daemon on {} (VAD threshold={threshold}, wake_word={})",
+        sock_path.display(),
+        wake_word_detector.is_some(),
     );
 
     // Channel: socket tasks send commands here
@@ -1310,7 +1385,19 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
     // Throttle level updates to ~5Hz (every 4th chunk at 50ms each = 200ms)
     let mut level_tick: u32 = 0;
     // Track current voice state locally so level writes don't clobber it
-    let mut current_voice_state = VoiceState::Monitoring;
+    let mut current_voice_state = initial_state;
+    // Throttle TTS echo suppression checks (~1Hz)
+    let mut echo_check_tick: u32 = 0;
+    let mut tts_is_speaking = false;
+    // Wake word accumulation buffer — rustpotter needs samples_per_frame()
+    // samples at a time, which may differ from the VAD chunk size. We
+    // accumulate native-rate mono samples and feed them in frame-sized
+    // batches, resampled to 16kHz (the rate the detector was configured with).
+    let ww_frame_size = wake_word_detector
+        .as_ref()
+        .map(|d| d.samples_per_frame())
+        .unwrap_or(0);
+    let mut ww_buffer: Vec<f32> = Vec::with_capacity(ww_frame_size * 2);
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
 
@@ -1318,8 +1405,20 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
         tokio::select! {
             // VAD audio chunks from the continuous stream
             Some(chunk) = audio_rx.recv() => {
-                // If push-to-talk is active, skip VAD processing
+                // If push-to-talk is active, skip VAD/wake word processing
                 if ptt_active {
+                    continue;
+                }
+
+                // Echo suppression: check TTS state periodically (~1Hz)
+                echo_check_tick += 1;
+                if echo_check_tick >= 20 { // 20 * 50ms = 1s
+                    echo_check_tick = 0;
+                    tts_is_speaking = is_tts_speaking();
+                }
+                // Skip all detection while TTS is playing to avoid
+                // the speaker output triggering false wake words or VAD
+                if tts_is_speaking {
                     continue;
                 }
 
@@ -1331,6 +1430,44 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                     // Clamp to 1.0 and round to 3 decimal places to reduce file churn
                     let level = (rms.min(1.0) * 1000.0).round() / 1000.0;
                     write_state_with_level(current_voice_state, None, Some(level));
+                }
+
+                // Wake word gate: in WakeWord state, feed audio to rustpotter
+                // instead of VAD. Only transition to VAD on detection.
+                if current_voice_state == VoiceState::WakeWord {
+                    if let Some(ref mut ww_det) = wake_word_detector {
+                        // Resample chunk from native rate to 16kHz for rustpotter
+                        let resampled = resample_f32_for_streaming(
+                            &chunk, native_rate, SAMPLE_RATE,
+                        );
+                        ww_buffer.extend_from_slice(&resampled);
+
+                        // Feed complete frames to the detector
+                        while ww_buffer.len() >= ww_frame_size && ww_frame_size > 0 {
+                            let frame: Vec<f32> =
+                                ww_buffer.drain(..ww_frame_size).collect();
+                            if ww_det.process_samples(&frame).is_some() {
+                                info!("wake word detected! transitioning to VAD listening");
+                                current_voice_state = VoiceState::Monitoring;
+                                write_state(VoiceState::Monitoring, Some("wake word heard"));
+                                vad.reset();
+                                ww_buffer.clear();
+                                // Don't break — fall through to VAD processing
+                                // on the next chunk
+                                break;
+                            }
+                        }
+
+                        // Prevent unbounded accumulation if frame_size is very large
+                        if ww_buffer.len() > ww_frame_size * 4 {
+                            let drain_to = ww_buffer.len() - ww_frame_size * 2;
+                            ww_buffer.drain(..drain_to);
+                        }
+                    }
+                    // If still in WakeWord state, skip VAD processing
+                    if current_voice_state == VoiceState::WakeWord {
+                        continue;
+                    }
                 }
 
                 let event = vad.process_chunk(&chunk);
@@ -1377,8 +1514,13 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             }
                             speech_buffer.clear();
                             vad.reset();
-                            current_voice_state = VoiceState::Monitoring;
-                            write_state(VoiceState::Monitoring, None);
+                            // Return to wake word or monitoring state
+                            current_voice_state = if wake_word_detector.is_some() {
+                                VoiceState::WakeWord
+                            } else {
+                                VoiceState::Monitoring
+                            };
+                            write_state(current_voice_state, None);
                         } else {
                             speech_buffer.extend_from_slice(&chunk);
 
@@ -1428,8 +1570,12 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                                 let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
                                 if samples_i16.len() < min_samples {
                                     info!("VAD: audio too short (< 0.3s), ignoring");
-                                    current_voice_state = VoiceState::Monitoring;
-                                    write_state(VoiceState::Monitoring, None);
+                                    current_voice_state = if wake_word_detector.is_some() {
+                                        VoiceState::WakeWord
+                                    } else {
+                                        VoiceState::Monitoring
+                                    };
+                                    write_state(current_voice_state, None);
                                     speech_buffer.clear();
                                     vad.reset();
                                     continue;
@@ -1456,20 +1602,37 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                             Ok(text) => {
                                 info!("VAD transcript: {text}");
 
-                                // VAD mode: send to thermal-dispatcher for command execution
-                                // (PTT mode uses type_at_cursor for dictation instead)
-                                tokio::spawn(dispatch_to_dispatcher(text));
+                                // Apply transcript filter to reject noise/hallucinations
+                                match filter_transcript(&text) {
+                                    FilterResult::Accept(cleaned) => {
+                                        // VAD mode: send to thermal-dispatcher for command execution
+                                        // (PTT mode uses type_at_cursor for dictation instead)
+                                        tokio::spawn(dispatch_to_dispatcher(cleaned));
+                                    }
+                                    FilterResult::Reject(reason) => {
+                                        info!("transcript filtered out: {reason}");
+                                    }
+                                }
                             }
                             Err(e) => {
                                 error!("VAD transcription failed: {e}");
                             }
                         }
 
-                        // Return to monitoring
-                        current_voice_state = VoiceState::Monitoring;
-                        write_state(VoiceState::Monitoring, None);
+                        // Return to wake word or monitoring state
+                        current_voice_state = if wake_word_detector.is_some() {
+                            VoiceState::WakeWord
+                        } else {
+                            VoiceState::Monitoring
+                        };
+                        write_state(current_voice_state, None);
                         speech_buffer.clear();
                         vad.reset();
+                        // Reset wake word detector state for clean next detection
+                        if let Some(ref mut ww_det) = wake_word_detector {
+                            ww_det.reset();
+                            ww_buffer.clear();
+                        }
                     }
                 }
             }
@@ -1492,9 +1655,17 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                         if ptt_active {
                             let resp = handle_stop(&mut ptt_recorder, &config).await;
                             ptt_active = false;
-                            // Return to monitoring after push-to-talk completes
-                            current_voice_state = VoiceState::Monitoring;
-                            write_state(VoiceState::Monitoring, None);
+                            // Return to wake word or monitoring after PTT completes
+                            current_voice_state = if wake_word_detector.is_some() {
+                                VoiceState::WakeWord
+                            } else {
+                                VoiceState::Monitoring
+                            };
+                            write_state(current_voice_state, None);
+                            if let Some(ref mut ww_det) = wake_word_detector {
+                                ww_det.reset();
+                                ww_buffer.clear();
+                            }
                             resp
                         } else {
                             SocketResponse::ok("not_recording")
@@ -1506,7 +1677,7 @@ async fn run_listen_daemon(threshold: f32, use_streaming: bool, streaming_url: &
                         } else if vad.is_in_speech() {
                             SocketResponse::state_response(VoiceState::Listening)
                         } else {
-                            SocketResponse::state_response(VoiceState::Monitoring)
+                            SocketResponse::state_response(current_voice_state)
                         }
                     }
                     other => SocketResponse::error(&format!("unknown action: {other}")),
@@ -1616,8 +1787,8 @@ async fn main() -> Result<()> {
         None => run_daemon().await,
         Some(Command::Toggle) => run_toggle().await,
         Some(Command::Status) => run_status().await,
-        Some(Command::Listen { threshold, streaming, streaming_url }) => {
-            run_listen_daemon(threshold, streaming, &streaming_url).await
+        Some(Command::Listen { threshold, streaming, streaming_url, no_wake_word }) => {
+            run_listen_daemon(threshold, streaming, &streaming_url, !no_wake_word).await
         }
     }
 }
@@ -1690,6 +1861,24 @@ mod tests {
     }
 
     #[test]
+    fn state_serialization_wake_word() {
+        let state = VoiceStateFile {
+            state: VoiceState::WakeWord,
+            label: None,
+            level: None,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"wake_word\""));
+    }
+
+    #[test]
+    fn state_deserialization_wake_word() {
+        let json = r#"{"state": "wake_word"}"#;
+        let parsed: VoiceStateFile = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.state, VoiceState::WakeWord);
+    }
+
+    #[test]
     fn state_deserialization_monitoring() {
         let json = r#"{"state": "monitoring"}"#;
         let parsed: VoiceStateFile = serde_json::from_str(json).unwrap();
@@ -1701,6 +1890,7 @@ mod tests {
         for s in [
             VoiceState::Muted,
             VoiceState::Monitoring,
+            VoiceState::WakeWord,
             VoiceState::Listening,
             VoiceState::Processing,
         ] {
@@ -1901,5 +2091,20 @@ mod tests {
         let resp = SocketResponse::state_response(VoiceState::Monitoring);
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"monitoring\""));
+    }
+
+    #[test]
+    fn response_state_wake_word() {
+        let resp = SocketResponse::state_response(VoiceState::WakeWord);
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"wake_word\""));
+    }
+
+    // -- Echo suppression --
+
+    #[test]
+    fn tts_not_speaking_when_no_state_file() {
+        // When there's no state file, TTS should not be considered speaking
+        assert!(!is_tts_speaking());
     }
 }

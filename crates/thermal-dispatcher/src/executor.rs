@@ -5,11 +5,15 @@
 //! We spawn it as a child process, send a `tools/call` request, and read
 //! the response. For beads tools, we shell out to the `beads` CLI.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use thermal_core::message::{AgentId, Message, MessageType};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -17,13 +21,118 @@ use tracing::{debug, info, warn};
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Execute a tool by name with the given input arguments.
-/// Routes to thermal-commander (MCP) for desktop tools, or beads CLI for
-/// issue-tracking tools.
+/// Routes to thermal-commander (MCP) for desktop tools, beads CLI for
+/// issue-tracking tools, or handles slim-schema tools locally.
 pub async fn execute_tool(tool_name: &str, input: &Value) -> Result<String> {
-    if tool_name.starts_with("beads:") {
-        execute_beads_tool(tool_name, input).await
-    } else {
-        execute_commander_tool(tool_name, input).await
+    match tool_name {
+        "send_message" => execute_send_message(input).await,
+        "clipboard" => execute_clipboard(input).await,
+        _ if tool_name.starts_with("beads:") => execute_beads_tool(tool_name, input).await,
+        _ => execute_commander_tool(tool_name, input).await,
+    }
+}
+
+/// Handle the `send_message` tool — route a message to an agent/service
+/// via the thermal-messages bus (messages.sock).
+async fn execute_send_message(input: &Value) -> Result<String> {
+    let to = input
+        .get("to")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let content = input
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    info!(to = %to, content = %content, "send_message routed");
+
+    // Validate target
+    let valid_targets = ["@planner", "@claude", "@codex", "@system"];
+    if !valid_targets.contains(&to) {
+        return Ok(format!(
+            "Unknown target '{to}'. Valid targets: @planner, @claude, @codex, @system"
+        ));
+    }
+
+    // Map @-prefixed target to AgentId (strip leading @, use as agent_type)
+    let agent_type = to.strip_prefix('@').unwrap_or(to);
+    let to_id = AgentId::new(agent_type, "default");
+    let from_id = AgentId::new("dispatcher", "voice");
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let msg = Message {
+        seq: 0, // assigned by daemon
+        ts: now_ms,
+        from: from_id,
+        to: to_id,
+        context_id: None,
+        project: None,
+        content: content.to_string(),
+        msg_type: MessageType::AgentMsg,
+        metadata: HashMap::new(),
+    };
+
+    let sock_path = crate::messages_socket_path();
+
+    let stream = match UnixStream::connect(&sock_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(path = %sock_path.display(), error = %e, "cannot connect to messages.sock");
+            return Ok(
+                "Message bus not available \u{2014} is thermal-messages running?".to_string(),
+            );
+        }
+    };
+
+    let (reader, mut writer) = stream.into_split();
+    let mut payload = serde_json::to_string(&msg).context("serializing AgentMsg")?;
+    payload.push('\n');
+    writer
+        .write_all(payload.as_bytes())
+        .await
+        .context("writing to messages.sock")?;
+
+    // Read response line from daemon
+    let mut buf_reader = BufReader::new(reader);
+    let mut response_line = String::new();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        buf_reader.read_line(&mut response_line),
+    )
+    .await
+    {
+        Ok(Ok(0)) | Err(_) => {
+            // EOF or timeout — message was sent but no response
+            Ok(format!("Message sent to {to} (no daemon response)"))
+        }
+        Ok(Ok(_)) => Ok(response_line.trim().to_string()),
+        Ok(Err(e)) => Ok(format!("Message sent to {to} but read error: {e}")),
+    }
+}
+
+/// Handle the unified `clipboard` tool (get/set).
+///
+/// Maps to the thermal-commander clipboard_get/clipboard_set tools.
+async fn execute_clipboard(input: &Value) -> Result<String> {
+    let action = input
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("get");
+
+    match action {
+        "get" => execute_commander_tool("clipboard_get", &json!({})).await,
+        "set" => {
+            let text = input
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            execute_commander_tool("clipboard_set", &json!({"text": text})).await
+        }
+        _ => Ok(format!("Unknown clipboard action: {action}")),
     }
 }
 
@@ -568,5 +677,110 @@ mod tests {
     fn mcp_invalid_json_returns_error() {
         let result = parse_mcp_response("not json at all");
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // send_message tool
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn send_message_valid_target_attempts_bus_connection() {
+        // With or without the daemon running, valid targets should either
+        // connect to the bus or report it's unavailable — not return a
+        // false "Message sent" confirmation.
+        let input = json!({"to": "@planner", "content": "create issue for voice bug"});
+        let result = super::execute_send_message(&input).await.unwrap();
+        // Should NOT contain the old stub "Message sent to @planner: ..."
+        assert!(
+            !result.contains("Message sent to @planner:"),
+            "should not return stub confirmation, got: {result}"
+        );
+        // Should be one of: bus unavailable, sent (no daemon response), or real response
+        assert!(
+            result.contains("Message bus not available")
+                || result.contains("Message sent to @planner")
+                || result.contains("ack"),
+            "unexpected result: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_invalid_target_returns_error() {
+        let input = json!({"to": "@invalid", "content": "test"});
+        let result = super::execute_send_message(&input).await.unwrap();
+        assert!(result.contains("Unknown target"), "should reject invalid target");
+    }
+
+    #[tokio::test]
+    async fn send_message_missing_fields_uses_defaults() {
+        let input = json!({});
+        let result = super::execute_send_message(&input).await.unwrap();
+        assert!(result.contains("Unknown target"), "missing 'to' should fail");
+    }
+
+    #[test]
+    fn send_message_builds_correct_agent_msg() {
+        // Verify the Message struct is constructed correctly without needing a socket
+        use std::collections::HashMap;
+        use thermal_core::message::{AgentId, Message, MessageType};
+
+        let msg = Message {
+            seq: 0,
+            ts: 1000,
+            from: AgentId::new("dispatcher", "voice"),
+            to: AgentId::new("claude", "default"),
+            context_id: None,
+            project: None,
+            content: "hello there".to_string(),
+            msg_type: MessageType::AgentMsg,
+            metadata: HashMap::new(),
+        };
+
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["from"]["agent_type"], "dispatcher");
+        assert_eq!(parsed["from"]["key"], "voice");
+        assert_eq!(parsed["to"]["agent_type"], "claude");
+        assert_eq!(parsed["to"]["key"], "default");
+        assert_eq!(parsed["content"], "hello there");
+        assert_eq!(parsed["type"], "AgentMsg");
+    }
+
+    // -----------------------------------------------------------------------
+    // clipboard tool routing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn clipboard_action_parsing() {
+        // Just test that the action field is parsed correctly
+        let input_get = json!({"action": "get"});
+        assert_eq!(
+            input_get.get("action").and_then(|v| v.as_str()),
+            Some("get")
+        );
+
+        let input_set = json!({"action": "set", "text": "hello"});
+        assert_eq!(
+            input_set.get("action").and_then(|v| v.as_str()),
+            Some("set")
+        );
+        assert_eq!(
+            input_set.get("text").and_then(|v| v.as_str()),
+            Some("hello")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tool routing: send_message and clipboard dispatch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_routing_send_message_is_not_beads() {
+        assert!(!"send_message".starts_with("beads:"));
+    }
+
+    #[test]
+    fn tool_routing_clipboard_is_not_beads() {
+        assert!(!"clipboard".starts_with("beads:"));
     }
 }

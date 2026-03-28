@@ -24,6 +24,7 @@ const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
 /// Unicode mic symbols.
 const MIC_MUTED: &str = "\u{1F507}"; // speaker off (muted)
 const MIC_MONITORING: &str = "\u{1F50E}"; // magnifying glass (monitoring/VAD)
+const MIC_WAKE_WORD: &str = "\u{1F514}"; // bell (wake word listening)
 const MIC_LISTENING: &str = "\u{1F3A4}"; // microphone
 const MIC_PROCESSING: &str = "\u{1F525}"; // fire (processing)
 
@@ -39,6 +40,8 @@ pub enum VoiceState {
     Muted,
     /// Always-listening idle: VAD is active, waiting for speech.
     Monitoring,
+    /// Wake word mode: listening for the wake word before activating.
+    WakeWord,
     Listening,
     Processing,
 }
@@ -148,6 +151,7 @@ impl VoiceModule {
         let (icon, label, color) = match state.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
             VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
+            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
@@ -249,6 +253,7 @@ mod tests {
         let (icon, label, color) = match state_file.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
             VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
+            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
@@ -344,6 +349,7 @@ mod tests {
         for state in [
             VoiceState::Muted,
             VoiceState::Monitoring,
+            VoiceState::WakeWord,
             VoiceState::Listening,
             VoiceState::Processing,
         ] {
@@ -381,6 +387,7 @@ mod tests {
     fn mic_constants_are_non_empty() {
         assert!(!MIC_MUTED.is_empty());
         assert!(!MIC_MONITORING.is_empty());
+        assert!(!MIC_WAKE_WORD.is_empty());
         assert!(!MIC_LISTENING.is_empty());
         assert!(!MIC_PROCESSING.is_empty());
     }

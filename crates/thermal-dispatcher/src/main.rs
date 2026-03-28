@@ -13,7 +13,7 @@ mod escalation;
 mod executor;
 mod tools;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -28,11 +28,37 @@ use context::ConversationContext;
 // Constants
 // ---------------------------------------------------------------------------
 
-const SOCKET_DIR: &str = "/run/user/1000/thermal";
-const SOCKET_PATH: &str = "/run/user/1000/thermal/dispatcher.sock";
-const AUDIO_SOCKET_PATH: &str = "/run/user/1000/thermal/audio.sock";
 const HUD_STATE_FILE: &str = "/tmp/thermal-hud-state.json";
 const VOICE_STATE_FILE: &str = "/tmp/thermal-voice-state.json";
+
+// ---------------------------------------------------------------------------
+// Runtime paths (XDG_RUNTIME_DIR with UID fallback)
+// ---------------------------------------------------------------------------
+
+/// Return the thermal runtime directory, respecting XDG_RUNTIME_DIR.
+/// Falls back to `/run/user/<uid>/thermal` when the env var is unset.
+pub fn runtime_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(dir).join("thermal")
+    } else {
+        PathBuf::from(format!(
+            "/run/user/{}/thermal",
+            nix::unistd::getuid()
+        ))
+    }
+}
+
+fn socket_path() -> PathBuf {
+    runtime_dir().join("dispatcher.sock")
+}
+
+fn audio_socket_path() -> PathBuf {
+    runtime_dir().join("audio.sock")
+}
+
+pub fn messages_socket_path() -> PathBuf {
+    runtime_dir().join("messages.sock")
+}
 
 /// Maximum number of tool-use iterations before bailing out.
 /// Prevents infinite loops if the model never returns `end_turn`.
@@ -73,25 +99,26 @@ async fn main() -> Result<()> {
         trust_config.tier_count()
     );
 
-    // Build the tool schema list for the API system prompt
-    let tool_schemas = tools::build_tool_schemas();
-    info!("registered {} tools for dispatch", tool_schemas.len());
+    // Build the slim tool schema list (~6 tools) for qwen3:8b accuracy
+    let tool_schemas = tools::build_slim_tool_schemas();
+    info!("registered {} slim tools for dispatch", tool_schemas.len());
 
     // Ensure socket directory exists
-    tokio::fs::create_dir_all(SOCKET_DIR)
+    let sock_dir = runtime_dir();
+    tokio::fs::create_dir_all(&sock_dir)
         .await
-        .with_context(|| format!("creating socket dir {SOCKET_DIR}"))?;
+        .with_context(|| format!("creating socket dir {}", sock_dir.display()))?;
 
     // Remove stale socket
-    let socket_path = Path::new(SOCKET_PATH);
-    if socket_path.exists() {
-        tokio::fs::remove_file(socket_path)
+    let sock_path = socket_path();
+    if sock_path.exists() {
+        tokio::fs::remove_file(&sock_path)
             .await
             .context("removing stale socket")?;
     }
 
-    let listener = UnixListener::bind(socket_path).context("binding Unix socket")?;
-    info!("listening on {SOCKET_PATH}");
+    let listener = UnixListener::bind(&sock_path).context("binding Unix socket")?;
+    info!("listening on {}", sock_path.display());
 
     // Shared state wrapped in Arc for concurrent access
     let shared = std::sync::Arc::new(SharedState {
@@ -573,6 +600,44 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
                 .unwrap_or("?");
             format!("Kill Claude session {id}")
         }
+        "send_message" => {
+            let to = input.get("to").and_then(|v| v.as_str()).unwrap_or("?");
+            let content = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("...");
+            let preview = if content.len() > 60 {
+                let mut end = 60;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &content[..end])
+            } else {
+                content.to_string()
+            };
+            format!("Send to {to}: \"{preview}\"")
+        }
+        "clipboard" => {
+            let action = input
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("get");
+            if action == "set" {
+                let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
+                let preview = if text.len() > 40 {
+                    let mut end = 40;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &text[..end])
+                } else {
+                    text.to_string()
+                };
+                format!("Copy to clipboard: \"{preview}\"")
+            } else {
+                "Read clipboard".to_string()
+            }
+        }
         _ => {
             // Generic: show tool name + compact args
             let args_str = serde_json::to_string(input).unwrap_or_default();
@@ -710,7 +775,7 @@ async fn send_tts(text: &str) {
     info!(text = %text, "sending TTS");
 
     // Try connecting to audio socket
-    match UnixStream::connect(AUDIO_SOCKET_PATH).await {
+    match UnixStream::connect(audio_socket_path()).await {
         Ok(stream) => {
             let msg = serde_json::json!({
                 "action": "speak",
@@ -1146,15 +1211,31 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn socket_path_is_in_run_user() {
-        assert!(SOCKET_PATH.starts_with("/run/user/"));
-        assert!(SOCKET_PATH.ends_with(".sock"));
+    fn runtime_dir_ends_with_thermal() {
+        let dir = runtime_dir();
+        assert!(
+            dir.to_str().unwrap().ends_with("/thermal"),
+            "runtime dir should end with /thermal, got {:?}",
+            dir
+        );
     }
 
     #[test]
-    fn audio_socket_path_is_in_run_user() {
-        assert!(AUDIO_SOCKET_PATH.starts_with("/run/user/"));
-        assert!(AUDIO_SOCKET_PATH.ends_with(".sock"));
+    fn socket_path_ends_with_sock() {
+        let p = socket_path();
+        assert!(p.to_str().unwrap().ends_with(".sock"));
+    }
+
+    #[test]
+    fn audio_socket_path_ends_with_sock() {
+        let p = audio_socket_path();
+        assert!(p.to_str().unwrap().ends_with(".sock"));
+    }
+
+    #[test]
+    fn messages_socket_path_ends_with_sock() {
+        let p = messages_socket_path();
+        assert!(p.to_str().unwrap().ends_with("messages.sock"));
     }
 
     #[test]

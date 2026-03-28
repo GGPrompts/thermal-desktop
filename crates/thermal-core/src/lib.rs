@@ -5,6 +5,7 @@
 pub mod claude_state;
 pub mod config;
 pub mod geometry;
+pub mod message;
 pub mod palette;
 pub mod pane;
 pub mod session;
@@ -15,6 +16,7 @@ pub mod wgpu_ctx;
 pub use claude_state::{
     ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ToolArgs, ToolDetails,
 };
+pub use message::{AgentId, Message, MessageType, ParseAgentIdError, TaskState};
 // Generalized aliases — prefer these in new code.
 pub use claude_state::{AgentSessionState, AgentStatePoller, AgentStatus};
 pub use config::{ConductorConfig, Layout};

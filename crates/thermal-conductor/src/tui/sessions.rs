@@ -598,6 +598,16 @@ pub struct SessionsPage {
     /// Status message with error flag and timestamp.
     chat_status: Option<(String, bool, Instant)>,
 
+    // -- Preview pane --
+    /// Cached lines from last `kitty @ get-text` call.
+    preview_content: Vec<String>,
+    /// Scroll offset for PgUp/PgDn within the preview pane.
+    preview_scroll: usize,
+    /// Session ID of the session currently being previewed (to detect selection changes).
+    last_preview_session: Option<String>,
+    /// Throttle preview refreshes (only every 500ms).
+    last_preview_update: Option<Instant>,
+
     // -- Bus subscriber --
     /// Connection to messages.sock for receiving messages.
     bus_connection: Option<BusConnection>,
@@ -626,6 +636,10 @@ impl SessionsPage {
             chat_focused: false,
             chat_messages: VecDeque::new(),
             chat_status: None,
+            preview_content: Vec::new(),
+            preview_scroll: 0,
+            last_preview_session: None,
+            last_preview_update: None,
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
@@ -956,6 +970,71 @@ impl SessionsPage {
         }
     }
 
+    // -- Preview pane --
+
+    /// Fetch terminal content from the selected session's kitty window via
+    /// `kitty @ get-text`. Throttled to at most once every 500ms.
+    fn fetch_preview(&mut self) {
+        // Determine the currently selected session's PID.
+        let selected = self.table_state.selected().and_then(|i| {
+            self.display_rows.get(i).and_then(|row| {
+                row.session.pid.map(|pid| (row.session.session_id.clone(), pid))
+            })
+        });
+
+        let (session_id, pid) = match selected {
+            Some(pair) => pair,
+            None => {
+                self.preview_content.clear();
+                self.last_preview_session = None;
+                return;
+            }
+        };
+
+        // If the selection changed, reset scroll and force an immediate refresh.
+        let selection_changed = self.last_preview_session.as_deref() != Some(&session_id);
+        if selection_changed {
+            self.last_preview_session = Some(session_id.clone());
+            self.preview_scroll = 0;
+            // Force refresh by clearing the throttle timestamp.
+            self.last_preview_update = None;
+        }
+
+        // Throttle: only refresh every 500ms.
+        if let Some(last) = self.last_preview_update {
+            if last.elapsed() < std::time::Duration::from_millis(500) {
+                return;
+            }
+        }
+        self.last_preview_update = Some(Instant::now());
+
+        // Run kitty @ get-text synchronously (called from tick()).
+        let match_arg = format!("pid:{pid}");
+        let result = Command::new("kitty")
+            .args([
+                "@",
+                "get-text",
+                "--extent=screen",
+                "--match",
+                &match_arg,
+            ])
+            .output();
+
+        match result {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                self.preview_content = text.lines().map(|l| l.to_string()).collect();
+                // Scroll to bottom (latest content).
+                let content_len = self.preview_content.len();
+                self.preview_scroll = content_len;
+            }
+            _ => {
+                self.preview_content = vec!["(preview unavailable)".to_string()];
+                self.preview_scroll = 0;
+            }
+        }
+    }
+
     // -- Chat input --
 
     fn send_chat_input(&mut self) {
@@ -1111,6 +1190,9 @@ impl TuiPage for SessionsPage {
             self.last_workspace_refresh = Instant::now();
         }
 
+        // Refresh preview pane from kitty terminal content.
+        self.fetch_preview();
+
         // Poll bus for incoming messages.
         if self.bus_connection.is_none() {
             self.try_bus_connect();
@@ -1132,8 +1214,9 @@ impl TuiPage for SessionsPage {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),                     // table
+                Constraint::Percentage(40),             // table
                 Constraint::Length(1),                   // timeline bar for selected session
+                Constraint::Percentage(35),             // preview pane
                 Constraint::Length(chat_msg_height),     // recent chat messages
                 Constraint::Length(3),                   // chat input bar
                 Constraint::Length(1),                   // footer
@@ -1327,6 +1410,57 @@ impl TuiPage for SessionsPage {
             f.render_widget(tl_widget, tl_area);
         }
 
+        // -- Preview pane --
+        {
+            let preview_area = chunks[2];
+            let inner_height = preview_area.height.saturating_sub(2) as usize; // borders top+bottom
+
+            let preview_widget = if self.preview_content.is_empty() {
+                Paragraph::new(Line::from(Span::styled(
+                    "(no session selected)",
+                    Style::default().fg(TEXT_MUTED),
+                )))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .title(" Preview ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(COLD))
+                        .style(Style::default().bg(BG)),
+                )
+            } else {
+                // Apply scroll: show lines ending at preview_scroll (bottom-anchored).
+                // preview_scroll is the index of the line just past the visible window bottom.
+                let total = self.preview_content.len();
+                let end = self.preview_scroll.min(total);
+                let start = end.saturating_sub(inner_height);
+                let visible_lines: Vec<Line> = self.preview_content[start..end]
+                    .iter()
+                    .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(TEXT_MUTED))))
+                    .collect();
+
+                let scroll_indicator = if total > inner_height {
+                    let pct = if total == 0 {
+                        100
+                    } else {
+                        (end * 100) / total
+                    };
+                    format!(" Preview [{}/{} {}%] ", end, total, pct)
+                } else {
+                    " Preview ".to_string()
+                };
+
+                Paragraph::new(visible_lines).block(
+                    Block::default()
+                        .title(scroll_indicator)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(COLD))
+                        .style(Style::default().bg(BG)),
+                )
+            };
+            f.render_widget(preview_widget, preview_area);
+        }
+
         // -- Recent chat messages --
         if !self.chat_messages.is_empty() {
             let now = Instant::now();
@@ -1364,7 +1498,7 @@ impl TuiPage for SessionsPage {
                 })
                 .collect();
             let msgs_widget = Paragraph::new(msg_lines).style(Style::default().bg(BG));
-            f.render_widget(msgs_widget, chunks[2]);
+            f.render_widget(msgs_widget, chunks[3]);
         }
 
         // -- Chat input bar --
@@ -1447,7 +1581,7 @@ impl TuiPage for SessionsPage {
                     }))
                     .style(Style::default().bg(BG)),
             );
-            f.render_widget(input_widget, chunks[3]);
+            f.render_widget(input_widget, chunks[4]);
         }
 
         // -- Footer --
@@ -1520,7 +1654,7 @@ impl TuiPage for SessionsPage {
             Paragraph::new(Line::from(footer_spans))
         }
         .style(Style::default().bg(BG));
-        f.render_widget(footer, chunks[4]);
+        f.render_widget(footer, chunks[5]);
 
         // -- History popup overlay --
         if let Some(ref sid) = self.history_popup {
@@ -1604,6 +1738,28 @@ impl TuiPage for SessionsPage {
             }
             KeyCode::Char('h') => self.toggle_history(),
             KeyCode::Char('r') => self.force_refresh(poller),
+            KeyCode::PageUp => {
+                // Scroll preview up by half the visible height (estimate ~10 lines).
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                // Ensure we show at least the first line.
+                if self.preview_scroll < 1 && !self.preview_content.is_empty() {
+                    self.preview_scroll = self.preview_content.len().min(1);
+                }
+            }
+            KeyCode::PageDown => {
+                // Scroll preview down by half the visible height.
+                self.preview_scroll = (self.preview_scroll + 10).min(self.preview_content.len());
+            }
+            KeyCode::Home => {
+                // Jump to top of preview.
+                if !self.preview_content.is_empty() {
+                    self.preview_scroll = self.preview_content.len().min(1);
+                }
+            }
+            KeyCode::End => {
+                // Jump to bottom of preview.
+                self.preview_scroll = self.preview_content.len();
+            }
             _ => {}
         }
         false
@@ -2309,6 +2465,10 @@ mod tests {
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
+            preview_content: Vec::new(),
+            preview_scroll: 0,
+            last_preview_session: None,
+            last_preview_update: None,
         }
     }
 

@@ -911,22 +911,20 @@ impl SessionsPage {
             }
         }
 
-        let pid = self
+        let cwd = self
             .table_state
             .selected()
             .and_then(|i| self.display_rows.get(i))
-            .and_then(|row| row.session.pid);
+            .and_then(|row| row.session.working_dir.clone());
 
-        if let Some(pid) = pid {
+        if let Some(cwd) = cwd {
             self.last_focus_time = Some(Instant::now());
-            let match_arg = format!("pid:{}", pid);
+            let match_arg = format!("cwd:{}", cwd);
             // Fire-and-forget: spawn the process without waiting for output.
             let _ = Command::new("kitty")
                 .args([
                     "@",
                     "focus-window",
-                    "--to",
-                    "unix:/tmp/kitty-thc",
                     "--match",
                     &match_arg,
                 ])
@@ -1154,14 +1152,15 @@ impl SessionsPage {
     fn fetch_preview(&mut self) {
         // Determine the currently selected session's PID.
         let selected = self.table_state.selected().and_then(|i| {
-            self.display_rows.get(i).and_then(|row| {
-                row.session.pid.map(|pid| (row.session.session_id.clone(), pid))
+            self.display_rows.get(i).map(|row| {
+                let cwd = row.session.working_dir.clone().unwrap_or_default();
+                (row.session.session_id.clone(), cwd)
             })
         });
 
-        let (session_id, pid) = match selected {
-            Some(pair) => pair,
-            None => {
+        let (session_id, cwd) = match selected {
+            Some((id, cwd)) if !cwd.is_empty() => (id, cwd),
+            _ => {
                 self.preview_content.clear();
                 self.last_preview_session = None;
                 return;
@@ -1186,12 +1185,11 @@ impl SessionsPage {
         self.last_preview_update = Some(Instant::now());
 
         // Run kitty @ get-text synchronously (called from tick()).
-        let match_arg = format!("pid:{pid}");
+        // Match by cwd since the session PID changes with each tool fork.
+        let match_arg = format!("cwd:{cwd}");
         let result = Command::new("kitty")
             .args([
                 "@",
-                "--to",
-                "unix:/tmp/kitty-thc",
                 "get-text",
                 "--extent=screen",
                 "--match",

@@ -13,8 +13,6 @@ use crate::mcp::{ContentBlock, ToolResult};
 pub async fn capture_pane(args: Value) -> Result<ToolResult> {
     let mut cmd = Command::new("kitty");
     cmd.arg("@")
-        .arg("--to")
-        .arg("unix:/tmp/kitty-thc")
         .arg("get-text")
         .arg("--extent=screen")
         .arg("--ansi");

@@ -393,8 +393,6 @@ async fn kitty_send_text(window_match: &str, text: &str) -> Result<String> {
     let output = Command::new("kitty")
         .args([
             "@",
-            "--to",
-            "unix:/tmp/kitty-thc",
             "send-text",
             "--match",
             window_match,

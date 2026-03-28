@@ -506,16 +506,69 @@ fn parse_at_mention_with_sessions(
     (None, trimmed.to_string())
 }
 
-/// Send text to a kitty window matching the given PID via `kitty @ send-text`.
-/// This is a synchronous helper for use in the TUI event loop.
-fn kitty_send_text(pid: u32, text: &str) -> bool {
-    let match_arg = format!("pid:{pid}");
-    Command::new("kitty")
-        .args(["@", "send-text", "--match", &match_arg, "--"])
-        .arg(text)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Scan all kitty instances via `/tmp/kitty-thc-*` sockets and build a
+/// cwd → (socket_path, window_id) map across all instances.
+fn scan_all_kitty_windows() -> HashMap<String, (String, i64)> {
+    let mut map = HashMap::new();
+    // Discover all kitty sockets.
+    let sockets: Vec<_> = std::fs::read_dir("/tmp")
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("kitty-thc-"))
+                .unwrap_or(false)
+        })
+        .map(|e| format!("unix:{}", e.path().display()))
+        .collect();
+
+    for socket in &sockets {
+        let output = match Command::new("kitty")
+            .args(["@", "--to", socket, "ls"])
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => continue,
+        };
+        let text = match String::from_utf8(output.stdout) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let data: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let empty = Vec::new();
+        for oswin in data.as_array().unwrap_or(&empty) {
+            for tab in oswin["tabs"].as_array().unwrap_or(&empty) {
+                for win in tab["windows"].as_array().unwrap_or(&empty) {
+                    let wid = win["id"].as_i64().unwrap_or(-1);
+                    if wid < 0 {
+                        continue;
+                    }
+                    let entry = (socket.clone(), wid);
+                    if let Some(cwd) = win["cwd"].as_str() {
+                        if !cwd.is_empty() {
+                            map.entry(cwd.to_string()).or_insert_with(|| entry.clone());
+                        }
+                    }
+                    if let Some(procs) = win["foreground_processes"].as_array() {
+                        for proc in procs {
+                            if let Some(cwd) = proc["cwd"].as_str() {
+                                if !cwd.is_empty() {
+                                    map.entry(cwd.to_string())
+                                        .or_insert_with(|| entry.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
 }
 
 /// Send a message to the message bus via messages.sock.
@@ -634,10 +687,16 @@ pub struct SessionsPage {
     preview_content: Vec<String>,
     /// Scroll offset for PgUp/PgDn within the preview pane.
     preview_scroll: usize,
+    /// True when user has manually scrolled — suppresses auto-scroll to bottom.
+    preview_pinned: bool,
     /// Session ID of the session currently being previewed (to detect selection changes).
     last_preview_session: Option<String>,
     /// Throttle preview refreshes (only every 500ms).
     last_preview_update: Option<Instant>,
+    /// Cached cwd → (kitty socket path, window ID) from scanning all kitty instances.
+    kitty_window_map: HashMap<String, (String, i64)>,
+    /// Last time we refreshed the kitty window map.
+    last_kitty_ls: Option<Instant>,
 
     // -- Focus throttle --
     /// Last time we issued a kitty focus-window for single-select navigation.
@@ -684,8 +743,11 @@ impl SessionsPage {
             chat_saved_input: String::new(),
             preview_content: Vec::new(),
             preview_scroll: 0,
+            preview_pinned: false,
             last_preview_session: None,
             last_preview_update: None,
+            kitty_window_map: HashMap::new(),
+            last_kitty_ls: None,
             last_focus_time: None,
             autocomplete_items: Vec::new(),
             autocomplete_index: 0,
@@ -919,19 +981,15 @@ impl SessionsPage {
 
         if let Some(cwd) = cwd {
             self.last_focus_time = Some(Instant::now());
-            let match_arg = format!("cwd:{}", cwd);
-            // Fire-and-forget: spawn the process without waiting for output.
-            let _ = Command::new("kitty")
-                .args([
-                    "@",
-                    "focus-window",
-                    "--match",
-                    &match_arg,
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            if let Some((socket, wid)) = self.resolve_kitty_window(&cwd) {
+                let match_arg = format!("id:{wid}");
+                let _ = Command::new("kitty")
+                    .args(["@", "--to", &socket, "focus-window", "--match", &match_arg])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+            }
         }
     }
 
@@ -1165,12 +1223,14 @@ impl SessionsPage {
                 self.preview_content = vec![
                     format!("(no working_dir for session {})", &id[..id.len().min(12)]),
                 ];
+                self.preview_scroll = self.preview_content.len();
                 self.last_preview_session = Some(id);
                 return;
             }
             _ => {
                 self.preview_content =
                     vec!["(select a session with arrow keys)".to_string()];
+                self.preview_scroll = self.preview_content.len();
                 self.last_preview_session = None;
                 return;
             }
@@ -1181,6 +1241,7 @@ impl SessionsPage {
         if selection_changed {
             self.last_preview_session = Some(session_id.clone());
             self.preview_scroll = 0;
+            self.preview_pinned = false;
             // Force refresh by clearing the throttle timestamp.
             self.last_preview_update = None;
         }
@@ -1193,32 +1254,55 @@ impl SessionsPage {
         }
         self.last_preview_update = Some(Instant::now());
 
-        // Run kitty @ get-text synchronously (called from tick()).
-        // Match by cwd since the session PID changes with each tool fork.
-        let match_arg = format!("cwd:{cwd}");
+        // Resolve the kitty (socket, window_id) for this cwd by scanning all
+        // kitty instances. Then fetch text with `kitty @ --to <socket> get-text`.
+        let resolved = self.resolve_kitty_window(&cwd);
+
+        let (socket, window_id) = match resolved {
+            Some(pair) => pair,
+            None => {
+                self.preview_content = vec![
+                    format!("(no kitty window found for cwd: {cwd})"),
+                ];
+                self.preview_scroll = self.preview_content.len();
+                return;
+            }
+        };
+
+        let match_arg = format!("id:{window_id}");
         let result = Command::new("kitty")
-            .args([
-                "@",
-                "get-text",
-                "--extent=screen",
-                "--match",
-                &match_arg,
-            ])
+            .args(["@", "--to", &socket, "get-text", "--extent=screen", "--match", &match_arg])
             .output();
 
         match result {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout);
                 self.preview_content = text.lines().map(|l| l.to_string()).collect();
-                // Scroll to bottom (latest content).
-                let content_len = self.preview_content.len();
-                self.preview_scroll = content_len;
+                if !self.preview_pinned {
+                    self.preview_scroll = self.preview_content.len();
+                }
             }
             _ => {
-                self.preview_content = vec!["(preview unavailable)".to_string()];
-                self.preview_scroll = 0;
+                self.preview_content = vec![format!("(preview failed for kitty window {window_id})")];
+                self.preview_scroll = self.preview_content.len();
             }
         }
+    }
+
+    /// Look up the kitty (socket, window_id) for a given cwd. Rescans all
+    /// kitty instances every 3 seconds.
+    fn resolve_kitty_window(&mut self, cwd: &str) -> Option<(String, i64)> {
+        let stale = self
+            .last_kitty_ls
+            .map(|t| t.elapsed() >= std::time::Duration::from_secs(3))
+            .unwrap_or(true);
+
+        if stale {
+            self.last_kitty_ls = Some(Instant::now());
+            self.kitty_window_map = scan_all_kitty_windows();
+        }
+
+        self.kitty_window_map.get(cwd).cloned()
     }
 
     // -- Autocomplete --
@@ -1309,26 +1393,24 @@ impl SessionsPage {
             return;
         }
 
-        let selected_pids: Vec<(u32, String)> = if !self.selected_set.is_empty() {
-            // Multi-select: send to all selected sessions.
+        // Collect (cwd, display_name) for selected sessions.
+        let selected_targets: Vec<(String, String)> = if !self.selected_set.is_empty() {
             self.selected_set
                 .iter()
                 .filter_map(|&i| {
                     self.display_rows.get(i).and_then(|row| {
-                        row.session.pid.map(|pid| {
-                            let label = row.session.session_id.clone();
-                            (pid, label)
+                        row.session.working_dir.clone().map(|cwd| {
+                            (cwd, row.session.model_display_name())
                         })
                     })
                 })
                 .collect()
         } else if let Some(i) = self.table_state.selected() {
-            // Single selection: send to the highlighted session.
             self.display_rows
                 .get(i)
                 .and_then(|row| {
-                    row.session.pid.map(|pid| {
-                        vec![(pid, row.session.session_id.clone())]
+                    row.session.working_dir.clone().map(|cwd| {
+                        vec![(cwd, row.session.model_display_name())]
                     })
                 })
                 .unwrap_or_default()
@@ -1336,7 +1418,7 @@ impl SessionsPage {
             Vec::new()
         };
 
-        if selected_pids.is_empty() {
+        if selected_targets.is_empty() {
             // No session selected — send to message bus.
             // Parse @-mention for targeted routing.
             let (mention_target, cleaned_content) =
@@ -1368,20 +1450,29 @@ impl SessionsPage {
                 ));
             }
         } else {
-            // Send to kitty terminal(s) via send-text.
+            // Send to kitty terminal(s) via cross-instance window map.
             let text_with_enter = format!("{}\r", text);
             let mut success_count = 0;
             let mut target_label = String::new();
-            for (pid, label) in &selected_pids {
-                if kitty_send_text(*pid, &text_with_enter) {
-                    success_count += 1;
+            for (cwd, label) in &selected_targets {
+                if let Some((socket, wid)) = self.resolve_kitty_window(cwd) {
+                    let match_arg = format!("id:{wid}");
+                    let ok = Command::new("kitty")
+                        .args(["@", "--to", &socket, "send-text", "--match", &match_arg, "--"])
+                        .arg(&text_with_enter)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if ok {
+                        success_count += 1;
+                    }
                 }
                 if target_label.is_empty() {
                     target_label = label.clone();
                 }
             }
-            if selected_pids.len() > 1 {
-                target_label = format!("{} sessions", selected_pids.len());
+            if selected_targets.len() > 1 {
+                target_label = format!("{} sessions", selected_targets.len());
             }
             let entry = ChatEntry {
                 from_label: format!("you \u{2192} {}", target_label),
@@ -1389,12 +1480,12 @@ impl SessionsPage {
                 timestamp: Instant::now(),
             };
             self.chat_messages.push_back(entry);
-            if success_count < selected_pids.len() {
+            if success_count < selected_targets.len() {
                 self.chat_status = Some((
                     format!(
                         "Sent to {}/{} sessions",
                         success_count,
-                        selected_pids.len()
+                        selected_targets.len()
                     ),
                     true,
                     Instant::now(),
@@ -1706,7 +1797,7 @@ impl TuiPage for SessionsPage {
                 // Apply scroll: show lines ending at preview_scroll (bottom-anchored).
                 // preview_scroll is the index of the line just past the visible window bottom.
                 let total = self.preview_content.len();
-                let end = self.preview_scroll.min(total);
+                let end = self.preview_scroll.max(1).min(total);
                 let start = end.saturating_sub(inner_height);
                 let visible_lines: Vec<Line> = self.preview_content[start..end]
                     .iter()
@@ -2140,20 +2231,21 @@ impl TuiPage for SessionsPage {
             KeyCode::Char('r') => self.force_refresh(poller),
             KeyCode::Char('s') => self.save_session_as_profile(),
             KeyCode::PageUp => {
-                // Scroll preview up by ~10 lines.
-                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                self.preview_scroll = self.preview_scroll.saturating_sub(10).max(1);
+                self.preview_pinned = true;
             }
             KeyCode::PageDown => {
-                // Scroll preview down by ~10 lines.
                 self.preview_scroll = (self.preview_scroll + 10).min(self.preview_content.len());
+                // Unpin if we've scrolled back to the bottom.
+                self.preview_pinned = self.preview_scroll < self.preview_content.len();
             }
             KeyCode::Home => {
-                // Jump to top of preview.
-                self.preview_scroll = 0;
+                self.preview_scroll = 1;
+                self.preview_pinned = true;
             }
             KeyCode::End => {
-                // Jump to bottom of preview.
                 self.preview_scroll = self.preview_content.len();
+                self.preview_pinned = false;
             }
             _ => {}
         }
@@ -2868,8 +2960,11 @@ mod tests {
             last_bus_connect_attempt: None,
             preview_content: Vec::new(),
             preview_scroll: 0,
+            preview_pinned: false,
             last_preview_session: None,
             last_preview_update: None,
+            kitty_window_map: HashMap::new(),
+            last_kitty_ls: None,
             last_focus_time: None,
         }
     }

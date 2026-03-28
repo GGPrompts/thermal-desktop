@@ -14,7 +14,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
 };
 
 use thermal_core::message::{AgentId, Message, MessageType};
@@ -619,6 +619,14 @@ pub struct SessionsPage {
     /// Last time we issued a kitty focus-window for single-select navigation.
     last_focus_time: Option<Instant>,
 
+    // -- Autocomplete --
+    /// Current filtered list of @-mention completions.
+    autocomplete_items: Vec<String>,
+    /// Selected item index in the autocomplete popup.
+    autocomplete_index: usize,
+    /// Whether the autocomplete popup is visible.
+    autocomplete_active: bool,
+
     // -- Bus subscriber --
     /// Connection to messages.sock for receiving messages.
     bus_connection: Option<BusConnection>,
@@ -655,6 +663,9 @@ impl SessionsPage {
             last_preview_session: None,
             last_preview_update: None,
             last_focus_time: None,
+            autocomplete_items: Vec::new(),
+            autocomplete_index: 0,
+            autocomplete_active: false,
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
@@ -1175,6 +1186,86 @@ impl SessionsPage {
                 self.preview_scroll = 0;
             }
         }
+    }
+
+    // -- Autocomplete --
+
+    /// Build the full list of @-mention completion candidates.
+    fn build_autocomplete(&self) -> Vec<String> {
+        let mut items: Vec<String> = VALID_MENTION_TARGETS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Add live session model display names (deduplicated).
+        let mut seen = std::collections::HashSet::new();
+        for row in &self.display_rows {
+            let name = row.session.model_display_name();
+            if seen.insert(name.clone()) {
+                items.push(name);
+            }
+        }
+
+        items.sort();
+        items.dedup();
+        items
+    }
+
+    /// Update autocomplete state based on current chat_input and cursor position.
+    fn update_autocomplete(&mut self) {
+        // Find the last '@' before or at the cursor position.
+        let before_cursor = &self.chat_input[..self.chat_cursor];
+        if let Some(at_pos) = before_cursor.rfind('@') {
+            let after_at = &before_cursor[at_pos + 1..];
+            // If there's a space in the partial, the @-word is complete — dismiss.
+            if after_at.contains(' ') {
+                self.autocomplete_active = false;
+                return;
+            }
+            let prefix = after_at.to_lowercase();
+            let candidates = self.build_autocomplete();
+            let filtered: Vec<String> = candidates
+                .into_iter()
+                .filter(|item| item.to_lowercase().starts_with(&prefix))
+                .collect();
+
+            if filtered.is_empty() {
+                self.autocomplete_active = false;
+            } else {
+                self.autocomplete_items = filtered;
+                self.autocomplete_index = self.autocomplete_index.min(
+                    self.autocomplete_items.len().saturating_sub(1),
+                );
+                self.autocomplete_active = true;
+            }
+        } else {
+            self.autocomplete_active = false;
+        }
+    }
+
+    /// Accept the currently selected autocomplete item, replacing the @partial.
+    fn accept_autocomplete(&mut self) {
+        if !self.autocomplete_active || self.autocomplete_items.is_empty() {
+            return;
+        }
+        let completion = self.autocomplete_items[self.autocomplete_index].clone();
+
+        // Find the last '@' before cursor and replace from there to cursor.
+        let before_cursor = &self.chat_input[..self.chat_cursor];
+        if let Some(at_pos) = before_cursor.rfind('@') {
+            let after_cursor = &self.chat_input[self.chat_cursor..];
+            let new_input = format!(
+                "{}@{} {}",
+                &self.chat_input[..at_pos],
+                completion,
+                after_cursor,
+            );
+            // Place cursor right after the inserted completion + space.
+            self.chat_cursor = at_pos + 1 + completion.len() + 1;
+            self.chat_input = new_input;
+        }
+
+        self.autocomplete_active = false;
     }
 
     // -- Chat input --
@@ -1805,6 +1896,50 @@ impl TuiPage for SessionsPage {
         .style(Style::default().bg(BG));
         f.render_widget(footer, chunks[5]);
 
+        // -- Autocomplete popup overlay --
+        if self.autocomplete_active && !self.autocomplete_items.is_empty() {
+            let chat_area = chunks[4];
+            let item_count = self.autocomplete_items.len().min(8);
+            let popup_h = item_count as u16 + 2; // +2 for border
+            let max_item_len = self.autocomplete_items.iter().map(|s| s.len()).max().unwrap_or(0);
+            let popup_w = (max_item_len as u16 + 4).min(chat_area.width); // +4 for border + padding
+
+            // Position: above the chat input, aligned to the left of the input area.
+            // Calculate X offset based on cursor position within the input.
+            let before_cursor = &self.chat_input[..self.chat_cursor];
+            let at_offset = before_cursor.rfind('@').unwrap_or(0);
+            // +1 for the left border of the chat input block
+            let popup_x = chat_area.x + 1 + at_offset as u16;
+            let popup_x = popup_x.min(area.x + area.width.saturating_sub(popup_w));
+            let popup_y = chat_area.y.saturating_sub(popup_h);
+
+            let popup_rect = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+            f.render_widget(Clear, popup_rect);
+
+            let items: Vec<ListItem> = self
+                .autocomplete_items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let style = if i == self.autocomplete_index {
+                        Style::default().fg(BG).bg(ACCENT_COLD).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(TEXT_BRIGHT)
+                    };
+                    ListItem::new(format!(" @{} ", item)).style(style)
+                })
+                .collect();
+
+            let list = List::new(items).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(COLD))
+                    .style(Style::default().bg(BG_SURFACE)),
+            );
+            f.render_widget(list, popup_rect);
+        }
+
         // -- History popup overlay --
         if let Some(ref sid) = self.history_popup {
             self.render_history_popup(f, sid);
@@ -1831,14 +1966,48 @@ impl TuiPage for SessionsPage {
 
         // Chat input mode.
         if self.chat_focused {
+            // Autocomplete navigation intercepts certain keys.
+            if self.autocomplete_active && !self.autocomplete_items.is_empty() {
+                match key.code {
+                    KeyCode::Tab | KeyCode::Down => {
+                        self.autocomplete_index =
+                            (self.autocomplete_index + 1) % self.autocomplete_items.len();
+                        return false;
+                    }
+                    KeyCode::Up => {
+                        self.autocomplete_index = if self.autocomplete_index == 0 {
+                            self.autocomplete_items.len() - 1
+                        } else {
+                            self.autocomplete_index - 1
+                        };
+                        return false;
+                    }
+                    KeyCode::Enter => {
+                        self.accept_autocomplete();
+                        return false;
+                    }
+                    KeyCode::Esc => {
+                        self.autocomplete_active = false;
+                        return false;
+                    }
+                    // All other keys fall through to normal input handling.
+                    _ => {}
+                }
+            }
+
             match key.code {
                 KeyCode::Esc => {
                     self.chat_focused = false;
+                    self.autocomplete_active = false;
                 }
                 KeyCode::Enter => {
                     self.send_chat_input();
+                    self.autocomplete_active = false;
                 }
-                KeyCode::Backspace => self.chat_handle_backspace(),
+                KeyCode::Backspace => {
+                    self.chat_handle_backspace();
+                    self.update_autocomplete();
+                }
                 KeyCode::Left => {
                     if self.chat_cursor > 0 {
                         self.chat_cursor = self.chat_input[..self.chat_cursor]
@@ -1847,6 +2016,7 @@ impl TuiPage for SessionsPage {
                             .map(|(i, _)| i)
                             .unwrap_or(0);
                     }
+                    self.update_autocomplete();
                 }
                 KeyCode::Right => {
                     if self.chat_cursor < self.chat_input.len() {
@@ -1856,6 +2026,7 @@ impl TuiPage for SessionsPage {
                             .map(|(i, _)| self.chat_cursor + i)
                             .unwrap_or(self.chat_input.len());
                     }
+                    self.update_autocomplete();
                 }
                 KeyCode::Up => {
                     if !self.chat_history.is_empty() {
@@ -1874,6 +2045,7 @@ impl TuiPage for SessionsPage {
                         }
                         self.chat_cursor = self.chat_input.len();
                     }
+                    self.autocomplete_active = false;
                 }
                 KeyCode::Down => {
                     match self.chat_history_index {
@@ -1889,10 +2061,14 @@ impl TuiPage for SessionsPage {
                         _ => {} // Not browsing history
                     }
                     self.chat_cursor = self.chat_input.len();
+                    self.autocomplete_active = false;
                 }
                 KeyCode::Home => self.chat_cursor = 0,
                 KeyCode::End => self.chat_cursor = self.chat_input.len(),
-                KeyCode::Char(ch) => self.chat_handle_char(ch),
+                KeyCode::Char(ch) => {
+                    self.chat_handle_char(ch);
+                    self.update_autocomplete();
+                }
                 _ => {}
             }
             return false;
@@ -2654,6 +2830,9 @@ mod tests {
             chat_history: VecDeque::new(),
             chat_history_index: None,
             chat_saved_input: String::new(),
+            autocomplete_items: Vec::new(),
+            autocomplete_index: 0,
+            autocomplete_active: false,
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,

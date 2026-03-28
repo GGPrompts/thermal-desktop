@@ -48,12 +48,60 @@ pub struct SidecarEntry {
     pub original_cwd: String,
     /// Seconds since Unix epoch.
     pub spawn_time: u64,
+    /// Short display name derived from the model (e.g. "opus", "sonnet", "gpt5.4mini").
+    /// Used for @-mentions in the TUI and message bus. First occurrence gets the bare
+    /// name; duplicates get "-2", "-3", etc.
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// The full sidecar file — a simple map of session_id -> metadata.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SidecarData {
     pub sessions: Vec<SidecarEntry>,
+}
+
+impl SidecarData {
+    /// Look up a session by its display name (e.g. "opus", "sonnet-2").
+    /// Returns the first entry whose `display_name` matches (case-sensitive).
+    pub fn find_by_display_name(&self, name: &str) -> Option<&SidecarEntry> {
+        self.sessions
+            .iter()
+            .find(|e| e.display_name.as_deref() == Some(name))
+    }
+}
+
+/// Derive a unique display name from a base model name, avoiding collisions with
+/// names already present in `existing` entries.
+///
+/// - If `base` is not taken, returns it as-is (e.g. "opus").
+/// - If taken, appends a suffix: "opus-2", "opus-3", etc.
+/// - Skips the entry with `exclude_session_id` (so re-upserts don't collide with
+///   the session's own prior name).
+pub fn assign_display_name(base: &str, existing: &[SidecarEntry], exclude_session_id: Option<&str>) -> String {
+    let is_taken = |candidate: &str| -> bool {
+        existing.iter().any(|e| {
+            if let Some(exc) = exclude_session_id {
+                if e.session_id == exc {
+                    return false;
+                }
+            }
+            e.display_name.as_deref() == Some(candidate)
+        })
+    };
+
+    if !is_taken(base) {
+        return base.to_string();
+    }
+
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
 }
 
 // ── kitty @ ls JSON structures ──────────────────────────────────────────────
@@ -173,7 +221,9 @@ impl KittyController {
     /// is written to the sessions sidecar.
     ///
     /// Optional `profile_name` and `worktree_path` are stored in the sidecar
-    /// for downstream consumers.
+    /// for downstream consumers. If `model_display_base` is provided (e.g.
+    /// from `ClaudeSessionState::model_display_name()`), a unique display name
+    /// is assigned with dedup numbering.
     pub async fn spawn(
         &self,
         id: &str,
@@ -181,6 +231,21 @@ impl KittyController {
         cwd: &str,
         profile_name: Option<&str>,
         worktree_path: Option<&str>,
+    ) -> Result<()> {
+        self.spawn_with_model(id, command, cwd, profile_name, worktree_path, None)
+            .await
+    }
+
+    /// Like [`spawn`](Self::spawn), but also assigns a display name from
+    /// the given model base name.
+    pub async fn spawn_with_model(
+        &self,
+        id: &str,
+        command: &str,
+        cwd: &str,
+        profile_name: Option<&str>,
+        worktree_path: Option<&str>,
+        model_display_base: Option<&str>,
     ) -> Result<()> {
         let title = format!("{TITLE_PREFIX}{id}");
 
@@ -203,15 +268,31 @@ impl KittyController {
             bail!("kitty @ launch failed: {stderr}");
         }
 
-        // Record in sidecar.
-        let entry = SidecarEntry {
-            session_id: id.to_string(),
-            worktree_path: worktree_path.map(String::from),
-            profile_name: profile_name.map(String::from),
-            original_cwd: cwd.to_string(),
-            spawn_time: now_epoch(),
-        };
-        sidecar_add(entry).await?;
+        // Record in sidecar (display_name assigned inside the locked update).
+        let id_owned = id.to_string();
+        let worktree = worktree_path.map(String::from);
+        let profile = profile_name.map(String::from);
+        let cwd_owned = cwd.to_string();
+        let model_base = model_display_base.map(String::from);
+
+        sidecar_locked_update(move |data| {
+            // Remove any prior entry for this session.
+            data.sessions.retain(|e| e.session_id != id_owned);
+
+            let display_name = model_base
+                .as_deref()
+                .map(|base| assign_display_name(base, &data.sessions, None));
+
+            data.sessions.push(SidecarEntry {
+                session_id: id_owned,
+                worktree_path: worktree,
+                profile_name: profile,
+                original_cwd: cwd_owned,
+                spawn_time: now_epoch(),
+                display_name,
+            });
+        })
+        .await?;
 
         tracing::info!(id, cwd, "spawned kitty window");
         Ok(())
@@ -389,10 +470,30 @@ async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static
 }
 
 /// Add an entry to the sidecar (locked read-modify-write).
+/// If the entry has no `display_name` and a `model_display_base` is provided,
+/// a unique display name will be assigned. Use [`sidecar_upsert_display_name`]
+/// to assign/update display names on existing entries.
+#[allow(dead_code)]
 async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
     sidecar_locked_update(move |data| {
         data.sessions.retain(|e| e.session_id != entry.session_id);
         data.sessions.push(entry);
+    })
+    .await
+}
+
+/// Assign or update the display name for an existing sidecar entry.
+///
+/// Reads the current sidecar under lock, derives a unique display name from
+/// `model_display_base`, and writes it back. No-op if the session is not found.
+pub async fn sidecar_upsert_display_name(session_id: &str, model_display_base: &str) -> Result<()> {
+    let sid = session_id.to_string();
+    let base = model_display_base.to_string();
+    sidecar_locked_update(move |data| {
+        let name = assign_display_name(&base, &data.sessions, Some(&sid));
+        if let Some(entry) = data.sessions.iter_mut().find(|e| e.session_id == sid) {
+            entry.display_name = Some(name);
+        }
     })
     .await
 }
@@ -449,6 +550,7 @@ mod tests {
                     profile_name: Some("dev".into()),
                     original_cwd: "/home/builder/projects/foo".into(),
                     spawn_time: 1_700_000_000,
+                    display_name: Some("opus".into()),
                 },
                 SidecarEntry {
                     session_id: "def".into(),
@@ -456,6 +558,7 @@ mod tests {
                     profile_name: None,
                     original_cwd: "/tmp".into(),
                     spawn_time: 1_700_000_001,
+                    display_name: None,
                 },
             ],
         };
@@ -468,7 +571,18 @@ mod tests {
             decoded.sessions[0].worktree_path.as_deref(),
             Some("/tmp/wt-abc")
         );
+        assert_eq!(decoded.sessions[0].display_name.as_deref(), Some("opus"));
         assert_eq!(decoded.sessions[1].profile_name, None);
+        assert_eq!(decoded.sessions[1].display_name, None);
+    }
+
+    #[test]
+    fn sidecar_deserializes_without_display_name() {
+        // Old sidecar files won't have display_name — serde(default) handles it.
+        let json = r#"{"sessions":[{"session_id":"old","original_cwd":"/tmp","spawn_time":1700000000}]}"#;
+        let data: SidecarData = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(data.sessions[0].session_id, "old");
+        assert_eq!(data.sessions[0].display_name, None);
     }
 
     #[test]
@@ -538,5 +652,129 @@ mod tests {
     #[test]
     fn controller_new_does_not_panic() {
         let _ctrl = KittyController::new();
+    }
+
+    // ── assign_display_name tests ──────────────────────────────────────────
+
+    fn make_entry(session_id: &str, display_name: Option<&str>) -> SidecarEntry {
+        SidecarEntry {
+            session_id: session_id.into(),
+            worktree_path: None,
+            profile_name: None,
+            original_cwd: "/tmp".into(),
+            spawn_time: 1_700_000_000,
+            display_name: display_name.map(String::from),
+        }
+    }
+
+    #[test]
+    fn assign_display_name_first_gets_bare_name() {
+        let entries = vec![];
+        assert_eq!(assign_display_name("opus", &entries, None), "opus");
+    }
+
+    #[test]
+    fn assign_display_name_dedup_second() {
+        let entries = vec![make_entry("s1", Some("opus"))];
+        assert_eq!(assign_display_name("opus", &entries, None), "opus-2");
+    }
+
+    #[test]
+    fn assign_display_name_dedup_third() {
+        let entries = vec![
+            make_entry("s1", Some("opus")),
+            make_entry("s2", Some("opus-2")),
+        ];
+        assert_eq!(assign_display_name("opus", &entries, None), "opus-3");
+    }
+
+    #[test]
+    fn assign_display_name_different_bases_no_conflict() {
+        let entries = vec![make_entry("s1", Some("opus"))];
+        assert_eq!(assign_display_name("sonnet", &entries, None), "sonnet");
+    }
+
+    #[test]
+    fn assign_display_name_excludes_own_session() {
+        // Re-upserting s1 should not conflict with s1's own display_name.
+        let entries = vec![make_entry("s1", Some("opus"))];
+        assert_eq!(
+            assign_display_name("opus", &entries, Some("s1")),
+            "opus"
+        );
+    }
+
+    #[test]
+    fn assign_display_name_excludes_own_but_conflicts_with_others() {
+        let entries = vec![
+            make_entry("s1", Some("opus")),
+            make_entry("s2", Some("opus-2")),
+        ];
+        // Re-upserting s1 — "opus" is s1's own (excluded), but "opus-2" is s2's.
+        assert_eq!(
+            assign_display_name("opus", &entries, Some("s1")),
+            "opus"
+        );
+    }
+
+    #[test]
+    fn assign_display_name_gap_in_numbering_fills_first_available() {
+        // "opus" and "opus-3" taken (but not "opus-2").
+        let entries = vec![
+            make_entry("s1", Some("opus")),
+            make_entry("s3", Some("opus-3")),
+        ];
+        assert_eq!(assign_display_name("opus", &entries, None), "opus-2");
+    }
+
+    #[test]
+    fn assign_display_name_entries_without_display_name_ignored() {
+        // Entries with None display_name should not conflict.
+        let entries = vec![make_entry("s1", None)];
+        assert_eq!(assign_display_name("opus", &entries, None), "opus");
+    }
+
+    // ── find_by_display_name tests ─────────────────────────────────────────
+
+    #[test]
+    fn find_by_display_name_found() {
+        let data = SidecarData {
+            sessions: vec![
+                make_entry("s1", Some("opus")),
+                make_entry("s2", Some("sonnet")),
+            ],
+        };
+        let found = data.find_by_display_name("sonnet");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().session_id, "s2");
+    }
+
+    #[test]
+    fn find_by_display_name_not_found() {
+        let data = SidecarData {
+            sessions: vec![make_entry("s1", Some("opus"))],
+        };
+        assert!(data.find_by_display_name("haiku").is_none());
+    }
+
+    #[test]
+    fn find_by_display_name_none_entries_skipped() {
+        let data = SidecarData {
+            sessions: vec![make_entry("s1", None)],
+        };
+        assert!(data.find_by_display_name("opus").is_none());
+    }
+
+    #[test]
+    fn find_by_display_name_numbered_variant() {
+        let data = SidecarData {
+            sessions: vec![
+                make_entry("s1", Some("opus")),
+                make_entry("s2", Some("opus-2")),
+            ],
+        };
+        let found = data.find_by_display_name("opus-2");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().session_id, "s2");
     }
 }

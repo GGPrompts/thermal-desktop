@@ -376,7 +376,7 @@ impl ChatPage {
 
 impl TuiPage for ChatPage {
     fn title(&self) -> &str {
-        "Chat"
+        "Messages"
     }
 
     fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn chat_page_title() {
         let page = ChatPage::new();
-        assert_eq!(page.title(), "Chat");
+        assert_eq!(page.title(), "Messages");
     }
 
     #[test]

@@ -456,12 +456,20 @@ const VALID_MENTION_TARGETS: &[&str] = &[
 
 /// Parse an @-mention from chat input text.
 ///
-/// If the text starts with or contains `@target` (where target is a valid agent
-/// type), extracts the target and returns the remaining content with the
-/// @mention stripped.
+/// Accepts both static agent types (@claude, @system, @dispatcher, etc.) and
+/// live session display names (@opus, @sonnet-2, @gpt5.4mini, etc.).
+/// Display names are resolved by checking against the provided session list.
 ///
 /// Returns `(Option<AgentId>, cleaned_content)`.
 fn parse_at_mention(text: &str) -> (Option<AgentId>, String) {
+    parse_at_mention_with_sessions(text, &[])
+}
+
+/// Parse @-mention with live session display names for resolution.
+fn parse_at_mention_with_sessions(
+    text: &str,
+    sessions: &[ClaudeSessionState],
+) -> (Option<AgentId>, String) {
     let trimmed = text.trim();
     // Look for @word at the beginning of the text.
     if let Some(rest) = trimmed.strip_prefix('@') {
@@ -471,11 +479,27 @@ fn parse_at_mention(text: &str) -> (Option<AgentId>, String) {
             None => (rest, ""),
         };
         let mention_lower = mention.to_lowercase();
+
+        // Check static targets first.
         if VALID_MENTION_TARGETS.contains(&mention_lower.as_str()) {
             return (
                 Some(AgentId::new(mention_lower, "default")),
                 content.to_string(),
             );
+        }
+
+        // Check live session display names (e.g. @opus, @sonnet-2, @gpt5.4mini).
+        for s in sessions {
+            let display = s.model_display_name().to_lowercase();
+            if display == mention_lower {
+                // Route to the agent type with the session_id as key,
+                // so the bus can identify this specific session.
+                let agent_type = s.agent_type.as_deref().unwrap_or("claude");
+                return (
+                    Some(AgentId::new(agent_type, &s.session_id)),
+                    content.to_string(),
+                );
+            }
         }
     }
     // No valid @-mention found.
@@ -1306,7 +1330,8 @@ impl SessionsPage {
         if selected_pids.is_empty() {
             // No session selected — send to message bus.
             // Parse @-mention for targeted routing.
-            let (mention_target, cleaned_content) = parse_at_mention(&text);
+            let (mention_target, cleaned_content) =
+                parse_at_mention_with_sessions(&text, &self.sessions);
             let (from_label, ok) = if let Some(ref target) = mention_target {
                 let label = format!("you \u{2192} @{}", target);
                 let ok = send_to_message_bus(&cleaned_content, Some(target));
@@ -3103,5 +3128,47 @@ mod tests {
         let target = target.unwrap();
         assert_eq!(target.agent_type, "planner");
         assert_eq!(content, "plan the feature");
+    }
+
+    #[test]
+    fn parse_at_mention_display_name_resolves_to_session() {
+        let sessions = vec![ClaudeSessionState {
+            session_id: "abc123".into(),
+            model: Some("claude-opus-4-6".into()),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        }];
+        let (target, content) = parse_at_mention_with_sessions("@opus fix the build", &sessions);
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "claude");
+        assert_eq!(target.key, "abc123");
+        assert_eq!(content, "fix the build");
+    }
+
+    #[test]
+    fn parse_at_mention_display_name_not_found_falls_through() {
+        let sessions = vec![ClaudeSessionState {
+            session_id: "abc123".into(),
+            model: Some("claude-opus-4-6".into()),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        }];
+        let (target, _) = parse_at_mention_with_sessions("@gemini hello", &sessions);
+        assert!(target.is_none());
+    }
+
+    #[test]
+    fn parse_at_mention_static_takes_priority_over_display_name() {
+        // If someone names a session "claude", the static target wins
+        let sessions = vec![ClaudeSessionState {
+            session_id: "abc123".into(),
+            model: Some("claude-opus-4-6".into()),
+            agent_type: Some("claude".into()),
+            ..Default::default()
+        }];
+        let (target, _) = parse_at_mention_with_sessions("@claude hello", &sessions);
+        let target = target.unwrap();
+        assert_eq!(target.agent_type, "claude");
+        assert_eq!(target.key, "default"); // static target, not session key
     }
 }

@@ -1190,6 +1190,8 @@ impl SessionsPage {
         let result = Command::new("kitty")
             .args([
                 "@",
+                "--to",
+                "unix:/tmp/kitty-thc",
                 "get-text",
                 "--extent=screen",
                 "--match",
@@ -2114,10 +2116,12 @@ impl TuiPage for SessionsPage {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 self.nav_down();
-                self.focus_selected_window();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.nav_up();
+            }
+            KeyCode::Char('f') => {
+                // Focus the selected session's kitty window (workspace switch).
                 self.focus_selected_window();
             }
             KeyCode::Char(' ') => self.toggle_select_current(),

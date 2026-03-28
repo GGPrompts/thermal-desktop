@@ -3,17 +3,21 @@
 //! Shows all Claude sessions with subagent nesting, context %, mouse scroll,
 //! kitty attach, and a history popup overlay.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::Write as _;
+use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::time::Instant;
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
 };
+
+use thermal_core::message::{AgentId, Message, MessageType};
 
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
 
@@ -61,20 +65,24 @@ fn status_color(status: &ClaudeStatus) -> Color {
     }
 }
 
-/// Short label and color for the agent type column.
-/// Copilot sessions also display the model name when available.
+/// Emoji badge and color for the agent type column.
+/// Subagent count renders next to the emoji: `\u{1F916}x3`.
 fn agent_type_badge(session: &ClaudeSessionState) -> (String, Color) {
-    match session.agent_type.as_deref() {
-        Some("copilot") => {
-            let label = match session.model.as_deref() {
-                Some(m) => format!("COP {m}"),
-                None => "COP".to_string(),
-            };
-            (label, pal(ThermalPalette::ACCENT_HOT))
-        }
-        Some("codex") => ("COX".to_string(), pal(ThermalPalette::ACCENT_COOL)),
-        _ => ("CLU".to_string(), pal(ThermalPalette::ACCENT_WARM)),
-    }
+    let (emoji, color) = match session.agent_type.as_deref() {
+        Some("copilot") => ("\u{1F916}", pal(ThermalPalette::ACCENT_HOT)),
+        Some("codex") => ("\u{1F916}", pal(ThermalPalette::ACCENT_COOL)),
+        _ => ("\u{1F916}", pal(ThermalPalette::ACCENT_WARM)),
+    };
+
+    let label = if let Some(n) = session.subagent_count
+        && n > 0
+    {
+        format!("{}x{}", emoji, n)
+    } else {
+        emoji.to_string()
+    };
+
+    (label, color)
 }
 
 fn status_label(status: &ClaudeStatus) -> &'static str {
@@ -225,21 +233,13 @@ fn format_activity(s: &ClaudeSessionState) -> String {
         other => ("", other),
     };
 
-    let mut result = if emoji.is_empty() {
+    if emoji.is_empty() {
         label.to_string()
     } else if detail.is_empty() {
         format!("{} {}", emoji, label)
     } else {
         format!("{} {}: {}", emoji, label, detail)
-    };
-
-    if let Some(n) = s.subagent_count
-        && n > 0
-    {
-        result.push_str(&format!(" \u{1F916}\u{00D7}{}", n));
     }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -364,8 +364,92 @@ fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
 }
 
 // ---------------------------------------------------------------------------
+// Messages socket path
+// ---------------------------------------------------------------------------
+
+fn messages_socket_path() -> std::path::PathBuf {
+    let uid = nix::unistd::getuid().as_raw();
+    std::path::PathBuf::from(format!("/run/user/{uid}/thermal/messages.sock"))
+}
+
+/// Send text to a kitty window matching the given PID via `kitty @ send-text`.
+/// This is a synchronous helper for use in the TUI event loop.
+fn kitty_send_text(pid: u32, text: &str) -> bool {
+    let match_arg = format!("pid:{pid}");
+    Command::new("kitty")
+        .args(["@", "send-text", "--match", &match_arg, "--"])
+        .arg(text)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Send a message to the dispatcher via messages.sock.
+fn send_to_message_bus(text: &str) -> bool {
+    let path = messages_socket_path();
+    let stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_nonblocking(false);
+
+    // Send subscribe first, then the actual message.
+    let subscribe = Message {
+        seq: 0,
+        ts: 0,
+        from: AgentId::new("user", "tui"),
+        to: AgentId::new("daemon", "bus"),
+        context_id: None,
+        project: None,
+        content: String::new(),
+        msg_type: MessageType::Subscribe { since_seq: None },
+        metadata: Default::default(),
+    };
+    let mut json = match serde_json::to_string(&subscribe) {
+        Ok(j) => j,
+        Err(_) => return false,
+    };
+    json.push('\n');
+    let mut writer = stream.try_clone().unwrap_or_else(|_| {
+        // Fallback — just reuse the same stream (write + read on same fd).
+        UnixStream::connect(&path).unwrap()
+    });
+    if writer.write_all(json.as_bytes()).is_err() {
+        return false;
+    }
+
+    let msg = Message {
+        seq: 0,
+        ts: 0,
+        from: AgentId::new("user", "tui"),
+        to: AgentId::new("*", "broadcast"),
+        context_id: None,
+        project: None,
+        content: text.to_string(),
+        msg_type: MessageType::AgentMsg,
+        metadata: Default::default(),
+    };
+    let mut json = match serde_json::to_string(&msg) {
+        Ok(j) => j,
+        Err(_) => return false,
+    };
+    json.push('\n');
+    writer.write_all(json.as_bytes()).is_ok()
+}
+
+// ---------------------------------------------------------------------------
 // Sessions page state
 // ---------------------------------------------------------------------------
+
+/// Maximum recent messages to display in the chat area.
+const MAX_RECENT_MESSAGES: usize = 50;
+
+/// A recent message displayed in the inline chat area.
+struct ChatEntry {
+    from_label: String,
+    content: String,
+    timestamp: Instant,
+}
 
 pub struct SessionsPage {
     sessions: Vec<ClaudeSessionState>,
@@ -380,6 +464,22 @@ pub struct SessionsPage {
     last_workspace_refresh: Instant,
     /// Per-session tool activity timelines, keyed by session_id.
     timelines: HashMap<String, AgentTimeline>,
+
+    // -- Multi-select --
+    /// Set of selected display_row indices.
+    selected_set: HashSet<usize>,
+
+    // -- Inline chat input --
+    /// Text input buffer.
+    chat_input: String,
+    /// Cursor position in the input string (byte offset).
+    chat_cursor: usize,
+    /// Whether the chat input is focused.
+    chat_focused: bool,
+    /// Recent chat messages for display.
+    chat_messages: VecDeque<ChatEntry>,
+    /// Status message with error flag and timestamp.
+    chat_status: Option<(String, bool, Instant)>,
 }
 
 impl SessionsPage {
@@ -395,6 +495,12 @@ impl SessionsPage {
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now() - std::time::Duration::from_secs(10),
             timelines: HashMap::new(),
+            selected_set: HashSet::new(),
+            chat_input: String::new(),
+            chat_cursor: 0,
+            chat_focused: false,
+            chat_messages: VecDeque::new(),
+            chat_status: None,
         }
     }
 
@@ -644,6 +750,140 @@ impl SessionsPage {
 
         Line::from(spans)
     }
+
+    // -- Multi-select --
+
+    fn toggle_select_current(&mut self) {
+        if let Some(i) = self.table_state.selected() {
+            if self.selected_set.contains(&i) {
+                self.selected_set.remove(&i);
+            } else {
+                self.selected_set.insert(i);
+            }
+        }
+    }
+
+    fn select_all(&mut self) {
+        for i in 0..self.display_rows.len() {
+            self.selected_set.insert(i);
+        }
+    }
+
+    fn deselect_all(&mut self) {
+        self.selected_set.clear();
+    }
+
+    // -- Chat input --
+
+    fn send_chat_input(&mut self) {
+        let text = self.chat_input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        let selected_pids: Vec<(u32, String)> = if !self.selected_set.is_empty() {
+            // Multi-select: send to all selected sessions.
+            self.selected_set
+                .iter()
+                .filter_map(|&i| {
+                    self.display_rows.get(i).and_then(|row| {
+                        row.session.pid.map(|pid| {
+                            let label = row.session.session_id.clone();
+                            (pid, label)
+                        })
+                    })
+                })
+                .collect()
+        } else if let Some(i) = self.table_state.selected() {
+            // Single selection: send to the highlighted session.
+            self.display_rows
+                .get(i)
+                .and_then(|row| {
+                    row.session.pid.map(|pid| {
+                        vec![(pid, row.session.session_id.clone())]
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        if selected_pids.is_empty() {
+            // No session selected — send to dispatcher via messages.sock.
+            let ok = send_to_message_bus(&text);
+            let entry = ChatEntry {
+                from_label: "you \u{2192} bus".into(),
+                content: text.clone(),
+                timestamp: Instant::now(),
+            };
+            self.chat_messages.push_back(entry);
+            if !ok {
+                self.chat_status = Some((
+                    "Failed to send to message bus".into(),
+                    true,
+                    Instant::now(),
+                ));
+            }
+        } else {
+            // Send to kitty terminal(s) via send-text.
+            let text_with_enter = format!("{}\r", text);
+            let mut success_count = 0;
+            let mut target_label = String::new();
+            for (pid, label) in &selected_pids {
+                if kitty_send_text(*pid, &text_with_enter) {
+                    success_count += 1;
+                }
+                if target_label.is_empty() {
+                    target_label = label.clone();
+                }
+            }
+            if selected_pids.len() > 1 {
+                target_label = format!("{} sessions", selected_pids.len());
+            }
+            let entry = ChatEntry {
+                from_label: format!("you \u{2192} {}", target_label),
+                content: text.clone(),
+                timestamp: Instant::now(),
+            };
+            self.chat_messages.push_back(entry);
+            if success_count < selected_pids.len() {
+                self.chat_status = Some((
+                    format!(
+                        "Sent to {}/{} sessions",
+                        success_count,
+                        selected_pids.len()
+                    ),
+                    true,
+                    Instant::now(),
+                ));
+            }
+        }
+
+        // Trim chat messages.
+        while self.chat_messages.len() > MAX_RECENT_MESSAGES {
+            self.chat_messages.pop_front();
+        }
+
+        self.chat_input.clear();
+        self.chat_cursor = 0;
+    }
+
+    fn chat_handle_char(&mut self, ch: char) {
+        self.chat_input.insert(self.chat_cursor, ch);
+        self.chat_cursor += ch.len_utf8();
+    }
+
+    fn chat_handle_backspace(&mut self) {
+        if self.chat_cursor > 0 {
+            let prev = self.chat_input[..self.chat_cursor]
+                .char_indices()
+                .next_back()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.chat_input.replace_range(prev..self.chat_cursor, "");
+            self.chat_cursor = prev;
+        }
+    }
 }
 
 impl TuiPage for SessionsPage {
@@ -673,15 +913,27 @@ impl TuiPage for SessionsPage {
             }
             self.last_workspace_refresh = Instant::now();
         }
+
+        // Clear chat status after 4 seconds.
+        if let Some((_, _, when)) = &self.chat_status {
+            if when.elapsed().as_secs() >= 4 {
+                self.chat_status = None;
+            }
+        }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        let chat_msg_height = if self.chat_messages.is_empty() { 0 } else {
+            (self.chat_messages.len() as u16).min(5)
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),    // table
-                Constraint::Length(1), // timeline bar for selected session
-                Constraint::Length(1), // footer
+                Constraint::Min(5),                     // table
+                Constraint::Length(1),                   // timeline bar for selected session
+                Constraint::Length(chat_msg_height),     // recent chat messages
+                Constraint::Length(3),                   // chat input bar
+                Constraint::Length(1),                   // footer
             ])
             .split(area);
 
@@ -706,7 +958,7 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells = [
-            "Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
+            "\u{2610}", "Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
         ]
         .iter()
         .map(|h| {
@@ -721,12 +973,24 @@ impl TuiPage for SessionsPage {
         let rows: Vec<Row> = self
             .display_rows
             .iter()
-            .map(|row| {
+            .enumerate()
+            .map(|(row_idx, row)| {
                 let s = &row.session;
                 let color = status_color(&s.status);
                 let label = status_label(&s.status);
                 let activity = format_activity(s);
                 let (agent_badge, agent_color) = agent_type_badge(s);
+
+                let checkbox = if self.selected_set.contains(&row_idx) {
+                    "\u{2611}"  // checked box
+                } else {
+                    "\u{2610}"  // unchecked box
+                };
+                let check_color = if self.selected_set.contains(&row_idx) {
+                    pal(ThermalPalette::WARM)
+                } else {
+                    TEXT_MUTED
+                };
 
                 let (ctx_str, ctx_c) = match s.context_percent {
                     Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
@@ -772,6 +1036,7 @@ impl TuiPage for SessionsPage {
                     let id_str = format!("{} {}", tree, agent_label);
 
                     Row::new(vec![
+                        Cell::from(checkbox).style(Style::default().fg(check_color)),
                         Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
@@ -789,6 +1054,7 @@ impl TuiPage for SessionsPage {
                     };
 
                     Row::new(vec![
+                        Cell::from(checkbox).style(Style::default().fg(check_color)),
                         Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
                         Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
@@ -805,14 +1071,15 @@ impl TuiPage for SessionsPage {
         let table = Table::new(
             rows,
             [
-                Constraint::Length(14),
-                Constraint::Length(5), // Agent (CLU/COX)
-                Constraint::Length(10),
-                Constraint::Length(28),
-                Constraint::Length(6),
-                Constraint::Min(14),
-                Constraint::Length(4),
-                Constraint::Length(8),
+                Constraint::Length(3),  // checkbox
+                Constraint::Length(14), // session id
+                Constraint::Length(5),  // Agent emoji + count
+                Constraint::Length(10), // status
+                Constraint::Length(28), // activity
+                Constraint::Length(6),  // ctx%
+                Constraint::Min(14),   // project
+                Constraint::Length(4),  // WS
+                Constraint::Length(8),  // updated
             ],
         )
         .header(header_row)
@@ -856,15 +1123,167 @@ impl TuiPage for SessionsPage {
             f.render_widget(tl_widget, tl_area);
         }
 
+        // -- Recent chat messages --
+        if !self.chat_messages.is_empty() {
+            let now = Instant::now();
+            let msg_lines: Vec<Line> = self
+                .chat_messages
+                .iter()
+                .rev()
+                .take(chat_msg_height as usize)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|e| {
+                    let ago = now.duration_since(e.timestamp).as_secs();
+                    let rel = if ago < 60 {
+                        format!("{}s", ago)
+                    } else {
+                        format!("{}m", ago / 60)
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            format!("[{rel}] "),
+                            Style::default().fg(TEXT_MUTED),
+                        ),
+                        Span::styled(
+                            format!("{}: ", e.from_label),
+                            Style::default()
+                                .fg(pal(ThermalPalette::WARM))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            e.content.clone(),
+                            Style::default().fg(TEXT_BRIGHT),
+                        ),
+                    ])
+                })
+                .collect();
+            let msgs_widget = Paragraph::new(msg_lines).style(Style::default().bg(BG));
+            f.render_widget(msgs_widget, chunks[2]);
+        }
+
+        // -- Chat input bar --
+        {
+            let selected_count = self.selected_set.len();
+            let target_hint = if selected_count > 1 {
+                format!(" [{} selected] ", selected_count)
+            } else if selected_count == 1 {
+                let idx = *self.selected_set.iter().next().unwrap();
+                let label = self
+                    .display_rows
+                    .get(idx)
+                    .map(|r| {
+                        let id = &r.session.session_id;
+                        if id.len() > 12 { &id[..12] } else { id }
+                    })
+                    .unwrap_or("-");
+                format!(" [{}] ", label)
+            } else if let Some(i) = self.table_state.selected() {
+                let label = self
+                    .display_rows
+                    .get(i)
+                    .map(|r| {
+                        let id = &r.session.session_id;
+                        if id.len() > 12 { &id[..12] } else { id }
+                    })
+                    .unwrap_or("-");
+                format!(" \u{2192} {} ", label)
+            } else {
+                " \u{2192} bus ".into()
+            };
+
+            let input_border_color = if self.chat_focused {
+                pal(ThermalPalette::WARM)
+            } else {
+                COLD
+            };
+            let input_title = if self.chat_focused {
+                format!("{}Enter=send, Esc=cancel ", target_hint)
+            } else {
+                format!("{}/ to type ", target_hint)
+            };
+
+            let (before_cursor, after_cursor) = self.chat_input.split_at(self.chat_cursor);
+            let input_line = if self.chat_focused {
+                Line::from(vec![
+                    Span::styled(before_cursor, Style::default().fg(TEXT_BRIGHT)),
+                    Span::styled(
+                        if after_cursor.is_empty() {
+                            " "
+                        } else {
+                            &after_cursor[..1]
+                        },
+                        Style::default().fg(BG).bg(TEXT_BRIGHT),
+                    ),
+                    Span::styled(
+                        if after_cursor.len() > 1 {
+                            &after_cursor[1..]
+                        } else {
+                            ""
+                        },
+                        Style::default().fg(TEXT_BRIGHT),
+                    ),
+                ])
+            } else if self.chat_input.is_empty() {
+                Line::from(Span::styled(
+                    "Press / to start typing...",
+                    Style::default().fg(TEXT_MUTED),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    &self.chat_input,
+                    Style::default().fg(TEXT),
+                ))
+            };
+
+            let input_widget = Paragraph::new(input_line).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(input_border_color))
+                    .title(input_title)
+                    .title_style(Style::default().fg(if self.chat_focused {
+                        pal(ThermalPalette::WARM)
+                    } else {
+                        TEXT_MUTED
+                    }))
+                    .style(Style::default().bg(BG)),
+            );
+            f.render_widget(input_widget, chunks[3]);
+        }
+
         // -- Footer --
-        let footer = Paragraph::new(Line::from(vec![
+        let sel_count = self.selected_set.len();
+        let sel_hint = if sel_count > 0 {
+            vec![
+                Span::styled(
+                    format!(" {} selected ", sel_count),
+                    Style::default()
+                        .fg(pal(ThermalPalette::WARM))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" | ", Style::default().fg(TEXT_MUTED)),
+            ]
+        } else {
+            vec![]
+        };
+
+        let mut footer_spans = sel_hint;
+        footer_spans.extend(vec![
             Span::styled(
-                " j/k",
+                "j/k",
                 Style::default()
                     .fg(ACCENT_COLD)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(": navigate  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(": nav  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
+                "Space",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": select  ", Style::default().fg(TEXT_MUTED)),
             Span::styled(
                 "Enter",
                 Style::default()
@@ -873,22 +1292,37 @@ impl TuiPage for SessionsPage {
             ),
             Span::styled(": attach  ", Style::default().fg(TEXT_MUTED)),
             Span::styled(
+                "/",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": chat  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
                 "h",
                 Style::default()
                     .fg(ACCENT_COLD)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(": history  ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(
-                "r",
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(": refresh", Style::default().fg(TEXT_MUTED)),
-        ]))
+            Span::styled(": history", Style::default().fg(TEXT_MUTED)),
+        ]);
+
+        let footer = if let Some((ref msg, is_error, _)) = self.chat_status {
+            let color = if is_error {
+                pal(ThermalPalette::SEARING)
+            } else {
+                pal(ThermalPalette::WARM)
+            };
+            Paragraph::new(Line::from(Span::styled(
+                msg.as_str(),
+                Style::default().fg(color),
+            )))
+            .alignment(Alignment::Center)
+        } else {
+            Paragraph::new(Line::from(footer_spans))
+        }
         .style(Style::default().bg(BG));
-        f.render_widget(footer, chunks[2]);
+        f.render_widget(footer, chunks[4]);
 
         // -- History popup overlay --
         if let Some(ref sid) = self.history_popup {
@@ -901,8 +1335,11 @@ impl TuiPage for SessionsPage {
         key: crossterm::event::KeyEvent,
         poller: &mut ClaudeStatePoller,
     ) -> bool {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // History popup intercepts all keys.
         if self.history_popup.is_some() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('h') => self.dismiss_history(),
@@ -911,15 +1348,71 @@ impl TuiPage for SessionsPage {
             return false;
         }
 
+        // Chat input mode.
+        if self.chat_focused {
+            match key.code {
+                KeyCode::Esc => {
+                    self.chat_focused = false;
+                }
+                KeyCode::Enter => {
+                    self.send_chat_input();
+                }
+                KeyCode::Backspace => self.chat_handle_backspace(),
+                KeyCode::Left => {
+                    if self.chat_cursor > 0 {
+                        self.chat_cursor = self.chat_input[..self.chat_cursor]
+                            .char_indices()
+                            .next_back()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                    }
+                }
+                KeyCode::Right => {
+                    if self.chat_cursor < self.chat_input.len() {
+                        self.chat_cursor = self.chat_input[self.chat_cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map(|(i, _)| self.chat_cursor + i)
+                            .unwrap_or(self.chat_input.len());
+                    }
+                }
+                KeyCode::Home => self.chat_cursor = 0,
+                KeyCode::End => self.chat_cursor = self.chat_input.len(),
+                KeyCode::Char(ch) => self.chat_handle_char(ch),
+                _ => {}
+            }
+            return false;
+        }
+
+        // Normal navigation mode.
+
+        // Ctrl+A selects all, Ctrl+D deselects all.
+        if ctrl && key.code == KeyCode::Char('a') {
+            self.select_all();
+            return false;
+        }
+        if ctrl && key.code == KeyCode::Char('d') {
+            self.deselect_all();
+            return false;
+        }
+
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => self.nav_down(),
             KeyCode::Char('k') | KeyCode::Up => self.nav_up(),
+            KeyCode::Char(' ') => self.toggle_select_current(),
             KeyCode::Enter => self.attach_selected(),
+            KeyCode::Char('/') => {
+                self.chat_focused = true;
+            }
             KeyCode::Char('h') => self.toggle_history(),
             KeyCode::Char('r') => self.force_refresh(poller),
             _ => {}
         }
         false
+    }
+
+    fn has_text_focus(&self) -> bool {
+        self.chat_focused
     }
 
     fn handle_mouse(
@@ -1401,7 +1894,47 @@ mod tests {
     }
 
     #[test]
-    fn format_activity_with_subagent_count_appends_indicator() {
+    fn agent_badge_with_subagent_count() {
+        let s = ClaudeSessionState {
+            subagent_count: Some(3),
+            ..ClaudeSessionState::default()
+        };
+        let (badge, _color) = agent_type_badge(&s);
+        assert!(
+            badge.contains("x3"),
+            "badge should contain subagent count: {badge}"
+        );
+    }
+
+    #[test]
+    fn agent_badge_zero_subagents_no_count() {
+        let s = ClaudeSessionState {
+            subagent_count: Some(0),
+            ..ClaudeSessionState::default()
+        };
+        let (badge, _color) = agent_type_badge(&s);
+        assert!(
+            !badge.contains('x'),
+            "zero subagents should not show count: {badge}"
+        );
+    }
+
+    #[test]
+    fn agent_badge_none_subagents_no_count() {
+        let s = ClaudeSessionState {
+            subagent_count: None,
+            ..ClaudeSessionState::default()
+        };
+        let (badge, _color) = agent_type_badge(&s);
+        assert!(
+            !badge.contains('x'),
+            "None subagent_count should not show count: {badge}"
+        );
+    }
+
+    #[test]
+    fn format_activity_no_longer_includes_subagent_indicator() {
+        // Subagent count now lives in the badge, not the activity string.
         let s = ClaudeSessionState {
             status: ClaudeStatus::ToolUse,
             current_tool: Some("Task".into()),
@@ -1410,38 +1943,8 @@ mod tests {
         };
         let result = format_activity(&s);
         assert!(
-            result.contains("🤖×3"),
-            "should contain subagent indicator: {result}"
-        );
-    }
-
-    #[test]
-    fn format_activity_subagent_count_zero_no_indicator() {
-        let s = ClaudeSessionState {
-            status: ClaudeStatus::ToolUse,
-            current_tool: Some("Bash".into()),
-            subagent_count: Some(0),
-            ..ClaudeSessionState::default()
-        };
-        let result = format_activity(&s);
-        assert!(
-            !result.contains('×'),
-            "zero subagents should not add indicator: {result}"
-        );
-    }
-
-    #[test]
-    fn format_activity_none_subagent_count_no_indicator() {
-        let s = ClaudeSessionState {
-            status: ClaudeStatus::ToolUse,
-            current_tool: Some("Bash".into()),
-            subagent_count: None,
-            ..ClaudeSessionState::default()
-        };
-        let result = format_activity(&s);
-        assert!(
-            !result.contains('×'),
-            "None subagent_count should not add indicator: {result}"
+            !result.contains('\u{00D7}'),
+            "activity should not contain subagent indicator: {result}"
         );
     }
 
@@ -1599,6 +2102,12 @@ mod tests {
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now(),
             timelines: HashMap::new(),
+            selected_set: HashSet::new(),
+            chat_input: String::new(),
+            chat_cursor: 0,
+            chat_focused: false,
+            chat_messages: VecDeque::new(),
+            chat_status: None,
         }
     }
 
@@ -1713,5 +2222,91 @@ mod tests {
         assert_ne!(idle, processing);
         assert_ne!(processing, tool_use);
         assert_ne!(tool_use, awaiting);
+    }
+
+    // ── Multi-select ────────────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_select_current_adds_and_removes() {
+        let mut page = page_with_sessions(vec![make_session("a", None), make_session("b", None)]);
+        page.table_state.select(Some(0));
+        page.toggle_select_current();
+        assert!(page.selected_set.contains(&0));
+        assert_eq!(page.selected_set.len(), 1);
+
+        page.toggle_select_current();
+        assert!(!page.selected_set.contains(&0));
+        assert!(page.selected_set.is_empty());
+    }
+
+    #[test]
+    fn select_all_selects_every_row() {
+        let mut page = page_with_sessions(vec![
+            make_session("a", None),
+            make_session("b", None),
+            make_session("c", None),
+        ]);
+        page.select_all();
+        assert_eq!(page.selected_set.len(), 3);
+    }
+
+    #[test]
+    fn deselect_all_clears_selection() {
+        let mut page = page_with_sessions(vec![make_session("a", None), make_session("b", None)]);
+        page.select_all();
+        assert_eq!(page.selected_set.len(), 2);
+        page.deselect_all();
+        assert!(page.selected_set.is_empty());
+    }
+
+    // ── Chat input ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn chat_input_char_and_backspace() {
+        let mut page = page_with_sessions(vec![]);
+        page.chat_focused = true;
+        page.chat_handle_char('h');
+        page.chat_handle_char('i');
+        assert_eq!(page.chat_input, "hi");
+        assert_eq!(page.chat_cursor, 2);
+
+        page.chat_handle_backspace();
+        assert_eq!(page.chat_input, "h");
+        assert_eq!(page.chat_cursor, 1);
+    }
+
+    #[test]
+    fn has_text_focus_when_chat_focused() {
+        let mut page = page_with_sessions(vec![]);
+        assert!(!page.has_text_focus());
+        page.chat_focused = true;
+        assert!(page.has_text_focus());
+    }
+
+    // ── Agent badges ────────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_badge_uses_emoji() {
+        let claude = ClaudeSessionState::default();
+        let (badge, _) = agent_type_badge(&claude);
+        assert!(badge.contains('\u{1F916}'), "badge should contain robot emoji: {badge}");
+    }
+
+    #[test]
+    fn agent_badge_colors_differ_by_type() {
+        let claude = ClaudeSessionState::default();
+        let codex = ClaudeSessionState {
+            agent_type: Some("codex".into()),
+            ..ClaudeSessionState::default()
+        };
+        let copilot = ClaudeSessionState {
+            agent_type: Some("copilot".into()),
+            ..ClaudeSessionState::default()
+        };
+        let (_, c1) = agent_type_badge(&claude);
+        let (_, c2) = agent_type_badge(&codex);
+        let (_, c3) = agent_type_badge(&copilot);
+        assert_ne!(c1, c2);
+        assert_ne!(c2, c3);
     }
 }

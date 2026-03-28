@@ -311,21 +311,14 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && mouse.row < 3
                     {
-                        // Tab titles are: "1:Sessions", "2:Profiles", "3:Services"
-                        // separated by " | " (3 chars). The Tabs widget has a Block with
-                        // Borders::BOTTOM, adding 1 row of border at bottom but the text
-                        // is on row 0 (inside the block). The block also has padding from
-                        // the title " THERMAL CONDUCTOR " centered, but tab content starts
-                        // at column 1 (left border area).
-                        //
-                        // Calculate tab boundaries from title widths + divider " | " (3 chars).
-                        // Each title is "{N}:{name}" so widths are:
-                        //   "1:Sessions" = 10, "2:Spawn" = 7, "3:Profiles" = 10, "4:Services" = 10
-                        let tab_titles: Vec<&str> = app.pages.iter().map(|p| p.title()).collect();
-                        // +2 for the "N:" prefix on each tab
+                        // Tab labels are rendered as "{N}:{title}" separated by
+                        // " | " (3 chars). The Tabs widget sits inside a Block which
+                        // adds a 1-char left border/padding. Compute clickable regions
+                        // from the actual title lengths.
                         let mut x = 1u16; // start after left border
-                        for (i, title) in tab_titles.iter().enumerate() {
-                            let tab_width = (title.len() + 2) as u16; // "N:" + title
+                        for (i, page) in app.pages.iter().enumerate() {
+                            // Rendered width: digit + ":" + title
+                            let tab_width = (1 + 1 + page.title().len()) as u16;
                             if mouse.column >= x && mouse.column < x + tab_width {
                                 app.set_tab(i);
                                 break;

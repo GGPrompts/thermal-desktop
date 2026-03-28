@@ -597,6 +597,12 @@ pub struct SessionsPage {
     chat_messages: VecDeque<ChatEntry>,
     /// Status message with error flag and timestamp.
     chat_status: Option<(String, bool, Instant)>,
+    /// Command history for the chat input (most recent at front).
+    chat_history: VecDeque<String>,
+    /// Current position in chat_history (None = not browsing history).
+    chat_history_index: Option<usize>,
+    /// Saves the in-progress input when entering history browsing mode.
+    chat_saved_input: String,
 
     // -- Preview pane --
     /// Cached lines from last `kitty @ get-text` call.
@@ -640,6 +646,9 @@ impl SessionsPage {
             chat_focused: false,
             chat_messages: VecDeque::new(),
             chat_status: None,
+            chat_history: VecDeque::new(),
+            chat_history_index: None,
+            chat_saved_input: String::new(),
             preview_content: Vec::new(),
             preview_scroll: 0,
             last_preview_session: None,
@@ -1188,6 +1197,13 @@ impl SessionsPage {
         while self.chat_messages.len() > MAX_RECENT_MESSAGES {
             self.chat_messages.pop_front();
         }
+
+        // Push to command history.
+        self.chat_history.push_front(text);
+        if self.chat_history.len() > 100 {
+            self.chat_history.pop_back();
+        }
+        self.chat_history_index = None;
 
         self.chat_input.clear();
         self.chat_cursor = 0;
@@ -1756,6 +1772,39 @@ impl TuiPage for SessionsPage {
                             .map(|(i, _)| self.chat_cursor + i)
                             .unwrap_or(self.chat_input.len());
                     }
+                }
+                KeyCode::Up => {
+                    if !self.chat_history.is_empty() {
+                        match self.chat_history_index {
+                            None => {
+                                self.chat_saved_input = self.chat_input.clone();
+                                self.chat_history_index = Some(0);
+                                self.chat_input = self.chat_history[0].clone();
+                            }
+                            Some(idx) if idx < self.chat_history.len() - 1 => {
+                                let new_idx = idx + 1;
+                                self.chat_history_index = Some(new_idx);
+                                self.chat_input = self.chat_history[new_idx].clone();
+                            }
+                            _ => {} // Already at oldest entry
+                        }
+                        self.chat_cursor = self.chat_input.len();
+                    }
+                }
+                KeyCode::Down => {
+                    match self.chat_history_index {
+                        Some(0) => {
+                            self.chat_history_index = None;
+                            self.chat_input = self.chat_saved_input.clone();
+                        }
+                        Some(idx) if idx > 0 => {
+                            let new_idx = idx - 1;
+                            self.chat_history_index = Some(new_idx);
+                            self.chat_input = self.chat_history[new_idx].clone();
+                        }
+                        _ => {} // Not browsing history
+                    }
+                    self.chat_cursor = self.chat_input.len();
                 }
                 KeyCode::Home => self.chat_cursor = 0,
                 KeyCode::End => self.chat_cursor = self.chat_input.len(),
@@ -2517,6 +2566,9 @@ mod tests {
             chat_focused: false,
             chat_messages: VecDeque::new(),
             chat_status: None,
+            chat_history: VecDeque::new(),
+            chat_history_index: None,
+            chat_saved_input: String::new(),
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,

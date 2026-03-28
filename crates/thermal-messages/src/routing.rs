@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -150,6 +151,7 @@ enum Backend {
     Codex,
     Planner,
     User,
+    Dispatcher,
 }
 
 impl Backend {
@@ -160,6 +162,7 @@ impl Backend {
             Backend::Codex => "codex",
             Backend::Planner => "planner",
             Backend::User => "user",
+            Backend::Dispatcher => "dispatcher",
         }
     }
 
@@ -170,6 +173,7 @@ impl Backend {
             Backend::Codex => dispatch_codex(msg).await,
             Backend::Planner => dispatch_planner(msg).await,
             Backend::User => dispatch_user(msg).await,
+            Backend::Dispatcher => dispatch_dispatcher(msg).await,
         }
     }
 }
@@ -351,12 +355,122 @@ fn parse_mcp_response(response_line: &str) -> Result<String> {
 }
 
 // ---------------------------------------------------------------------------
-// ClaudeBackend — spawns `claude -p` with the message content
+// Sidecar + kitty live-session routing
+// ---------------------------------------------------------------------------
+
+/// Minimal sidecar entry — just the fields we need for routing.
+/// Avoids coupling to thermal-conductor's full `SidecarEntry` type.
+#[derive(Debug, Deserialize)]
+struct RoutingSidecarEntry {
+    session_id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoutingSidecarData {
+    #[serde(default)]
+    sessions: Vec<RoutingSidecarEntry>,
+}
+
+/// Read and parse the sessions sidecar at `/run/user/{uid}/thermal/sessions.json`.
+/// Returns `None` if the file doesn't exist or can't be parsed.
+fn read_sidecar() -> Option<Vec<RoutingSidecarEntry>> {
+    let uid = nix::unistd::getuid().as_raw();
+    let path = format!("/run/user/{uid}/thermal/sessions.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let data: RoutingSidecarData = serde_json::from_str(&content).ok()?;
+    Some(data.sessions)
+}
+
+/// Send text to a specific kitty window via `kitty @ send-text`.
+/// `window_match` is a kitty match expression (e.g. `title:^thermal-abc$`).
+/// The text is sent with a trailing carriage return to submit it.
+async fn kitty_send_text(window_match: &str, text: &str) -> Result<String> {
+    // Build the text payload with a trailing \r to press Enter
+    let payload = format!("{text}\r");
+
+    let output = Command::new("kitty")
+        .args([
+            "@",
+            "--to",
+            "unix:/tmp/kitty-thc",
+            "send-text",
+            "--match",
+            window_match,
+            "--",
+        ])
+        .arg(&payload)
+        .output()
+        .await
+        .context("failed to run kitty @ send-text")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("kitty @ send-text failed: {stderr}");
+    }
+
+    Ok("ok".to_string())
+}
+
+/// Known display name prefixes that indicate a Claude session.
+const CLAUDE_DISPLAY_HINTS: &[&str] = &["opus", "sonnet", "haiku", "claude"];
+
+/// Known display name prefixes that indicate a Codex session.
+const CODEX_DISPLAY_HINTS: &[&str] = &["codex", "gpt"];
+
+/// Try to find a live kitty session matching the given display name hints.
+/// Returns the session_id of the first matching entry, or None.
+fn find_live_session(hints: &[&str]) -> Option<String> {
+    let entries = read_sidecar()?;
+    for entry in &entries {
+        if let Some(ref name) = entry.display_name {
+            let lower = name.to_lowercase();
+            for hint in hints {
+                if lower.starts_with(hint) {
+                    debug!(
+                        session_id = %entry.session_id,
+                        display_name = %name,
+                        hint = %hint,
+                        "found live session matching hint"
+                    );
+                    return Some(entry.session_id.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// ClaudeBackend — routes to live kitty session, falls back to `claude -p`
 // ---------------------------------------------------------------------------
 
 async fn dispatch_claude(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to claude");
 
+    // Try to route to a live kitty session first
+    if let Some(session_id) = find_live_session(CLAUDE_DISPLAY_HINTS) {
+        let window_match = format!("title:^thermal-{session_id}$");
+        match kitty_send_text(&window_match, &msg.content).await {
+            Ok(_) => {
+                info!(session_id = %session_id, "sent message to live claude session");
+                return Ok(make_response(
+                    msg,
+                    format!("Message sent to live session '{session_id}'"),
+                ));
+            }
+            Err(e) => {
+                warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "failed to send to live session, falling back to one-shot"
+                );
+            }
+        }
+    }
+
+    // Fall back to one-shot `claude -p`
     let mut cmd = Command::new(resolve_binary("claude"));
     cmd.arg("-p")
         .arg(&msg.content)
@@ -411,6 +525,28 @@ async fn dispatch_claude(msg: &Message) -> Result<Message> {
 async fn dispatch_codex(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to codex");
 
+    // Try to route to a live kitty session first
+    if let Some(session_id) = find_live_session(CODEX_DISPLAY_HINTS) {
+        let window_match = format!("title:^thermal-{session_id}$");
+        match kitty_send_text(&window_match, &msg.content).await {
+            Ok(_) => {
+                info!(session_id = %session_id, "sent message to live codex session");
+                return Ok(make_response(
+                    msg,
+                    format!("Message sent to live session '{session_id}'"),
+                ));
+            }
+            Err(e) => {
+                warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "failed to send to live session, falling back to one-shot"
+                );
+            }
+        }
+    }
+
+    // Fall back to one-shot `codex`
     let output = Command::new(resolve_binary("codex"))
         .arg("--quiet")
         .arg(&msg.content)
@@ -505,6 +641,56 @@ async fn dispatch_user(msg: &Message) -> Result<Message> {
     Ok(make_response(msg, "delivered to user".to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// DispatcherBackend — sends transcript to thermal-dispatcher via Unix socket
+// ---------------------------------------------------------------------------
+
+async fn dispatch_dispatcher(msg: &Message) -> Result<Message> {
+    info!(content_len = msg.content.len(), "dispatching to dispatcher");
+
+    let uid = nix::unistd::getuid().as_raw();
+    let sock_path = format!("/run/user/{uid}/thermal/dispatcher.sock");
+
+    let stream = tokio::net::UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("connecting to thermal-dispatcher at {sock_path}"))?;
+
+    let request = json!({
+        "transcript": msg.content,
+        "confidence": 1.0
+    });
+
+    let (reader, mut writer) = stream.into_split();
+    let mut line = serde_json::to_string(&request)?;
+    line.push('\n');
+    writer.write_all(line.as_bytes()).await?;
+    writer.flush().await?;
+
+    // Read the response
+    let mut buf_reader = BufReader::new(reader);
+    let mut response_line = String::new();
+    buf_reader.read_line(&mut response_line).await?;
+
+    // Try to extract a meaningful response from the dispatcher's JSON
+    let content = if let Ok(parsed) = serde_json::from_str::<Value>(response_line.trim()) {
+        parsed
+            .get("response")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| {
+                parsed
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| response_line.trim().to_string())
+    } else {
+        response_line.trim().to_string()
+    };
+
+    Ok(make_response(msg, content))
+}
+
 /// Send a TTS request to thermal-audio via its Unix socket.
 async fn send_tts(text: &str) -> Result<()> {
     let uid = nix::unistd::getuid().as_raw();
@@ -549,6 +735,7 @@ impl RouteTable {
         backends.insert("codex".to_string(), Backend::Codex);
         backends.insert("planner".to_string(), Backend::Planner);
         backends.insert("user".to_string(), Backend::User);
+        backends.insert("dispatcher".to_string(), Backend::Dispatcher);
 
         Self { backends }
     }
@@ -808,6 +995,7 @@ kill_claude = "BLOCK"
         assert!(targets.contains(&"codex"));
         assert!(targets.contains(&"planner"));
         assert!(targets.contains(&"user"));
+        assert!(targets.contains(&"dispatcher"));
     }
 
     #[test]

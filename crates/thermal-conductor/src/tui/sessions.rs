@@ -1161,7 +1161,7 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells = [
-            "\u{2610}", "Session", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
+            "\u{2610}", "Name", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
         ]
         .iter()
         .map(|h| {
@@ -1250,15 +1250,16 @@ impl TuiPage for SessionsPage {
                         Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
                     ])
                 } else {
-                    let short_id = if s.session_id.len() > 12 {
-                        &s.session_id[..12]
+                    let display_name = s.model_display_name();
+                    let name_label = if display_name.len() > 14 {
+                        format!("{}..", &display_name[..12])
                     } else {
-                        &s.session_id
+                        display_name
                     };
 
                     Row::new(vec![
                         Cell::from(checkbox).style(Style::default().fg(check_color)),
-                        Cell::from(short_id.to_string()).style(Style::default().fg(TEXT)),
+                        Cell::from(name_label).style(Style::default().fg(TEXT)),
                         Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
@@ -1376,21 +1377,15 @@ impl TuiPage for SessionsPage {
                 let label = self
                     .display_rows
                     .get(idx)
-                    .map(|r| {
-                        let id = &r.session.session_id;
-                        if id.len() > 12 { &id[..12] } else { id }
-                    })
-                    .unwrap_or("-");
+                    .map(|r| r.session.model_display_name())
+                    .unwrap_or_else(|| "-".into());
                 format!(" [{}] ", label)
             } else if let Some(i) = self.table_state.selected() {
                 let label = self
                     .display_rows
                     .get(i)
-                    .map(|r| {
-                        let id = &r.session.session_id;
-                        if id.len() > 12 { &id[..12] } else { id }
-                    })
-                    .unwrap_or("-");
+                    .map(|r| r.session.model_display_name())
+                    .unwrap_or_else(|| "-".into());
                 format!(" \u{2192} {} ", label)
             } else {
                 " \u{2192} bus ".into()

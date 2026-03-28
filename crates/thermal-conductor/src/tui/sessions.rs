@@ -933,26 +933,31 @@ impl SessionsPage {
         if self.display_rows.is_empty() {
             return;
         }
-        let i = self.table_state.selected().unwrap_or(0);
-        let next = if i >= self.display_rows.len() - 1 {
-            0
-        } else {
-            i + 1
-        };
-        self.table_state.select(Some(next));
+        let len = self.display_rows.len();
+        let start = self.table_state.selected().unwrap_or(0);
+        // Skip subagent rows — land on the next parent session.
+        for offset in 1..=len {
+            let idx = (start + offset) % len;
+            if !self.display_rows[idx].is_subagent {
+                self.table_state.select(Some(idx));
+                return;
+            }
+        }
     }
 
     pub fn nav_up(&mut self) {
         if self.display_rows.is_empty() {
             return;
         }
-        let i = self.table_state.selected().unwrap_or(0);
-        let prev = if i == 0 {
-            self.display_rows.len() - 1
-        } else {
-            i - 1
-        };
-        self.table_state.select(Some(prev));
+        let len = self.display_rows.len();
+        let start = self.table_state.selected().unwrap_or(0);
+        for offset in 1..=len {
+            let idx = (start + len - offset) % len;
+            if !self.display_rows[idx].is_subagent {
+                self.table_state.select(Some(idx));
+                return;
+            }
+        }
     }
 
     /// Focus the kitty window for the currently highlighted session.
@@ -1687,7 +1692,7 @@ impl TuiPage for SessionsPage {
                     let id_str = format!("{} {}", tree, agent_label);
 
                     Row::new(vec![
-                        Cell::from(checkbox).style(Style::default().fg(check_color)),
+                        Cell::from(""),
                         Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(agent_badge).style(Style::default().fg(agent_color)),
                         Cell::from(label).style(Style::default().fg(color)),

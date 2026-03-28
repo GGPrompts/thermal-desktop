@@ -22,6 +22,7 @@ use thermal_core::message::{AgentId, Message, MessageType};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
 
 use crate::agent_timeline::{AgentTimeline, ToolCategory};
+use crate::profiles_config::{Profile, load_profiles, save_profiles};
 
 use super::TuiPage;
 
@@ -736,6 +737,89 @@ impl SessionsPage {
         self.sessions = poller.get_all();
         self.display_rows = build_display_order(&self.sessions);
         self.clamp_selection();
+    }
+
+    /// Save the currently selected session as a new spawn profile.
+    fn save_session_as_profile(&mut self) {
+        let row = match self
+            .table_state
+            .selected()
+            .and_then(|i| self.display_rows.get(i))
+        {
+            Some(r) => r,
+            None => {
+                self.chat_status = Some((
+                    "No session selected".into(),
+                    true,
+                    Instant::now(),
+                ));
+                return;
+            }
+        };
+
+        let session = &row.session;
+
+        // Extract cwd — required to make a useful profile.
+        let cwd = match session.working_dir.as_deref() {
+            Some(d) if !d.is_empty() => d,
+            _ => {
+                self.chat_status = Some((
+                    "Session has no working directory".into(),
+                    true,
+                    Instant::now(),
+                ));
+                return;
+            }
+        };
+
+        // Build profile name: model_display_name + project dir basename.
+        // e.g. "opus-thermal-desktop"
+        let model = session.model_display_name();
+        let project = std::path::Path::new(cwd)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project");
+        let profile_name = format!("{}-{}", model, project);
+
+        // Load existing profiles and check for duplicates.
+        let (default_cwd, mut profiles) = load_profiles();
+        if profiles.iter().any(|p| p.name == profile_name) {
+            self.chat_status = Some((
+                format!("Profile already exists: {}", profile_name),
+                true,
+                Instant::now(),
+            ));
+            return;
+        }
+
+        // Build the new profile.
+        let new_profile = Profile {
+            name: profile_name.clone(),
+            command: None,
+            cwd: Some(cwd.to_string()),
+            icon: None,
+            count: 1,
+            git_worktree: false,
+        };
+        profiles.push(new_profile);
+
+        // Save.
+        match save_profiles(default_cwd.as_deref(), &profiles) {
+            Ok(()) => {
+                self.chat_status = Some((
+                    format!("Saved profile: {}", profile_name),
+                    false,
+                    Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.chat_status = Some((
+                    format!("Failed to save profile: {}", e),
+                    true,
+                    Instant::now(),
+                ));
+            }
+        }
     }
 
     fn clamp_selection(&mut self) {
@@ -1842,6 +1926,7 @@ impl TuiPage for SessionsPage {
             }
             KeyCode::Char('h') => self.toggle_history(),
             KeyCode::Char('r') => self.force_refresh(poller),
+            KeyCode::Char('s') => self.save_session_as_profile(),
             KeyCode::PageUp => {
                 // Scroll preview up by half the visible height (estimate ~10 lines).
                 self.preview_scroll = self.preview_scroll.saturating_sub(10);

@@ -608,6 +608,10 @@ pub struct SessionsPage {
     /// Throttle preview refreshes (only every 500ms).
     last_preview_update: Option<Instant>,
 
+    // -- Focus throttle --
+    /// Last time we issued a kitty focus-window for single-select navigation.
+    last_focus_time: Option<Instant>,
+
     // -- Bus subscriber --
     /// Connection to messages.sock for receiving messages.
     bus_connection: Option<BusConnection>,
@@ -640,6 +644,7 @@ impl SessionsPage {
             preview_scroll: 0,
             last_preview_session: None,
             last_preview_update: None,
+            last_focus_time: None,
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
@@ -758,6 +763,50 @@ impl SessionsPage {
             i - 1
         };
         self.table_state.select(Some(prev));
+    }
+
+    /// Focus the kitty window for the currently highlighted session.
+    ///
+    /// Only fires when not in multi-select mode (selected_set is empty) and
+    /// throttled to at most once every 200ms to avoid rapid workspace switching
+    /// during fast scrolling.
+    fn focus_selected_window(&mut self) {
+        // Don't focus if multi-select is active.
+        if !self.selected_set.is_empty() {
+            return;
+        }
+
+        // Throttle: skip if last focus was less than 200ms ago.
+        if let Some(last) = self.last_focus_time {
+            if last.elapsed() < std::time::Duration::from_millis(200) {
+                return;
+            }
+        }
+
+        let pid = self
+            .table_state
+            .selected()
+            .and_then(|i| self.display_rows.get(i))
+            .and_then(|row| row.session.pid);
+
+        if let Some(pid) = pid {
+            self.last_focus_time = Some(Instant::now());
+            let match_arg = format!("pid:{}", pid);
+            // Fire-and-forget: spawn the process without waiting for output.
+            let _ = Command::new("kitty")
+                .args([
+                    "@",
+                    "focus-window",
+                    "--to",
+                    "unix:/tmp/kitty-thc",
+                    "--match",
+                    &match_arg,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
     }
 
     pub fn attach_selected(&self) {
@@ -1729,8 +1778,14 @@ impl TuiPage for SessionsPage {
         }
 
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.nav_down(),
-            KeyCode::Char('k') | KeyCode::Up => self.nav_up(),
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.nav_down();
+                self.focus_selected_window();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.nav_up();
+                self.focus_selected_window();
+            }
             KeyCode::Char(' ') => self.toggle_select_current(),
             KeyCode::Enter => self.attach_selected(),
             KeyCode::Char('/') => {
@@ -2469,6 +2524,7 @@ mod tests {
             preview_scroll: 0,
             last_preview_session: None,
             last_preview_update: None,
+            last_focus_time: None,
         }
     }
 

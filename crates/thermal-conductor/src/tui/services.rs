@@ -273,6 +273,15 @@ fn count_instances(def: &ServiceDef) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
+    // Clean up stale pidfile if the process is dead but the file remains.
+    // Without this, the new process sees the pidfile and refuses to start.
+    if let PidSource::Pidfile(filename) = &def.pid_source {
+        let pidfile = runtime_dir().join(filename);
+        if pidfile.exists() && read_pid_from_file(filename).is_none() {
+            let _ = std::fs::remove_file(&pidfile);
+        }
+    }
+
     // Spawn detached — setsid so it outlives the TUI.
     // Capture stderr to a temp file so we can report early crashes.
     let program = def.command.unwrap_or(def.binary);

@@ -48,7 +48,7 @@ async fn execute_speak(input: &Value) -> Result<String> {
     match UnixStream::connect(&sock_path).await {
         Ok(stream) => {
             let request = json!({
-                "action": "speak",
+                "action": "tts",
                 "text": text,
             });
             let (_, mut writer) = stream.into_split();

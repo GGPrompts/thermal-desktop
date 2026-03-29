@@ -150,8 +150,8 @@ impl VoiceModule {
 
         let (icon, label, color) = match state.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
-            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::COOL),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::ACCENT_COOL),
+            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::ACCENT_COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };
@@ -252,8 +252,8 @@ mod tests {
     fn render_from_state(state_file: VoiceStateFile) -> ModuleOutput {
         let (icon, label, color) = match state_file.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::COOL),
-            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::COOL),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::ACCENT_COOL),
+            VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::ACCENT_COOL),
             VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
         };

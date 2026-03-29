@@ -432,87 +432,47 @@ pub fn build_tool_schemas() -> Vec<Value> {
     tools
 }
 
-/// Build a slim tool schema list (~6 tools) optimised for small models (qwen3:8b).
+/// Build the 3-tool schema for qwen3:8b.
 ///
-/// Instead of exposing 28 individual tools, we collapse most actions into a
-/// `send_message` routing tool.  The small model acts as an intent parser,
-/// not a tool orchestrator — complex actions are forwarded to specialised
-/// agents (@planner, @claude, @codex, @system) via the message bus.
+/// The dispatcher can *observe* (read), *talk* (speak), and *delegate* (route).
+/// Three tools is small enough that the model cannot hallucinate capabilities.
 pub fn build_slim_tool_schemas() -> Vec<Value> {
     vec![
         tool(
-            "send_message",
-            "Route a request to another agent or system service. Targets: @planner (issues/tasks), @claude (coding questions), @codex (coding tasks), @system (desktop control, notifications).",
+            "speak",
+            "Respond to the user via text-to-speech.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The text to speak aloud to the user"
+                    }
+                },
+                "required": ["text"]
+            }),
+        ),
+        tool(
+            "read",
+            "Capture the active terminal screen. Returns the visible text so you can summarize it.",
+            json!({ "type": "object", "properties": {} }),
+        ),
+        tool(
+            "route",
+            "Forward a request to an agent. Targets: @system (desktop control), @planner (issues/tasks), @claude (coding questions), @codex (coding tasks).",
             json!({
                 "type": "object",
                 "properties": {
                     "to": {
                         "type": "string",
-                        "description": "Target: @planner, @claude, @codex, or @system"
+                        "description": "Target agent: @system, @planner, @claude, or @codex"
                     },
-                    "content": {
+                    "message": {
                         "type": "string",
-                        "description": "The message or request to send"
+                        "description": "The request to forward"
                     }
                 },
-                "required": ["to", "content"]
-            }),
-        ),
-        tool(
-            "open_app",
-            "Launch an application by command name (e.g. \"firefox\", \"obs\", \"spotify\", \"nautilus\", \"kitty\").",
-            json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Command to execute (e.g. \"firefox\", \"kitty\", \"obs\")"
-                    }
-                },
-                "required": ["command"]
-            }),
-        ),
-        tool(
-            "focus_window",
-            "Switch focus to a window by class name or title substring (e.g. \"kitty\", \"Firefox\", \"obs\").",
-            json!({
-                "type": "object",
-                "properties": {
-                    "selector": {
-                        "type": "string",
-                        "description": "Window class name or title substring"
-                    }
-                },
-                "required": ["selector"]
-            }),
-        ),
-        tool(
-            "screenshot",
-            "Take a screenshot of the screen. Returns a text description of what is visible.",
-            json!({ "type": "object", "properties": {} }),
-        ),
-        tool(
-            "system_metrics",
-            "Get current CPU, RAM, and GPU usage.",
-            json!({ "type": "object", "properties": {} }),
-        ),
-        tool(
-            "clipboard",
-            "Get or set clipboard contents.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["get", "set"],
-                        "description": "\"get\" to read clipboard, \"set\" to write"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Text to copy (only for action=\"set\")"
-                    }
-                },
-                "required": ["action"]
+                "required": ["to", "message"]
             }),
         ),
     ]
@@ -893,7 +853,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Slim tool schema tests
+    // Slim tool schema tests (speak/read/route)
     // -----------------------------------------------------------------------
 
     fn slim_tool_names() -> Vec<String> {
@@ -911,22 +871,15 @@ mod tests {
     }
 
     #[test]
-    fn slim_schemas_have_6_tools() {
+    fn slim_schemas_have_3_tools() {
         let tools = build_slim_tool_schemas();
-        assert_eq!(tools.len(), 6, "slim schema should have exactly 6 tools");
+        assert_eq!(tools.len(), 3, "slim schema should have exactly 3 tools");
     }
 
     #[test]
     fn slim_schemas_contain_expected_tools() {
         let names = slim_tool_names();
-        for expected in &[
-            "send_message",
-            "open_app",
-            "focus_window",
-            "screenshot",
-            "system_metrics",
-            "clipboard",
-        ] {
+        for expected in &["speak", "read", "route"] {
             assert!(
                 names.contains(&expected.to_string()),
                 "slim schema missing tool: {expected}"
@@ -969,65 +922,25 @@ mod tests {
     }
 
     #[test]
-    fn slim_send_message_requires_to_and_content() {
-        let t = find_slim_tool("send_message");
+    fn slim_speak_requires_text() {
+        let t = find_slim_tool("speak");
         let req = required_fields(&t);
-        assert!(req.contains(&"to".to_string()), "send_message should require 'to'");
-        assert!(req.contains(&"content".to_string()), "send_message should require 'content'");
+        assert!(req.contains(&"text".to_string()), "speak should require 'text'");
     }
 
     #[test]
-    fn slim_open_app_requires_command() {
-        let t = find_slim_tool("open_app");
+    fn slim_read_has_no_required_fields() {
+        let t = find_slim_tool("read");
         let req = required_fields(&t);
-        assert!(req.contains(&"command".to_string()));
+        assert!(req.is_empty(), "read should have no required fields");
     }
 
     #[test]
-    fn slim_focus_window_requires_selector() {
-        let t = find_slim_tool("focus_window");
+    fn slim_route_requires_to_and_message() {
+        let t = find_slim_tool("route");
         let req = required_fields(&t);
-        assert!(req.contains(&"selector".to_string()));
-    }
-
-    #[test]
-    fn slim_clipboard_requires_action() {
-        let t = find_slim_tool("clipboard");
-        let req = required_fields(&t);
-        assert!(req.contains(&"action".to_string()));
-    }
-
-    #[test]
-    fn slim_clipboard_action_enum_has_get_and_set() {
-        let t = find_slim_tool("clipboard");
-        let enum_vals = t
-            .get("input_schema")
-            .and_then(|s| s.get("properties"))
-            .and_then(|p| p.get("action"))
-            .and_then(|a| a.get("enum"))
-            .and_then(|e| e.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        assert!(enum_vals.contains(&"get".to_string()));
-        assert!(enum_vals.contains(&"set".to_string()));
-    }
-
-    #[test]
-    fn slim_screenshot_has_no_required_fields() {
-        let t = find_slim_tool("screenshot");
-        let req = required_fields(&t);
-        assert!(req.is_empty());
-    }
-
-    #[test]
-    fn slim_system_metrics_has_no_required_fields() {
-        let t = find_slim_tool("system_metrics");
-        let req = required_fields(&t);
-        assert!(req.is_empty());
+        assert!(req.contains(&"to".to_string()), "route should require 'to'");
+        assert!(req.contains(&"message".to_string()), "route should require 'message'");
     }
 
     #[test]

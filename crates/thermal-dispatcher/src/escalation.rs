@@ -5,6 +5,8 @@
 //! logging and future use (e.g., routing to a larger local model).
 
 /// Minimum available memory (in GB) required to spawn a new agent.
+/// Retained for future use; dispatcher no longer gates spawn_claude directly.
+#[allow(dead_code)]
 pub const MIN_SPAWN_MEMORY_GB: f64 = 4.0;
 
 /// Complexity classification for a voice transcript.
@@ -109,6 +111,8 @@ pub fn classify_complexity(transcript: &str) -> ComplexityLevel {
 /// Read available memory from /proc/meminfo and return the value in GB.
 ///
 /// Returns `None` if /proc/meminfo cannot be read or parsed (e.g., on non-Linux).
+/// Retained for future use; dispatcher no longer gates spawn_claude directly.
+#[allow(dead_code)]
 pub fn available_memory_gb() -> Option<f64> {
     let content = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in content.lines() {

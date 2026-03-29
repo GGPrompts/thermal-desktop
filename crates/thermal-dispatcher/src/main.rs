@@ -52,7 +52,7 @@ fn socket_path() -> PathBuf {
     runtime_dir().join("dispatcher.sock")
 }
 
-fn audio_socket_path() -> PathBuf {
+pub fn audio_socket_path() -> PathBuf {
     runtime_dir().join("audio.sock")
 }
 
@@ -149,6 +149,7 @@ async fn main() -> Result<()> {
 /// State shared across client handler tasks.
 struct SharedState {
     model: String,
+    #[allow(dead_code)] // Retained for future use; agents handle their own permissions now
     trust_config: TrustConfig,
     tool_schemas: Vec<serde_json::Value>,
     /// Reusable HTTP client (connection pool shared across requests).
@@ -431,72 +432,9 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
 
             info!(tool = %tool_name, id = %tool_id, "model wants to call tool");
 
-            // Classify by trust tier
-            let tier = state.trust_config.tier_for(tool_name);
-            info!(tool = %tool_name, tier = ?tier, "trust classification");
-
-            // Capacity check: reject spawn_claude if insufficient memory
-            if tool_name == "spawn_claude" {
-                if let Some(available_gb) = escalation::available_memory_gb() {
-                    if available_gb < escalation::MIN_SPAWN_MEMORY_GB {
-                        let msg = format!(
-                            "Not enough memory to spawn another agent. {:.1}GB available, need at least {}GB.",
-                            available_gb,
-                            escalation::MIN_SPAWN_MEMORY_GB as u32,
-                        );
-                        warn!("{msg}");
-                        send_tts(&msg).await;
-                        tool_results.push(serde_json::json!({
-                            "type": "tool_result",
-                            "tool_use_id": tool_id,
-                            "content": msg,
-                        }));
-                        continue;
-                    }
-                    info!(available_gb = format!("{:.1}", available_gb), "memory check passed for spawn_claude");
-                }
-            }
-
-            let result = match tier {
-                config::TrustTier::Auto => {
-                    // Execute immediately
-                    executor::execute_tool(tool_name, &tool_input).await
-                }
-                config::TrustTier::Confirm => {
-                    // Write action plan to HUD, wait for confirmation
-                    let description = format_action_description(tool_name, &tool_input);
-
-                    write_hud_state(&HudState::Confirming {
-                        transcript: String::new(), // Will be filled by HUD from context
-                        action: description.clone(),
-                        tool_name: tool_name.to_string(),
-                    })
-                    .await;
-
-                    match wait_for_confirmation(tool_name, &description).await {
-                        ConfirmResult::Approved => {
-                            write_hud_state(&HudState::Executing {
-                                action: description,
-                            })
-                            .await;
-                            executor::execute_tool(tool_name, &tool_input).await
-                        }
-                        ConfirmResult::Denied => {
-                            Ok(format!("User denied execution of {tool_name}"))
-                        }
-                        ConfirmResult::Timeout => Ok(format!(
-                            "Confirmation timed out for {tool_name} — action skipped"
-                        )),
-                    }
-                }
-                config::TrustTier::Block => {
-                    // Reject and announce
-                    let msg = format!("Tool {tool_name} is blocked by security policy");
-                    warn!("{msg}");
-                    send_tts(&format!("Blocked: {tool_name} is not allowed")).await;
-                    Ok(msg)
-                }
-            };
+            // All 3 dispatcher tools (speak/read/route) execute immediately.
+            // Trust-tier gating is handled by the routed agents themselves.
+            let result = executor::execute_tool(tool_name, &tool_input).await;
 
             let result_text = match result {
                 Ok(text) => text,
@@ -538,22 +476,14 @@ fn extract_text_response(content: &[serde_json::Value]) -> String {
         .join(" ")
 }
 
-/// Format a human-readable description of a tool call for confirmation UI.
+/// Format a human-readable description of a tool call for HUD display.
+#[cfg(test)]
 fn format_action_description(tool_name: &str, input: &serde_json::Value) -> String {
     match tool_name {
-        "click" => {
-            let x = input.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
-            let y = input.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
-            let btn = input
-                .get("button")
-                .and_then(|v| v.as_str())
-                .unwrap_or("left");
-            format!("Click {btn} at ({x}, {y})")
-        }
-        "type_text" => {
+        "speak" => {
             let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
-            let preview = if text.len() > 50 {
-                let mut end = 50;
+            let preview = if text.len() > 60 {
+                let mut end = 60;
                 while end > 0 && !text.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -561,85 +491,27 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
             } else {
                 text.to_string()
             };
-            format!("Type: \"{preview}\"")
+            format!("Speak: \"{preview}\"")
         }
-        "key_combo" => {
-            let combo = input.get("combo").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Press {combo}")
-        }
-        "focus_window" => {
-            let sel = input
-                .get("selector")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("Focus window: {sel}")
-        }
-        "open_app" => {
-            let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Launch: {cmd}")
-        }
-        "open_browser" => {
-            let url = input
-                .get("url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("new window");
-            format!("Open browser: {url}")
-        }
-        "spawn_claude" => {
-            let count = input.get("count").and_then(|v| v.as_i64()).unwrap_or(1);
-            let project = input
-                .get("project")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default");
-            format!("Spawn {count} Claude session(s) in {project}")
-        }
-        "kill_claude" => {
-            let id = input
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            format!("Kill Claude session {id}")
-        }
-        "send_message" => {
+        "read" => "Read active terminal".to_string(),
+        "route" => {
             let to = input.get("to").and_then(|v| v.as_str()).unwrap_or("?");
-            let content = input
-                .get("content")
+            let message = input
+                .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("...");
-            let preview = if content.len() > 60 {
+            let preview = if message.len() > 60 {
                 let mut end = 60;
-                while end > 0 && !content.is_char_boundary(end) {
+                while end > 0 && !message.is_char_boundary(end) {
                     end -= 1;
                 }
-                format!("{}...", &content[..end])
+                format!("{}...", &message[..end])
             } else {
-                content.to_string()
+                message.to_string()
             };
-            format!("Send to {to}: \"{preview}\"")
-        }
-        "clipboard" => {
-            let action = input
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("get");
-            if action == "set" {
-                let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("...");
-                let preview = if text.len() > 40 {
-                    let mut end = 40;
-                    while end > 0 && !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    format!("{}...", &text[..end])
-                } else {
-                    text.to_string()
-                };
-                format!("Copy to clipboard: \"{preview}\"")
-            } else {
-                "Read clipboard".to_string()
-            }
+            format!("Route to {to}: \"{preview}\"")
         }
         _ => {
-            // Generic: show tool name + compact args
             let args_str = serde_json::to_string(input).unwrap_or_default();
             let preview = if args_str.len() > 80 {
                 let mut end = 80;
@@ -664,14 +536,6 @@ fn format_action_description(tool_name: &str, input: &serde_json::Value) -> Stri
 enum HudState {
     #[serde(rename = "thinking")]
     Thinking { transcript: String },
-    #[serde(rename = "confirming")]
-    Confirming {
-        transcript: String,
-        action: String,
-        tool_name: String,
-    },
-    #[serde(rename = "executing")]
-    Executing { action: String },
     #[serde(rename = "result")]
     Result { transcript: String, summary: String },
     #[serde(rename = "error")]
@@ -694,72 +558,6 @@ async fn write_hud_state(state: &HudState) {
     }
     if let Err(e) = tokio::fs::rename(&tmp, HUD_STATE_FILE).await {
         warn!("failed to rename HUD state: {e}");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Confirmation flow
-// ---------------------------------------------------------------------------
-
-enum ConfirmResult {
-    Approved,
-    Denied,
-    Timeout,
-}
-
-/// Wait for user confirmation via the HUD state file.
-///
-/// The HUD writes `{"confirmed": true}` or `{"confirmed": false}` to
-/// `/tmp/thermal-hud-confirm.json` when the user responds.
-/// We poll this file with a timeout.
-async fn wait_for_confirmation(tool_name: &str, description: &str) -> ConfirmResult {
-    const CONFIRM_FILE: &str = "/tmp/thermal-hud-confirm.json";
-    const TIMEOUT_SECS: u64 = 30;
-
-    // Clear any stale confirmation
-    let _ = tokio::fs::remove_file(CONFIRM_FILE).await;
-
-    info!(
-        tool = %tool_name,
-        description = %description,
-        "waiting for user confirmation ({}s timeout)",
-        TIMEOUT_SECS
-    );
-
-    send_tts(&format!("Confirm: {description}?")).await;
-
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(TIMEOUT_SECS);
-
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            info!(tool = %tool_name, "confirmation timed out");
-            return ConfirmResult::Timeout;
-        }
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-
-        let data = match tokio::fs::read_to_string(CONFIRM_FILE).await {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        #[derive(serde::Deserialize)]
-        struct Confirm {
-            confirmed: bool,
-        }
-
-        if let Ok(c) = serde_json::from_str::<Confirm>(&data) {
-            // Clean up
-            let _ = tokio::fs::remove_file(CONFIRM_FILE).await;
-
-            if c.confirmed {
-                info!(tool = %tool_name, "user confirmed");
-                return ConfirmResult::Approved;
-            } else {
-                info!(tool = %tool_name, "user denied");
-                return ConfirmResult::Denied;
-            }
-        }
     }
 }
 
@@ -960,109 +758,53 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // format_action_description
+    // format_action_description (speak/read/route)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn format_click_description() {
-        let input = json!({"x": 100, "y": 200, "button": "right"});
-        let desc = format_action_description("click", &input);
-        assert!(desc.contains("right"), "should mention button");
-        assert!(desc.contains("100"), "should contain x");
-        assert!(desc.contains("200"), "should contain y");
+    fn format_speak_description() {
+        let input = json!({"text": "hello there"});
+        let desc = format_action_description("speak", &input);
+        assert!(desc.contains("hello there"));
+        assert!(desc.starts_with("Speak:"));
     }
 
     #[test]
-    fn format_click_defaults_to_left_button() {
-        let input = json!({"x": 50, "y": 75});
-        let desc = format_action_description("click", &input);
-        assert!(desc.contains("left"));
-    }
-
-    #[test]
-    fn format_type_text_description_short() {
-        let input = json!({"text": "hello"});
-        let desc = format_action_description("type_text", &input);
-        assert!(desc.contains("hello"));
-        assert!(desc.starts_with("Type:"));
-    }
-
-    #[test]
-    fn format_type_text_description_long_truncated() {
+    fn format_speak_long_text_truncated() {
         let long_text = "a".repeat(100);
         let input = json!({"text": long_text});
-        let desc = format_action_description("type_text", &input);
+        let desc = format_action_description("speak", &input);
         assert!(
             desc.contains("..."),
             "long text should be truncated with ..."
         );
-        // The preview is at most 50 chars + "..."
+    }
+
+    #[test]
+    fn format_read_description() {
+        let input = json!({});
+        let desc = format_action_description("read", &input);
+        assert_eq!(desc, "Read active terminal");
+    }
+
+    #[test]
+    fn format_route_description() {
+        let input = json!({"to": "@claude", "message": "explain lifetimes"});
+        let desc = format_action_description("route", &input);
+        assert!(desc.contains("@claude"));
+        assert!(desc.contains("explain lifetimes"));
+        assert!(desc.starts_with("Route to"));
+    }
+
+    #[test]
+    fn format_route_long_message_truncated() {
+        let long_msg = "x".repeat(100);
+        let input = json!({"to": "@planner", "message": long_msg});
+        let desc = format_action_description("route", &input);
         assert!(
-            desc.len() < 100,
-            "description should be shorter than full text"
+            desc.contains("..."),
+            "long message should be truncated with ..."
         );
-    }
-
-    #[test]
-    fn format_key_combo_description() {
-        let input = json!({"combo": "ctrl+s"});
-        let desc = format_action_description("key_combo", &input);
-        assert!(desc.contains("ctrl+s"));
-        assert!(desc.starts_with("Press"));
-    }
-
-    #[test]
-    fn format_focus_window_description() {
-        let input = json!({"selector": "firefox"});
-        let desc = format_action_description("focus_window", &input);
-        assert!(desc.contains("firefox"));
-        assert!(desc.to_lowercase().contains("focus"));
-    }
-
-    #[test]
-    fn format_open_app_description() {
-        let input = json!({"command": "gimp"});
-        let desc = format_action_description("open_app", &input);
-        assert!(desc.contains("gimp"));
-        assert!(desc.to_lowercase().contains("launch"));
-    }
-
-    #[test]
-    fn format_open_browser_with_url() {
-        let input = json!({"url": "https://example.com"});
-        let desc = format_action_description("open_browser", &input);
-        assert!(desc.contains("https://example.com"));
-    }
-
-    #[test]
-    fn format_open_browser_without_url() {
-        let input = json!({});
-        let desc = format_action_description("open_browser", &input);
-        assert!(desc.contains("new window"));
-    }
-
-    #[test]
-    fn format_spawn_claude_description() {
-        let input = json!({"count": 3, "project": "thermal-desktop"});
-        let desc = format_action_description("spawn_claude", &input);
-        assert!(desc.contains("3"));
-        assert!(desc.contains("thermal-desktop"));
-    }
-
-    #[test]
-    fn format_spawn_claude_defaults() {
-        let input = json!({});
-        let desc = format_action_description("spawn_claude", &input);
-        assert!(desc.contains("1"), "default count should be 1");
-        assert!(desc.contains("default"));
-    }
-
-    #[test]
-    fn format_kill_claude_description() {
-        let input = json!({"session_id": "sess-abc123"});
-        let desc = format_action_description("kill_claude", &input);
-        assert!(desc.contains("sess-abc123"));
-        assert!(desc.to_lowercase().contains("kill"));
     }
 
     #[test]
@@ -1172,38 +914,6 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert_eq!(json.get("state").and_then(|v| v.as_str()), Some("error"));
         assert_eq!(json.get("error").and_then(|v| v.as_str()), Some("timeout"));
-    }
-
-    #[test]
-    fn hud_state_confirming_serialises_correctly() {
-        let state = HudState::Confirming {
-            transcript: String::new(),
-            action: "Launch gimp".into(),
-            tool_name: "open_app".into(),
-        };
-        let json: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!(
-            json.get("state").and_then(|v| v.as_str()),
-            Some("confirming")
-        );
-        assert_eq!(
-            json.get("tool_name").and_then(|v| v.as_str()),
-            Some("open_app")
-        );
-    }
-
-    #[test]
-    fn hud_state_executing_serialises_correctly() {
-        let state = HudState::Executing {
-            action: "Clicking at (100, 200)".into(),
-        };
-        let json: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!(
-            json.get("state").and_then(|v| v.as_str()),
-            Some("executing")
-        );
     }
 
     // -----------------------------------------------------------------------

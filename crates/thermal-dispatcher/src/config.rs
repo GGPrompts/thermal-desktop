@@ -80,6 +80,9 @@ impl TrustConfig {
     }
 
     /// Look up the trust tier for a tool. Defaults to [`TrustTier::Confirm`].
+    /// Currently unused in the dispatch loop (agents handle their own permissions),
+    /// but retained for future use and tests.
+    #[allow(dead_code)]
     pub fn tier_for(&self, tool_name: &str) -> TrustTier {
         self.tiers
             .get(tool_name)

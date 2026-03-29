@@ -355,6 +355,18 @@ impl DaemonClient {
         self.request_tx.clone()
     }
 
+    /// Take the response receiver out of the client.
+    ///
+    /// Used by `window.rs` to hand the receiver to a background task that
+    /// processes streamed `ScreenUpdate` / `SessionExited` messages. After
+    /// calling this, `recv()` and `try_recv()` will return `None`.
+    pub fn take_response_rx(&mut self) -> mpsc::Receiver<Response> {
+        // Replace with a dummy channel whose sender is immediately dropped,
+        // so any subsequent recv() returns None.
+        let (_tx, dummy_rx) = mpsc::channel(1);
+        std::mem::replace(&mut self.response_rx, dummy_rx)
+    }
+
     /// Send a ping and wait for pong.
     pub async fn ping(&mut self) -> Result<()> {
         let response = self.request(Request::Ping).await?;

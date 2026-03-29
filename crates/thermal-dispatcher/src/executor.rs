@@ -1,9 +1,8 @@
-//! Tool executor — dispatches tool calls to thermal-commander (via MCP stdio)
-//! or beads CLI.
+//! Tool executor — dispatches the 3 dispatcher tools:
 //!
-//! thermal-commander is an MCP server that speaks JSON-RPC 2.0 over stdio.
-//! We spawn it as a child process, send a `tools/call` request, and read
-//! the response. For beads tools, we shell out to the `beads` CLI.
+//! - `speak` → send TTS to thermal-audio via Unix socket
+//! - `read`  → capture active terminal via thermal-commander (MCP/JSON-RPC)
+//! - `route` → forward request to agent via thermal-messages bus
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,36 +20,79 @@ use tracing::{debug, info, warn};
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Execute a tool by name with the given input arguments.
-/// Routes to thermal-commander (MCP) for desktop tools, beads CLI for
-/// issue-tracking tools, or handles slim-schema tools locally.
+/// Only 3 tools: speak, read, route.
 pub async fn execute_tool(tool_name: &str, input: &Value) -> Result<String> {
     match tool_name {
-        "send_message" => execute_send_message(input).await,
-        "clipboard" => execute_clipboard(input).await,
-        _ if tool_name.starts_with("beads:") => execute_beads_tool(tool_name, input).await,
-        _ => execute_commander_tool(tool_name, input).await,
+        "speak" => execute_speak(input).await,
+        "read" => execute_read().await,
+        "route" => execute_route(input).await,
+        _ => Ok(format!("Unknown tool: {tool_name}")),
     }
 }
 
-/// Handle the `send_message` tool — route a message to an agent/service
-/// via the thermal-messages bus (messages.sock).
-async fn execute_send_message(input: &Value) -> Result<String> {
+/// Handle the `speak` tool — send text to thermal-audio for TTS playback.
+async fn execute_speak(input: &Value) -> Result<String> {
+    let text = input
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if text.is_empty() {
+        return Ok("Nothing to speak.".to_string());
+    }
+
+    info!(text = %text, "speak tool invoked");
+
+    let sock_path = crate::audio_socket_path();
+
+    match UnixStream::connect(&sock_path).await {
+        Ok(stream) => {
+            let request = json!({
+                "action": "speak",
+                "text": text,
+            });
+            let (_, mut writer) = stream.into_split();
+            let mut payload = serde_json::to_string(&request)?;
+            payload.push('\n');
+            writer.write_all(payload.as_bytes()).await
+                .context("writing to audio.sock")?;
+            writer.flush().await?;
+            info!("sent TTS request to thermal-audio");
+            Ok(format!("Spoke: {text}"))
+        }
+        Err(e) => {
+            warn!(path = %sock_path.display(), error = %e, "cannot connect to audio.sock");
+            Ok("Audio daemon not available — is thermal-audio running?".to_string())
+        }
+    }
+}
+
+/// Handle the `read` tool — capture the active terminal screen via
+/// thermal-commander's `capture_pane` MCP tool.
+async fn execute_read() -> Result<String> {
+    info!("read tool invoked — capturing active terminal");
+    execute_commander_tool("capture_pane", &json!({})).await
+}
+
+/// Handle the `route` tool — forward a message to an agent via the
+/// thermal-messages bus (messages.sock).
+async fn execute_route(input: &Value) -> Result<String> {
     let to = input
         .get("to")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let content = input
-        .get("content")
+    let message = input
+        .get("message")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    info!(to = %to, content = %content, "send_message routed");
+    info!(to = %to, message = %message, "route tool invoked");
 
     // Validate target
-    let valid_targets = ["@planner", "@claude", "@codex", "@system"];
+    let valid_targets = ["@system", "@planner", "@claude", "@codex"];
     if !valid_targets.contains(&to) {
         return Ok(format!(
-            "Unknown target '{to}'. Valid targets: @planner, @claude, @codex, @system"
+            "Unknown target '{to}'. Valid targets: @system, @planner, @claude, @codex"
         ));
     }
 
@@ -71,7 +113,7 @@ async fn execute_send_message(input: &Value) -> Result<String> {
         to: to_id,
         context_id: None,
         project: None,
-        content: content.to_string(),
+        content: message.to_string(),
         msg_type: MessageType::AgentMsg,
         metadata: HashMap::new(),
     };
@@ -107,32 +149,10 @@ async fn execute_send_message(input: &Value) -> Result<String> {
     {
         Ok(Ok(0)) | Err(_) => {
             // EOF or timeout — message was sent but no response
-            Ok(format!("Message sent to {to} (no daemon response)"))
+            Ok(format!("Routed to {to} (no daemon response)"))
         }
         Ok(Ok(_)) => Ok(response_line.trim().to_string()),
-        Ok(Err(e)) => Ok(format!("Message sent to {to} but read error: {e}")),
-    }
-}
-
-/// Handle the unified `clipboard` tool (get/set).
-///
-/// Maps to the thermal-commander clipboard_get/clipboard_set tools.
-async fn execute_clipboard(input: &Value) -> Result<String> {
-    let action = input
-        .get("action")
-        .and_then(|v| v.as_str())
-        .unwrap_or("get");
-
-    match action {
-        "get" => execute_commander_tool("clipboard_get", &json!({})).await,
-        "set" => {
-            let text = input
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            execute_commander_tool("clipboard_set", &json!({"text": text})).await
-        }
-        _ => Ok(format!("Unknown clipboard action: {action}")),
+        Ok(Err(e)) => Ok(format!("Routed to {to} but read error: {e}")),
     }
 }
 
@@ -258,166 +278,6 @@ async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String
         .unwrap_or_else(|| "no result".to_string()))
 }
 
-/// Build the CLI argument list for a beads subcommand without spawning the process.
-/// Used in tests to verify argument construction logic.
-#[cfg(test)]
-pub fn beads_args_for(tool_name: &str, input: &Value) -> Vec<String> {
-    let subcommand = tool_name.strip_prefix("beads:").unwrap_or(tool_name);
-    let mut args: Vec<String> = vec![subcommand.to_string()];
-    match subcommand {
-        "list" => {
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-            if let Some(status) = input.get("status").and_then(|v| v.as_str()) {
-                args.push("--status".to_string());
-                args.push(status.to_string());
-            }
-        }
-        "show" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-        }
-        "stats" => {
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-        }
-        "create" => {
-            if let Some(title) = input.get("title").and_then(|v| v.as_str()) {
-                args.push("--title".to_string());
-                args.push(title.to_string());
-            }
-            if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
-                args.push("--description".to_string());
-                args.push(desc.to_string());
-            }
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-        }
-        "close" | "claim" | "ready" | "blocked" | "reopen" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-        }
-        "update" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-            if let Some(title) = input.get("title").and_then(|v| v.as_str()) {
-                args.push("--title".to_string());
-                args.push(title.to_string());
-            }
-            if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
-                args.push("--description".to_string());
-                args.push(desc.to_string());
-            }
-        }
-        _ => {}
-    }
-    args
-}
-
-/// Execute a beads tool via the beads CLI.
-async fn execute_beads_tool(tool_name: &str, input: &Value) -> Result<String> {
-    let subcommand = tool_name.strip_prefix("beads:").unwrap_or(tool_name);
-
-    info!(tool = %tool_name, subcommand = %subcommand, "executing via beads CLI");
-
-    let mut args: Vec<String> = vec![subcommand.to_string()];
-
-    // Map input fields to CLI arguments based on the subcommand
-    match subcommand {
-        "list" => {
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-            if let Some(status) = input.get("status").and_then(|v| v.as_str()) {
-                args.push("--status".to_string());
-                args.push(status.to_string());
-            }
-        }
-        "show" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-        }
-        "stats" => {
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-        }
-        "create" => {
-            if let Some(title) = input.get("title").and_then(|v| v.as_str()) {
-                args.push("--title".to_string());
-                args.push(title.to_string());
-            }
-            if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
-                args.push("--description".to_string());
-                args.push(desc.to_string());
-            }
-            if let Some(project) = input.get("project").and_then(|v| v.as_str()) {
-                args.push("--project".to_string());
-                args.push(project.to_string());
-            }
-        }
-        "close" | "claim" | "ready" | "blocked" | "reopen" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-        }
-        "update" => {
-            if let Some(id) = input.get("issue_id").and_then(|v| v.as_str()) {
-                args.push(id.to_string());
-            }
-            if let Some(title) = input.get("title").and_then(|v| v.as_str()) {
-                args.push("--title".to_string());
-                args.push(title.to_string());
-            }
-            if let Some(desc) = input.get("description").and_then(|v| v.as_str()) {
-                args.push("--description".to_string());
-                args.push(desc.to_string());
-            }
-        }
-        _ => {
-            warn!(subcommand = %subcommand, "unknown beads subcommand");
-        }
-    }
-
-    let output = Command::new("beads")
-        .args(&args)
-        .output()
-        .await
-        .with_context(|| format!("failed to run beads {subcommand}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if !output.status.success() {
-        return Ok(format!(
-            "beads {subcommand} failed: {}",
-            if stderr.is_empty() {
-                stdout.trim()
-            } else {
-                stderr.trim()
-            }
-        ));
-    }
-
-    Ok(if stdout.trim().is_empty() {
-        format!("beads {subcommand} completed successfully")
-    } else {
-        stdout.trim().to_string()
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -428,155 +288,15 @@ mod tests {
     use serde_json::json;
 
     // -----------------------------------------------------------------------
-    // Namespaced tool routing: beads: prefix detection
+    // Tool routing: 3-tool dispatch
     // -----------------------------------------------------------------------
 
     #[test]
-    fn beads_prefix_is_recognised() {
-        assert!("beads:list".starts_with("beads:"));
-        assert!(!"screenshot".starts_with("beads:"));
-    }
-
-    // -----------------------------------------------------------------------
-    // beads CLI argument construction
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn beads_list_no_filters() {
-        let args = beads_args_for("beads:list", &json!({}));
-        assert_eq!(args, vec!["list"]);
-    }
-
-    #[test]
-    fn beads_list_with_project_filter() {
-        let args = beads_args_for("beads:list", &json!({"project": "therm"}));
-        assert_eq!(args, vec!["list", "--project", "therm"]);
-    }
-
-    #[test]
-    fn beads_list_with_status_filter() {
-        let args = beads_args_for("beads:list", &json!({"status": "open"}));
-        assert_eq!(args, vec!["list", "--status", "open"]);
-    }
-
-    #[test]
-    fn beads_list_with_both_filters() {
-        let args = beads_args_for(
-            "beads:list",
-            &json!({"project": "therm", "status": "ready"}),
-        );
-        // project comes before status in the match arm
-        assert!(args.contains(&"--project".to_string()));
-        assert!(args.contains(&"therm".to_string()));
-        assert!(args.contains(&"--status".to_string()));
-        assert!(args.contains(&"ready".to_string()));
-        assert_eq!(args[0], "list");
-    }
-
-    #[test]
-    fn beads_show_with_issue_id() {
-        let args = beads_args_for("beads:show", &json!({"issue_id": "therm-abc1"}));
-        assert_eq!(args, vec!["show", "therm-abc1"]);
-    }
-
-    #[test]
-    fn beads_show_without_issue_id() {
-        let args = beads_args_for("beads:show", &json!({}));
-        assert_eq!(args, vec!["show"]);
-    }
-
-    #[test]
-    fn beads_stats_with_project() {
-        let args = beads_args_for("beads:stats", &json!({"project": "therm"}));
-        assert_eq!(args, vec!["stats", "--project", "therm"]);
-    }
-
-    #[test]
-    fn beads_stats_without_project() {
-        let args = beads_args_for("beads:stats", &json!({}));
-        assert_eq!(args, vec!["stats"]);
-    }
-
-    #[test]
-    fn beads_create_with_all_fields() {
-        let args = beads_args_for(
-            "beads:create",
-            &json!({"title": "Fix bug", "description": "details", "project": "therm"}),
-        );
-        assert!(args.contains(&"create".to_string()));
-        assert!(args.contains(&"--title".to_string()));
-        assert!(args.contains(&"Fix bug".to_string()));
-        assert!(args.contains(&"--description".to_string()));
-        assert!(args.contains(&"details".to_string()));
-        assert!(args.contains(&"--project".to_string()));
-        assert!(args.contains(&"therm".to_string()));
-    }
-
-    #[test]
-    fn beads_create_title_only() {
-        let args = beads_args_for("beads:create", &json!({"title": "My issue"}));
-        assert_eq!(args[0], "create");
-        assert!(args.contains(&"--title".to_string()));
-        assert!(args.contains(&"My issue".to_string()));
-        assert!(!args.contains(&"--description".to_string()));
-        assert!(!args.contains(&"--project".to_string()));
-    }
-
-    #[test]
-    fn beads_close_with_issue_id() {
-        let args = beads_args_for("beads:close", &json!({"issue_id": "therm-xyz9"}));
-        assert_eq!(args, vec!["close", "therm-xyz9"]);
-    }
-
-    #[test]
-    fn beads_claim_with_issue_id() {
-        let args = beads_args_for("beads:claim", &json!({"issue_id": "therm-abc2"}));
-        assert_eq!(args, vec!["claim", "therm-abc2"]);
-    }
-
-    #[test]
-    fn beads_ready_with_issue_id() {
-        let args = beads_args_for("beads:ready", &json!({"issue_id": "therm-abc3"}));
-        assert_eq!(args, vec!["ready", "therm-abc3"]);
-    }
-
-    #[test]
-    fn beads_blocked_with_issue_id() {
-        let args = beads_args_for("beads:blocked", &json!({"issue_id": "therm-abc4"}));
-        assert_eq!(args, vec!["blocked", "therm-abc4"]);
-    }
-
-    #[test]
-    fn beads_reopen_with_issue_id() {
-        let args = beads_args_for("beads:reopen", &json!({"issue_id": "therm-abc5"}));
-        assert_eq!(args, vec!["reopen", "therm-abc5"]);
-    }
-
-    #[test]
-    fn beads_update_with_all_fields() {
-        let args = beads_args_for(
-            "beads:update",
-            &json!({"issue_id": "therm-abc6", "title": "New title", "description": "new desc"}),
-        );
-        assert_eq!(args[0], "update");
-        assert!(args.contains(&"therm-abc6".to_string()));
-        assert!(args.contains(&"--title".to_string()));
-        assert!(args.contains(&"New title".to_string()));
-        assert!(args.contains(&"--description".to_string()));
-        assert!(args.contains(&"new desc".to_string()));
-    }
-
-    #[test]
-    fn beads_update_id_only() {
-        let args = beads_args_for("beads:update", &json!({"issue_id": "therm-abc7"}));
-        assert_eq!(args, vec!["update", "therm-abc7"]);
-    }
-
-    #[test]
-    fn unknown_beads_subcommand_produces_only_subcommand() {
-        // Unknown subcommand — args has just the subcommand name
-        let args = beads_args_for("beads:frobnicate", &json!({"foo": "bar"}));
-        assert_eq!(args, vec!["frobnicate"]);
+    fn unknown_tool_returns_message() {
+        // Synchronously verify the match arm returns an error string
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_tool("nonexistent", &json!({}))).unwrap();
+        assert!(result.contains("Unknown tool"), "got: {result}");
     }
 
     // -----------------------------------------------------------------------
@@ -680,47 +400,64 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // send_message tool
+    // route tool
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn send_message_valid_target_attempts_bus_connection() {
-        // With or without the daemon running, valid targets should either
-        // connect to the bus or report it's unavailable — not return a
-        // false "Message sent" confirmation.
-        let input = json!({"to": "@planner", "content": "create issue for voice bug"});
-        let result = super::execute_send_message(&input).await.unwrap();
-        // Should NOT contain the old stub "Message sent to @planner: ..."
-        assert!(
-            !result.contains("Message sent to @planner:"),
-            "should not return stub confirmation, got: {result}"
-        );
-        // Should be one of: bus unavailable, sent (no daemon response), or real response
+    async fn route_valid_target_attempts_bus_connection() {
+        let input = json!({"to": "@planner", "message": "create issue for voice bug"});
+        let result = execute_route(&input).await.unwrap();
+        // Should be one of: bus unavailable, routed (no daemon response), or real response
         assert!(
             result.contains("Message bus not available")
-                || result.contains("Message sent to @planner")
+                || result.contains("Routed to @planner")
                 || result.contains("ack"),
             "unexpected result: {result}"
         );
     }
 
     #[tokio::test]
-    async fn send_message_invalid_target_returns_error() {
-        let input = json!({"to": "@invalid", "content": "test"});
-        let result = super::execute_send_message(&input).await.unwrap();
-        assert!(result.contains("Unknown target"), "should reject invalid target");
+    async fn route_invalid_target_returns_error() {
+        let input = json!({"to": "@invalid", "message": "test"});
+        let result = execute_route(&input).await.unwrap();
+        assert!(result.contains("Unknown target"), "should reject invalid target, got: {result}");
     }
 
     #[tokio::test]
-    async fn send_message_missing_fields_uses_defaults() {
+    async fn route_missing_fields_uses_defaults() {
         let input = json!({});
-        let result = super::execute_send_message(&input).await.unwrap();
+        let result = execute_route(&input).await.unwrap();
         assert!(result.contains("Unknown target"), "missing 'to' should fail");
     }
 
+    // -----------------------------------------------------------------------
+    // speak tool
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn speak_empty_text_returns_nothing_to_speak() {
+        let input = json!({"text": ""});
+        let result = execute_speak(&input).await.unwrap();
+        assert_eq!(result, "Nothing to speak.");
+    }
+
+    #[tokio::test]
+    async fn speak_attempts_audio_connection() {
+        let input = json!({"text": "hello world"});
+        let result = execute_speak(&input).await.unwrap();
+        // Audio daemon may or may not be running — either outcome is fine
+        assert!(
+            result.contains("Spoke:") || result.contains("Audio daemon not available"),
+            "unexpected result: {result}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // route builds correct AgentMsg
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn send_message_builds_correct_agent_msg() {
-        // Verify the Message struct is constructed correctly without needing a socket
+    fn route_builds_correct_agent_msg() {
         use std::collections::HashMap;
         use thermal_core::message::{AgentId, Message, MessageType};
 
@@ -744,43 +481,5 @@ mod tests {
         assert_eq!(parsed["to"]["key"], "default");
         assert_eq!(parsed["content"], "hello there");
         assert_eq!(parsed["type"], "AgentMsg");
-    }
-
-    // -----------------------------------------------------------------------
-    // clipboard tool routing
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn clipboard_action_parsing() {
-        // Just test that the action field is parsed correctly
-        let input_get = json!({"action": "get"});
-        assert_eq!(
-            input_get.get("action").and_then(|v| v.as_str()),
-            Some("get")
-        );
-
-        let input_set = json!({"action": "set", "text": "hello"});
-        assert_eq!(
-            input_set.get("action").and_then(|v| v.as_str()),
-            Some("set")
-        );
-        assert_eq!(
-            input_set.get("text").and_then(|v| v.as_str()),
-            Some("hello")
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Tool routing: send_message and clipboard dispatch
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tool_routing_send_message_is_not_beads() {
-        assert!(!"send_message".starts_with("beads:"));
-    }
-
-    #[test]
-    fn tool_routing_clipboard_is_not_beads() {
-        assert!(!"clipboard".starts_with("beads:"));
     }
 }

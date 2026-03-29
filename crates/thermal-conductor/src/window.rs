@@ -238,6 +238,9 @@ pub fn run() -> anyhow::Result<()> {
     // Enter the tokio runtime context for spawning async tasks.
     let _guard = tokio_rt.enter();
 
+    // Shared flag for the daemon reader task to signal session exit.
+    let daemon_exit_requested = Arc::new(AtomicBool::new(false));
+
     // Try to connect to the session daemon. If it is running, use client
     // mode; otherwise fall back to standalone mode with a local PTY.
     let (session_mode, term_event_rx, pty_child_pid) = tokio_rt.block_on(async {
@@ -328,12 +331,29 @@ pub fn run() -> anyhow::Result<()> {
                 let term_event_rx =
                     terminal.take_event_rx().expect("event_rx already taken");
 
+                // Take the response receiver from the client so the daemon
+                // reader task can consume streamed ScreenUpdate messages.
+                // The client retains the request sender for input/resize.
+                let response_rx = client.take_response_rx();
+
+                // Dup the write end of the wakeup pipe for the daemon reader
+                // task. The original OwnedFd will drop when this async block
+                // ends (in the standalone path it's moved to spawn_byte_processor
+                // instead). The dup'd OwnedFd is moved into the spawned task.
+                let task_wakeup_fd = {
+                    let raw = nix::unistd::dup(wakeup_write.as_raw_fd())
+                        .expect("Failed to dup wakeup write fd");
+                    unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) }
+                };
+
                 // Spawn a background task that reads daemon responses and
                 // feeds screen updates into the local Term + dirty flag.
                 spawn_daemon_reader_task(
                     &terminal,
+                    response_rx,
                     Arc::clone(&pty_dirty),
-                    wakeup_read_fd,
+                    Arc::clone(&daemon_exit_requested),
+                    task_wakeup_fd,
                 );
 
                 let mode = SessionMode::Client {
@@ -419,6 +439,7 @@ pub fn run() -> anyhow::Result<()> {
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         exit: false,
+        daemon_exit_requested,
         keyboard: None,
         seat: None,
         modifiers: Modifiers {
@@ -658,25 +679,196 @@ fn setup_standalone_session(
 /// Spawn a tokio task that reads daemon responses and applies screen updates
 /// to the local terminal. Signals the wakeup pipe so the render loop wakes.
 ///
-/// NOTE: In client mode the daemon streams `ScreenUpdate` and `SessionExited`
-/// messages. This task processes them in the background, writing dirty cells
-/// into the Term and setting the pty_dirty flag.
+/// In client mode the daemon streams `ScreenUpdate` and `SessionExited`
+/// messages after an `Attach`. This task processes them in the background,
+/// writing dirty cells into the Term and setting the pty_dirty flag.
 fn spawn_daemon_reader_task(
-    _terminal: &Terminal,
-    _pty_dirty: Arc<AtomicBool>,
-    _wakeup_read_fd: i32,
+    terminal: &Terminal,
+    mut response_rx: tokio::sync::mpsc::Receiver<Response>,
+    pty_dirty: Arc<AtomicBool>,
+    exit_requested: Arc<AtomicBool>,
+    wakeup_write: std::os::fd::OwnedFd,
 ) {
-    // TODO: Wire up the daemon response channel once the daemon sends
-    // ScreenUpdate messages. For now, the attach response provides the
-    // initial state and we rely on the daemon for input forwarding.
-    //
-    // The full implementation will:
-    // 1. Clone the terminal's term_handle
-    // 2. In a loop, receive Response from the client
-    // 3. For ScreenUpdate: apply dirty cells to the term
-    // 4. Set pty_dirty and write to the wakeup pipe
-    // 5. For SessionExited: signal the main loop
-    tracing::debug!("Daemon reader task placeholder — screen updates not yet streamed");
+    let term_handle = terminal.term_handle();
+    let wakeup_write_fd = wakeup_write.as_raw_fd();
+
+    tokio::spawn(async move {
+        // Keep the OwnedFd alive for the lifetime of the task.
+        let _wakeup_owner = wakeup_write;
+
+        tracing::info!("Daemon reader task started — streaming screen updates");
+
+        while let Some(response) = response_rx.recv().await {
+            match response {
+                Response::ScreenUpdate {
+                    dirty_cells,
+                    cursor,
+                    ..
+                } => {
+                    // Apply dirty cells incrementally to the local term.
+                    let mut term = term_handle.lock();
+                    let screen_lines = {
+                        use alacritty_terminal::grid::Dimensions;
+                        term.screen_lines()
+                    };
+
+                    for dc in &dirty_cells {
+                        let row = dc.row as usize;
+                        let col = dc.col as usize;
+                        if row >= screen_lines {
+                            continue;
+                        }
+                        let point = Point::new(
+                            alacritty_terminal::index::Line(row as i32),
+                            Column(col),
+                        );
+                        let grid_cell = &mut term.grid_mut()[point];
+                        grid_cell.c = dc.cell.ch;
+                        grid_cell.flags = Flags::from_bits_truncate(dc.cell.flags);
+                        grid_cell.fg = alacritty_terminal::vte::ansi::Color::Spec(
+                            alacritty_terminal::vte::ansi::Rgb {
+                                r: dc.cell.fg.r,
+                                g: dc.cell.fg.g,
+                                b: dc.cell.fg.b,
+                            },
+                        );
+                        grid_cell.bg = alacritty_terminal::vte::ansi::Color::Spec(
+                            alacritty_terminal::vte::ansi::Rgb {
+                                r: dc.cell.bg.r,
+                                g: dc.cell.bg.g,
+                                b: dc.cell.bg.b,
+                            },
+                        );
+                    }
+
+                    // Update cursor position.
+                    if cursor.visible {
+                        term.grid_mut().cursor.point = Point::new(
+                            alacritty_terminal::index::Line(cursor.row as i32),
+                            Column(cursor.col as usize),
+                        );
+                    }
+
+                    drop(term);
+
+                    // Signal render loop: new content available.
+                    pty_dirty.store(true, Ordering::Release);
+                    wake_render_loop(wakeup_write_fd);
+
+                    tracing::trace!(
+                        dirty = dirty_cells.len(),
+                        "Applied incremental screen update from daemon"
+                    );
+                }
+
+                Response::SessionState {
+                    cols,
+                    rows,
+                    ref cells,
+                    ref cursor,
+                    ..
+                } => {
+                    // Full redraw — the daemon sends this when damage is too
+                    // large for an incremental update.
+                    let mut term = term_handle.lock();
+
+                    // Resize if needed.
+                    let current_cols = {
+                        use alacritty_terminal::grid::Dimensions;
+                        term.columns()
+                    };
+                    let current_rows = {
+                        use alacritty_terminal::grid::Dimensions;
+                        term.screen_lines()
+                    };
+                    if current_cols != cols as usize || current_rows != rows as usize {
+                        use crate::terminal::ConductorTerminalSize;
+                        let size = ConductorTerminalSize::new(cols as usize, rows as usize);
+                        term.resize(size);
+                    }
+
+                    // Apply all cells.
+                    for (i, cell_data) in cells.iter().enumerate() {
+                        let row = i / (cols as usize);
+                        let col = i % (cols as usize);
+                        if row < rows as usize {
+                            let point = Point::new(
+                                alacritty_terminal::index::Line(row as i32),
+                                Column(col),
+                            );
+                            let grid_cell = &mut term.grid_mut()[point];
+                            grid_cell.c = cell_data.ch;
+                            grid_cell.flags = Flags::from_bits_truncate(cell_data.flags);
+                            grid_cell.fg = alacritty_terminal::vte::ansi::Color::Spec(
+                                alacritty_terminal::vte::ansi::Rgb {
+                                    r: cell_data.fg.r,
+                                    g: cell_data.fg.g,
+                                    b: cell_data.fg.b,
+                                },
+                            );
+                            grid_cell.bg = alacritty_terminal::vte::ansi::Color::Spec(
+                                alacritty_terminal::vte::ansi::Rgb {
+                                    r: cell_data.bg.r,
+                                    g: cell_data.bg.g,
+                                    b: cell_data.bg.b,
+                                },
+                            );
+                        }
+                    }
+
+                    // Position the cursor.
+                    if cursor.visible {
+                        term.grid_mut().cursor.point = Point::new(
+                            alacritty_terminal::index::Line(cursor.row as i32),
+                            Column(cursor.col as usize),
+                        );
+                    }
+
+                    drop(term);
+
+                    pty_dirty.store(true, Ordering::Release);
+                    wake_render_loop(wakeup_write_fd);
+
+                    tracing::debug!(
+                        cols,
+                        rows,
+                        cells = cells.len(),
+                        "Applied full session state from daemon (streamed)"
+                    );
+                }
+
+                Response::SessionExited { id, exit_code } => {
+                    tracing::info!(
+                        session_id = %id,
+                        ?exit_code,
+                        "Daemon reports session exited"
+                    );
+                    exit_requested.store(true, Ordering::Release);
+                    // Wake the render loop so it checks exit promptly.
+                    wake_render_loop(wakeup_write_fd);
+                    break;
+                }
+
+                Response::TitleChanged { title, .. } => {
+                    tracing::debug!(title = %title, "Daemon title changed (not yet applied to window)");
+                }
+
+                // Ignore request-response messages (Ok, Pong, Error, etc.)
+                // that may arrive before the stream settles.
+                other => {
+                    tracing::trace!(?other, "Daemon reader: ignoring non-stream response");
+                }
+            }
+        }
+
+        tracing::info!("Daemon reader task exiting");
+    });
+}
+
+/// Write a single byte to the wakeup pipe to unblock the poll() in the
+/// render loop. Errors are silently ignored (pipe full is harmless).
+fn wake_render_loop(wakeup_write_fd: i32) {
+    let _ = nix::unistd::write(unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_write_fd) }, &[1u8]);
 }
 
 // ── Apply daemon session state to local term ──────────────────────────────────
@@ -789,6 +981,9 @@ struct ConductorWindow {
     width: u32,
     height: u32,
     exit: bool,
+    /// Set to `true` by the daemon reader task when a `SessionExited` message
+    /// arrives. Checked by `session_has_exited()` in client mode.
+    daemon_exit_requested: Arc<AtomicBool>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// The seat associated with our keyboard, needed for shortcuts inhibit.
     seat: Option<wl_seat::WlSeat>,
@@ -893,10 +1088,9 @@ impl ConductorWindow {
     fn session_has_exited(&self) -> bool {
         match &self.session_mode {
             SessionMode::Standalone { pty } => pty.has_exited(),
-            // In client mode, the daemon sends SessionExited which will be
-            // handled by the daemon reader task (setting `self.exit`).
-            // For now, we never report exited from here.
-            SessionMode::Client { .. } => false,
+            // In client mode, the daemon reader task sets this flag when
+            // it receives a `SessionExited` message.
+            SessionMode::Client { .. } => self.daemon_exit_requested.load(Ordering::Acquire),
         }
     }
 

@@ -8,67 +8,28 @@ const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_MODEL: &str = "qwen3:8b";
 
 /// System prompt that gives the model its role as a voice assistant dispatcher.
-const SYSTEM_PROMPT: &str = r#"You are the voice assistant for Thermal Desktop, a custom Linux desktop.
-You receive speech-to-text transcripts and use tools to execute commands.
-Respond with brief spoken confirmations for TTS. No markdown, no formatting, plain English only, under 2 sentences.
+const SYSTEM_PROMPT: &str = r#"You hear voice transcripts from a Linux desktop user. You have 3 tools:
 
-Input is speech-to-text and may contain filler words, hesitations, or transcription errors. Interpret the intent, not literal text.
+- speak(text) — reply to the user via TTS
+- read() — capture the active terminal screen, returns text
+- route(to, message) — forward a request to an agent: @system, @planner, @claude, @codex
 
-You have 6 tools. For complex requests, use send_message to route to the right agent.
+If the user is talking to you, use speak. To see the terminal, use read. For everything else, route to the right agent then speak a short confirmation.
 
-TOOL GUIDE:
-- "open [app]" → open_app(command="firefox") or open_app(command="kitty")
-- "focus [app]" / "switch to [app]" → focus_window(selector="kitty")
-- "take a screenshot" → screenshot()
-- "check system" / "how's the machine" → system_metrics()
-- "copy/paste" / "what's on clipboard" → clipboard(action="get") or clipboard(action="set", text="...")
-- Everything else → send_message to the right agent:
-  - Issues/tasks/planning → send_message(to="@planner", content="...")
-  - Coding questions → send_message(to="@claude", content="...")
-  - Code tasks → send_message(to="@codex", content="...")
-  - Desktop control, notifications, spawning sessions → send_message(to="@system", content="...")
+Routing guide:
+- @system — desktop control, apps, windows, screenshots, notifications, spawning sessions
+- @planner — issues, tasks, planning
+- @claude — coding questions, explanations
+- @codex — coding tasks, implementation
 
-ROUTING EXAMPLES:
+Examples:
+User: "hey what's on screen" → read(), then speak a summary
+User: "open firefox" → route(to="@system", message="open firefox"), speak("Routed to system.")
+User: "create an issue for the voice bug" → route(to="@planner", message="create issue for the voice pipeline bug"), speak("Sent to the planner.")
+User: "ask claude about lifetimes" → route(to="@claude", message="explain rust lifetimes"), speak("Forwarded to Claude.")
+User: "good morning" → speak("Good morning!")
 
-User: "create an issue for the voice bug"
-Action: send_message(to="@planner", content="create issue for the voice pipeline bug")
-Response: Sent to the planner.
-
-User: "ask claude about rust lifetimes"
-Action: send_message(to="@claude", content="explain rust lifetimes")
-Response: Forwarded to Claude.
-
-User: "what issues are ready"
-Action: send_message(to="@planner", content="list ready issues")
-Response: Checking with the planner.
-
-User: "spawn two claude sessions"
-Action: send_message(to="@system", content="spawn 2 claude sessions")
-Response: Asking the system to spin those up.
-
-User: "send a notification saying build done"
-Action: send_message(to="@system", content="send notification: build done")
-Response: Notification sent.
-
-DIRECT EXAMPLES:
-
-User: "open Firefox"
-Action: open_app(command="firefox")
-Response: Opening Firefox.
-
-User: "switch to the terminal"
-Action: focus_window(selector="kitty")
-Response: Switched to the terminal.
-
-User: "how's the system doing"
-Action: system_metrics()
-Response: CPU is at 34 percent, 12 gigs of RAM used, GPU at 45 percent.
-
-User: "take a screenshot"
-Action: screenshot()
-Response: Got it. You have a terminal and Firefox open, with the terminal focused.
-
-THINKING: Do NOT use <think> blocks unless the user explicitly says "think" or "think about". Respond directly. /no_think"#;
+Plain English only, no markdown. Keep speak text under 2 sentences. /no_think"#;
 
 /// Resolve the model name: env var `THERMAL_DISPATCHER_MODEL` overrides the default.
 pub fn resolve_model() -> String {
@@ -525,7 +486,7 @@ mod tests {
         let result = build_ollama_messages(&msgs);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0]["role"], "system");
-        assert!(result[0]["content"].as_str().unwrap().contains("Thermal Desktop"));
+        assert!(result[0]["content"].as_str().unwrap().contains("voice transcripts"));
         assert_eq!(result[1]["role"], "user");
         assert_eq!(result[1]["content"], "hello");
     }
@@ -594,8 +555,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn system_prompt_contains_thermal_desktop() {
-        assert!(SYSTEM_PROMPT.contains("Thermal Desktop"));
+    fn system_prompt_describes_voice_role() {
+        assert!(SYSTEM_PROMPT.contains("voice transcripts"));
     }
 
     #[test]

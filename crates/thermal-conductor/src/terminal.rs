@@ -133,7 +133,11 @@ impl Terminal {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let listener = ThermalEventListener::new(event_tx);
 
-        let config = TermConfig::default();
+        let mut config = TermConfig::default();
+        // Enable the kitty keyboard protocol so terminal applications (neovim,
+        // helix, zellij) can push progressive enhancement flags and receive
+        // unambiguous key encodings.
+        config.kitty_keyboard = true;
         let size = ConductorTerminalSize::new(cols, rows);
         let term = Term::new(config, &size, listener);
 

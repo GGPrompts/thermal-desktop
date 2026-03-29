@@ -534,7 +534,8 @@ pub fn run() -> anyhow::Result<()> {
             && std::time::Instant::now() >= next
         {
             let key_clone = key.clone();
-            if let Some(bytes) = input::encode_key(&key_clone, &state.modifiers) {
+            // Use kitty Repeat event type when kitty keyboard protocol is active.
+            if let Some(bytes) = state.encode_key_event(&key_clone, input::KeyEventType::Repeat) {
                 state.write_session(&bytes);
             }
             state.repeat_next = Some(std::time::Instant::now() + state.repeat_rate);
@@ -1053,6 +1054,35 @@ struct ConductorWindow {
 }
 
 impl ConductorWindow {
+    // ── Kitty keyboard protocol helpers ──────────────────────────────────
+
+    /// Query the alacritty_terminal mode flags and return the active kitty
+    /// keyboard protocol flags.  Returns `KittyFlags::NONE` when kitty
+    /// keyboard mode is not active.
+    fn kitty_flags(&self) -> input::KittyFlags {
+        let th = self.terminal.term_handle();
+        let t = th.lock();
+        let mode = t.mode();
+        let mut flags: u8 = 0;
+        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) { flags |= 1; }
+        if mode.contains(TermMode::REPORT_EVENT_TYPES)     { flags |= 2; }
+        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS)  { flags |= 4; }
+        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) { flags |= 8; }
+        if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT)  { flags |= 16; }
+        input::KittyFlags(flags)
+    }
+
+    /// Encode a key event, choosing kitty or legacy encoding based on the
+    /// terminal's active mode.
+    fn encode_key_event(&self, event: &KeyEvent, event_type: input::KeyEventType) -> Option<Vec<u8>> {
+        let flags = self.kitty_flags();
+        if flags.contains(input::KittyFlags::DISAMBIGUATE) {
+            input::encode_key_kitty(event, &self.modifiers, flags, event_type)
+        } else {
+            input::encode_key(event, &self.modifiers)
+        }
+    }
+
     // ── Session mode dispatch helpers ─────────────────────────────────────
 
     /// Write bytes to the active session (PTY or daemon).
@@ -2379,12 +2409,13 @@ impl KeyboardHandler for ConductorWindow {
         }
 
         // Encode the key press into bytes and send to the session.
-        if let Some(bytes) = input::encode_key(&event, &self.modifiers) {
+        // Uses kitty keyboard protocol when the terminal has it enabled.
+        if let Some(bytes) = self.encode_key_event(&event, input::KeyEventType::Press) {
             self.write_session(&bytes);
         }
 
         // Start key repeat for this key. Modifier-only keys don't repeat.
-        if input::encode_key(&event, &self.modifiers).is_some() {
+        if self.encode_key_event(&event, input::KeyEventType::Press).is_some() {
             self.repeat_key = Some(event);
             self.repeat_next = Some(std::time::Instant::now() + self.repeat_delay);
         }
@@ -2400,11 +2431,20 @@ impl KeyboardHandler for ConductorWindow {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _event: KeyEvent,
+        event: KeyEvent,
     ) {
         // Stop key repeat when any key is released.
         self.repeat_key = None;
         self.repeat_next = None;
+
+        // When kitty keyboard protocol with REPORT_EVENTS is active, send
+        // a release event to the terminal application.
+        let flags = self.kitty_flags();
+        if flags.contains(input::KittyFlags::REPORT_EVENTS) {
+            if let Some(bytes) = input::encode_key_kitty(&event, &self.modifiers, flags, input::KeyEventType::Release) {
+                self.write_session(&bytes);
+            }
+        }
     }
 
     fn update_modifiers(

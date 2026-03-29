@@ -5,6 +5,7 @@
 //! and delegates to the shared encoding logic.
 
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, Keysym, Modifiers};
+pub use thermal_terminal::input::{KittyFlags, KeyEventType};
 
 /// Encode an SCTK key-press event into the bytes that should be written to
 /// the PTY.
@@ -23,6 +24,27 @@ pub fn encode_key(event: &KeyEvent, modifiers: &Modifiers) -> Option<Vec<u8>> {
     };
 
     thermal_terminal::input::encode_key(&key_code, &mods)
+}
+
+/// Encode an SCTK key event using the kitty keyboard protocol.
+///
+/// Should be used instead of [`encode_key`] when the terminal has kitty
+/// keyboard mode flags active (e.g. `DISAMBIGUATE_ESC_CODES`).
+pub fn encode_key_kitty(
+    event: &KeyEvent,
+    modifiers: &Modifiers,
+    flags: KittyFlags,
+    event_type: KeyEventType,
+) -> Option<Vec<u8>> {
+    let key_code = keysym_to_keycode(event.keysym, event.utf8.as_deref())?;
+
+    let mods = thermal_terminal::input::Modifiers {
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+    };
+
+    thermal_terminal::input::encode_key_kitty(&key_code, &mods, flags, event_type)
 }
 
 /// Convert an SCTK Keysym (+ optional utf8 text) to a platform-agnostic KeyCode.

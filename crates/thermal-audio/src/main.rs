@@ -224,7 +224,8 @@ struct AudioManager {
     last_play: HashMap<String, Instant>,
     audio_tx: mpsc::Sender<PathBuf>,
     current_child: CurrentChild,
-    edge_tts_available: bool,
+    /// Resolved absolute path to edge-tts binary, or None if not found.
+    edge_tts_bin: Option<PathBuf>,
     /// Shared volume percentage (0-100) readable by the audio player thread.
     volume_pct: Arc<AtomicU8>,
 }
@@ -235,16 +236,13 @@ impl AudioManager {
         fs::create_dir_all(&cache_dir)
             .with_context(|| format!("creating cache dir {:?}", cache_dir))?;
 
-        // Check if edge-tts is available.
-        let edge_tts_available = std::process::Command::new("edge-tts")
-            .arg("--help")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-
-        if !edge_tts_available {
-            warn!("edge-tts not found on PATH — TTS generation will be skipped");
+        // Resolve edge-tts binary — check PATH first, then common locations
+        // so it works even when the daemon is spawned with a minimal PATH.
+        let edge_tts_bin = find_edge_tts();
+        if let Some(ref bin) = edge_tts_bin {
+            info!("edge-tts found at {}", bin.display());
+        } else {
+            warn!("edge-tts not found — TTS generation will be skipped");
         }
 
         let volume_pct = Arc::new(AtomicU8::new(
@@ -258,7 +256,7 @@ impl AudioManager {
             last_play: HashMap::new(),
             audio_tx,
             current_child,
-            edge_tts_available,
+            edge_tts_bin,
             volume_pct,
         })
     }
@@ -321,13 +319,12 @@ impl AudioManager {
             return Ok(path);
         }
 
-        if !self.edge_tts_available {
-            anyhow::bail!("edge-tts not available");
-        }
+        let bin = self.edge_tts_bin.as_ref()
+            .context("edge-tts not available")?;
 
         // Use tokio::process::Command so edge-tts runs without blocking
         // the event loop — socket TTS and other transitions stay responsive.
-        let status = tokio::process::Command::new("edge-tts")
+        let status = tokio::process::Command::new(bin)
             .arg("--voice")
             .arg(voice)
             .arg("--rate")
@@ -432,6 +429,41 @@ fn play_file(path: &Path, current_child: &CurrentChild, volume: u8) -> Result<()
             }
         }
     }
+}
+
+/// Resolve the edge-tts binary — check PATH first, then well-known locations.
+/// Returns the absolute path if found, None otherwise.
+fn find_edge_tts() -> Option<PathBuf> {
+    // Try PATH first (works when launched from a full shell).
+    if let Ok(output) = std::process::Command::new("edge-tts")
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        if output.success() {
+            return Some(PathBuf::from("edge-tts"));
+        }
+    }
+
+    // Check common locations when PATH is minimal (e.g. spawned from TUI).
+    let candidates = [
+        dirs_home().join(".local/bin/edge-tts"),
+        PathBuf::from("/usr/local/bin/edge-tts"),
+        PathBuf::from("/usr/bin/edge-tts"),
+    ];
+    for path in &candidates {
+        if path.is_file() {
+            return Some(path.clone());
+        }
+    }
+    None
+}
+
+fn dirs_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/home/builder"))
 }
 
 /// Returns `~/.cache` (or XDG_CACHE_HOME if set).

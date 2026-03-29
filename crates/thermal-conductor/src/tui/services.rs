@@ -300,7 +300,8 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
         .args(def.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_fd));
+        .stderr(std::process::Stdio::from(stderr_fd))
+        .env("PATH", ensure_path());
     let result = command.spawn();
     match result {
         Ok(_) => {
@@ -1051,4 +1052,24 @@ mod tests {
         assert!(!status.stale_binary);
         assert_eq!(status.duplicate_count, 0);
     }
+}
+
+/// Return PATH with ~/.cargo/bin and ~/.local/bin guaranteed to be present.
+/// Daemons spawned from the TUI inherit a potentially minimal PATH that may
+/// be missing user-local directories where tools like edge-tts, whisper-cpp,
+/// and claude live.
+fn ensure_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/builder".to_string());
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut path = current.clone();
+    let extra_dirs = [
+        format!("{home}/.local/bin"),
+        format!("{home}/.cargo/bin"),
+    ];
+    for dir in &extra_dirs {
+        if !current.split(':').any(|p| p == dir) {
+            path = format!("{dir}:{path}");
+        }
+    }
+    path
 }

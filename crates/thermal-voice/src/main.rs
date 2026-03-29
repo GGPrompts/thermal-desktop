@@ -687,6 +687,8 @@ fn type_at_cursor(text: &str) -> bool {
         return true;
     }
     match std::process::Command::new("wtype")
+        .arg("-d")
+        .arg("1")
         .arg("--")
         .arg(text)
         .status()
@@ -1074,11 +1076,6 @@ async fn handle_stop(recorder: &mut Recorder, config: &Config) -> SocketResponse
             if let Some(ref code) = code_word {
                 execute_code_word(code);
             }
-
-            // Fire-and-forget: dispatch to claude -p in the background.
-            // Uses the full original transcript (not cleaned) so the
-            // dispatcher sees the complete intent.
-            spawn_claude_dispatch(text.clone());
 
             write_state(VoiceState::Muted, None);
             SocketResponse::with_transcript(text)

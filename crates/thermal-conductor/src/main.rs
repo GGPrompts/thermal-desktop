@@ -144,17 +144,38 @@ enum AudioAction {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("thermal_conductor=info".parse().unwrap()),
-        )
-        .init();
-
     let cli = Cli::parse();
 
     // Default to TUI when no subcommand is given.
     let command = cli.command.unwrap_or(Commands::Tui);
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("thermal_conductor=info".parse().unwrap());
+
+    // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
+    // alternate screen. Other modes log to stderr as normal.
+    if matches!(command, Commands::Tui) {
+        let log_dir = std::env::var("XDG_RUNTIME_DIR")
+            .unwrap_or_else(|_| "/tmp".to_string());
+        let log_path = std::path::PathBuf::from(log_dir)
+            .join("thermal")
+            .join("conductor-tui.log");
+        let _ = std::fs::create_dir_all(log_path.parent().unwrap());
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .expect("failed to open TUI log file");
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .init();
+    }
 
     let backend_pref = cli.backend;
 

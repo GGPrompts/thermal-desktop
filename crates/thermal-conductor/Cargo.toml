@@ -37,5 +37,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 tempfile = { workspace = true }
 zbus = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]

@@ -53,6 +53,8 @@ pub struct RenderCell {
     pub bg: AnsiColor,
     /// Cell flags (BOLD, INVERSE, WIDE_CHAR, etc.).
     pub flags: Flags,
+    /// Hyperlink URI from OSC 8 or regex URL detection.
+    pub hyperlink: Option<String>,
 }
 
 // ── CachedRow — cached per-row cell data ─────────────────────────────────
@@ -1076,6 +1078,11 @@ pub struct GridRenderer {
 
     // Kitty graphics image render pipeline.
     image_pipeline: ImageRenderPipeline,
+
+    /// Hyperlink URL map: (row, col) -> URL string.
+    /// Rebuilt each frame from cell hyperlinks (OSC 8) and regex URL detection.
+    /// Used by the mouse click handler to open URLs on Ctrl+Click.
+    pub hyperlink_map: HashMap<(usize, usize), String>,
 }
 
 /// Estimate the maximum number of vertices needed for the rect buffer.
@@ -1236,6 +1243,7 @@ impl GridRenderer {
             frame_time_idx: 0,
             frame_time_sum: 0,
             image_pipeline,
+            hyperlink_map: HashMap::new(),
         }
     }
 
@@ -3000,6 +3008,7 @@ impl GridRenderer {
                     fg: cell.fg,
                     bg: cell.bg,
                     flags: cell.flags,
+                    hyperlink: cell.hyperlink.clone(),
                 });
             }
         }
@@ -3176,6 +3185,34 @@ impl GridRenderer {
             }
         }
 
+        // ── Hyperlink underline rects + map rebuild ────────────────────
+        // Rebuild the hyperlink map each frame and draw underlines for
+        // cells that have hyperlinks (either OSC 8 or regex-detected URLs).
+        self.hyperlink_map.clear();
+        {
+            let link_color = PaletteColor::ACCENT_COOL.to_f32_array();
+            let underline_h = 1.0_f32;
+            for row in self.row_cache.iter().flatten() {
+                for cell in &row.cells {
+                    if let Some(ref url) = cell.hyperlink {
+                        self.hyperlink_map
+                            .insert((cell.row, cell.col), url.clone());
+                        let x = self.padding_x + cell.col as f32 * self.cell_width;
+                        let y = self.padding_y
+                            + cell.row as f32 * self.cell_height
+                            + self.cell_height
+                            - underline_h;
+                        let w = if cell.flags.contains(Flags::WIDE_CHAR) {
+                            self.cell_width * 2.0
+                        } else {
+                            self.cell_width
+                        };
+                        bg_rects.push(([x, y, w, underline_h], link_color));
+                    }
+                }
+            }
+        }
+
         // ── Write rect vertices into persistent buffer ──────────────────
         // Reuse the persistent CPU-side Vec to avoid allocation each frame.
         self.rect_verts_cpu.clear();
@@ -3283,6 +3320,9 @@ impl GridRenderer {
                     && cursor_row == cell.row;
                 let fg = if is_block_cursor {
                     TERM_BG
+                } else if cell.hyperlink.is_some() {
+                    // Hyperlink cells render in ACCENT_COOL blue.
+                    PaletteColor::ACCENT_COOL.to_f32_array()
                 } else if cell.flags.contains(Flags::INVERSE) {
                     ansi_to_glyphon_bg(&cell.bg).unwrap_or(TERM_BG)
                 } else {

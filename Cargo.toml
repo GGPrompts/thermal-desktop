@@ -65,6 +65,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap = { version = "4", features = ["derive"] }
 
+# Text processing
+regex = "1"
+
 # Error handling
 thiserror = "2"
 anyhow = "1"

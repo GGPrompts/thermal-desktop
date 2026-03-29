@@ -106,9 +106,11 @@ enum Commands {
     },
 
     /// Speak text via the running TTS daemon (thermal-audio)
+    #[command(trailing_var_arg = true)]
     Say {
-        /// Text to speak
-        text: String,
+        /// Text to speak (multiple words joined automatically)
+        #[arg(required = true, num_args = 1..)]
+        text: Vec<String>,
 
         /// Voice name (e.g. en-US-GuyNeural, en-GB-SoniaNeural)
         #[arg(short, long)]
@@ -193,7 +195,7 @@ fn main() -> Result<()> {
                 Commands::List { json } => cmd_list(json, backend_pref).await,
                 Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
-                Commands::Say { text, voice } => cmd_say(text, voice).await,
+                Commands::Say { text, voice } => cmd_say(text.join(" "), voice).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),

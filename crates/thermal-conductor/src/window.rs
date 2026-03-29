@@ -861,6 +861,19 @@ fn spawn_daemon_reader_task(
             }
         }
 
+        // If we exit the loop without having received a SessionExited
+        // message, the daemon connection was lost (crash, socket closed,
+        // etc.). Signal the window to exit so it doesn't hang with a
+        // frozen terminal.
+        if !exit_requested.load(Ordering::Acquire) {
+            tracing::warn!(
+                "Daemon reader: connection lost without SessionExited — \
+                 signaling exit to avoid frozen window"
+            );
+            exit_requested.store(true, Ordering::Release);
+            wake_render_loop(wakeup_write_fd);
+        }
+
         tracing::info!("Daemon reader task exiting");
     });
 }

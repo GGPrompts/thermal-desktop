@@ -69,9 +69,12 @@ impl DaemonClient {
                 // Connection refused means daemon crashed but socket remains.
                 if e.kind() == std::io::ErrorKind::ConnectionRefused {
                     warn!(
-                        "Stale daemon socket at {}; daemon not running",
+                        "Stale daemon socket at {}; daemon not running — cleaning up",
                         socket_path.display()
                     );
+                    // Best-effort cleanup of the stale socket file so future
+                    // probes don't need to attempt a connect() syscall.
+                    let _ = std::fs::remove_file(&socket_path);
                     return Ok(None);
                 }
                 return Err(e).context("Failed to connect to daemon socket");
@@ -481,5 +484,158 @@ mod tests {
             .expect("should be Some");
 
         assert!(client.is_healthy().await);
+    }
+
+    #[tokio::test]
+    async fn connect_to_stale_socket_returns_none() {
+        // Create a regular file at a socket path to simulate a stale socket.
+        // connect() on a regular file returns ConnectionRefused on Linux.
+        //
+        // A more reliable approach: bind a socket, drop the listener so no one
+        // is accepting, then try to connect. On Linux this gives ECONNREFUSED.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("stale.sock");
+
+        {
+            // Bind and immediately drop — leaves a socket file with no listener.
+            let _listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+        }
+        // The listener is dropped, but the socket file remains.
+        assert!(
+            sock_path.exists(),
+            "Socket file should still exist after listener drop"
+        );
+
+        let result = DaemonClient::connect_to(sock_path.clone())
+            .await
+            .expect("connect_to should not return Err for stale socket");
+        assert!(
+            result.is_none(),
+            "Stale socket (ConnectionRefused) should return Ok(None)"
+        );
+
+        // Verify the stale socket was cleaned up.
+        assert!(
+            !sock_path.exists(),
+            "Stale socket file should be removed after detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_to_live_daemon_returns_some() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("live-daemon.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Keep the server alive so the connection succeeds.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (_r, _w) = stream.into_split();
+            // Hold the connection open for a moment.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let result = DaemonClient::connect_to(sock_path.clone())
+            .await
+            .expect("connect_to should not error for live daemon");
+        assert!(
+            result.is_some(),
+            "Live daemon socket should return Ok(Some(client))"
+        );
+
+        // Clean up.
+        drop(result);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_returns_false_when_socket_gone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("reconnect-test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Server: accept, then drop immediately.
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let mut client = DaemonClient::connect_to(sock_path.clone())
+            .await
+            .expect("connect failed")
+            .expect("should be Some");
+
+        let _ = server.await;
+
+        // Remove the socket file to simulate daemon fully gone.
+        let _ = std::fs::remove_file(&sock_path);
+
+        let result = client.reconnect().await.expect("reconnect should not error");
+        assert!(
+            !result,
+            "reconnect should return false when socket is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn recv_returns_none_when_server_drops() {
+        // Verify that when the server side of a connection drops, the
+        // client's response_rx returns None (no hang/panic).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("drop-test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Server: accept, then drop the connection immediately.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            // Drop the stream immediately to simulate daemon crash.
+            drop(stream);
+        });
+
+        let mut client = DaemonClient::connect_to(sock_path.clone())
+            .await
+            .expect("connect failed")
+            .expect("should be Some");
+
+        // recv() should return None (connection closed), not hang.
+        let result = tokio::time::timeout(Duration::from_secs(2), client.recv()).await;
+        assert!(
+            result.is_ok(),
+            "recv() should not hang when server drops — timed out"
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "recv() should return None when connection is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_healthy_returns_false_after_disconnect() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("health-disconnect.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Server: accept, then drop immediately.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            drop(stream);
+        });
+
+        let mut client = DaemonClient::connect_to(sock_path.clone())
+            .await
+            .expect("connect failed")
+            .expect("should be Some");
+
+        // Give a moment for the reader task to notice the disconnect.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            !client.is_healthy().await,
+            "is_healthy should return false after server disconnect"
+        );
     }
 }

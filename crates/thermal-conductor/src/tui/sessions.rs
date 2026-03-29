@@ -633,6 +633,38 @@ fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Panel focus
+// ---------------------------------------------------------------------------
+
+/// Which of the 3 session panels currently has keyboard/mouse focus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FocusedPanel {
+    AgentList,
+    Preview,
+    Chat,
+}
+
+impl FocusedPanel {
+    /// Cycle forward: AgentList → Preview → Chat → AgentList.
+    fn next(self) -> Self {
+        match self {
+            Self::AgentList => Self::Preview,
+            Self::Preview => Self::Chat,
+            Self::Chat => Self::AgentList,
+        }
+    }
+
+    /// Cycle backward: AgentList → Chat → Preview → AgentList.
+    fn prev(self) -> Self {
+        match self {
+            Self::AgentList => Self::Chat,
+            Self::Preview => Self::AgentList,
+            Self::Chat => Self::Preview,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sessions page state
 // ---------------------------------------------------------------------------
 
@@ -669,8 +701,8 @@ pub struct SessionsPage {
     chat_input: String,
     /// Cursor position in the input string (byte offset).
     chat_cursor: usize,
-    /// Whether the chat input is focused.
-    chat_focused: bool,
+    /// Which panel currently has keyboard focus.
+    focused_panel: FocusedPanel,
     /// Recent chat messages for display.
     chat_messages: VecDeque<ChatEntry>,
     /// Status message with error flag and timestamp.
@@ -710,6 +742,12 @@ pub struct SessionsPage {
     /// Whether the autocomplete popup is visible.
     autocomplete_active: bool,
 
+    // -- Panel rects for mouse hit-testing --
+    /// Cached layout rects from last render (agent table, preview, chat input).
+    panel_rect_agent: Rect,
+    panel_rect_preview: Rect,
+    panel_rect_chat: Rect,
+
     // -- Bus subscriber --
     /// Connection to messages.sock for receiving messages.
     bus_connection: Option<BusConnection>,
@@ -735,7 +773,7 @@ impl SessionsPage {
             selected_set: HashSet::new(),
             chat_input: String::new(),
             chat_cursor: 0,
-            chat_focused: false,
+            focused_panel: FocusedPanel::AgentList,
             chat_messages: VecDeque::new(),
             chat_status: None,
             chat_history: VecDeque::new(),
@@ -752,6 +790,9 @@ impl SessionsPage {
             autocomplete_items: Vec::new(),
             autocomplete_index: 0,
             autocomplete_active: false,
+            panel_rect_agent: Rect::default(),
+            panel_rect_preview: Rect::default(),
+            panel_rect_chat: Rect::default(),
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
@@ -1602,6 +1643,11 @@ impl TuiPage for SessionsPage {
             ])
             .split(area);
 
+        // Cache panel rects for mouse hit-testing.
+        self.panel_rect_agent = chunks[0];
+        self.panel_rect_preview = chunks[2];
+        self.panel_rect_chat = chunks[4];
+
         // Background
         f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
@@ -1753,7 +1799,11 @@ impl TuiPage for SessionsPage {
             Block::default()
                 .title(block_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(COLD))
+                .border_style(Style::default().fg(if self.focused_panel == FocusedPanel::AgentList {
+                    pal(ThermalPalette::ACCENT_WARM)
+                } else {
+                    COLD
+                }))
                 .style(Style::default().bg(BG)),
         )
         .row_highlight_style(Style::default().bg(BG_SURFACE).add_modifier(Modifier::BOLD));
@@ -1793,6 +1843,11 @@ impl TuiPage for SessionsPage {
         {
             let preview_area = chunks[2];
             let inner_height = preview_area.height.saturating_sub(2) as usize; // borders top+bottom
+            let preview_border_color = if self.focused_panel == FocusedPanel::Preview {
+                pal(ThermalPalette::ACCENT_WARM)
+            } else {
+                COLD
+            };
 
             let preview_widget = if self.preview_content.is_empty() {
                 Paragraph::new(Line::from(Span::styled(
@@ -1804,7 +1859,7 @@ impl TuiPage for SessionsPage {
                     Block::default()
                         .title(" Preview ")
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(COLD))
+                        .border_style(Style::default().fg(preview_border_color))
                         .style(Style::default().bg(BG)),
                 )
             } else {
@@ -1833,7 +1888,7 @@ impl TuiPage for SessionsPage {
                     Block::default()
                         .title(scroll_indicator)
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(COLD))
+                        .border_style(Style::default().fg(preview_border_color))
                         .style(Style::default().bg(BG)),
                 )
             };
@@ -1904,19 +1959,20 @@ impl TuiPage for SessionsPage {
                 " \u{2192} bus ".into()
             };
 
-            let input_border_color = if self.chat_focused {
-                pal(ThermalPalette::WARM)
+            let chat_focused = self.focused_panel == FocusedPanel::Chat;
+            let input_border_color = if chat_focused {
+                pal(ThermalPalette::ACCENT_WARM)
             } else {
                 COLD
             };
-            let input_title = if self.chat_focused {
+            let input_title = if chat_focused {
                 format!("{}Enter=send, Esc=cancel ", target_hint)
             } else {
                 format!("{}/ to type ", target_hint)
             };
 
             let (before_cursor, after_cursor) = self.chat_input.split_at(self.chat_cursor);
-            let input_line = if self.chat_focused {
+            let input_line = if chat_focused {
                 Line::from(vec![
                     Span::styled(before_cursor, Style::default().fg(TEXT_BRIGHT)),
                     Span::styled(
@@ -1953,8 +2009,8 @@ impl TuiPage for SessionsPage {
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(input_border_color))
                     .title(input_title)
-                    .title_style(Style::default().fg(if self.chat_focused {
-                        pal(ThermalPalette::WARM)
+                    .title_style(Style::default().fg(if chat_focused {
+                        pal(ThermalPalette::ACCENT_WARM)
                     } else {
                         TEXT_MUTED
                     }))
@@ -2104,7 +2160,7 @@ impl TuiPage for SessionsPage {
         }
 
         // Chat input mode.
-        if self.chat_focused {
+        if self.focused_panel == FocusedPanel::Chat {
             // Autocomplete navigation intercepts certain keys.
             if self.autocomplete_active && !self.autocomplete_items.is_empty() {
                 match key.code {
@@ -2136,7 +2192,7 @@ impl TuiPage for SessionsPage {
 
             match key.code {
                 KeyCode::Esc => {
-                    self.chat_focused = false;
+                    self.focused_panel = FocusedPanel::AgentList;
                     self.autocomplete_active = false;
                 }
                 KeyCode::Enter => {
@@ -2213,7 +2269,40 @@ impl TuiPage for SessionsPage {
             return false;
         }
 
-        // Normal navigation mode.
+        // Preview panel mode — Esc returns to agent list, PgUp/PgDn/Home/End scroll.
+        if self.focused_panel == FocusedPanel::Preview {
+            match key.code {
+                KeyCode::Esc => {
+                    self.focused_panel = FocusedPanel::AgentList;
+                }
+                KeyCode::Tab => {
+                    self.focused_panel = self.focused_panel.next();
+                }
+                KeyCode::BackTab => {
+                    self.focused_panel = self.focused_panel.prev();
+                }
+                KeyCode::PageUp => {
+                    self.preview_scroll = self.preview_scroll.saturating_sub(10).max(1);
+                    self.preview_pinned = true;
+                }
+                KeyCode::PageDown => {
+                    self.preview_scroll = (self.preview_scroll + 10).min(self.preview_content.len());
+                    self.preview_pinned = self.preview_scroll < self.preview_content.len();
+                }
+                KeyCode::Home => {
+                    self.preview_scroll = 1;
+                    self.preview_pinned = true;
+                }
+                KeyCode::End => {
+                    self.preview_scroll = self.preview_content.len();
+                    self.preview_pinned = false;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
+        // Normal navigation mode (AgentList focused).
 
         // Ctrl+A selects all, Ctrl+D deselects all.
         if ctrl && key.code == KeyCode::Char('a') {
@@ -2239,7 +2328,13 @@ impl TuiPage for SessionsPage {
             KeyCode::Char(' ') => self.toggle_select_current(),
             KeyCode::Enter => self.attach_selected(),
             KeyCode::Char('/') => {
-                self.chat_focused = true;
+                self.focused_panel = FocusedPanel::Chat;
+            }
+            KeyCode::Tab => {
+                self.focused_panel = self.focused_panel.next();
+            }
+            KeyCode::BackTab => {
+                self.focused_panel = self.focused_panel.prev();
             }
             KeyCode::Char('h') => self.toggle_history(),
             KeyCode::Char('r') => self.force_refresh(poller),
@@ -2267,7 +2362,7 @@ impl TuiPage for SessionsPage {
     }
 
     fn has_text_focus(&self) -> bool {
-        self.chat_focused
+        self.focused_panel == FocusedPanel::Chat
     }
 
     fn handle_mouse(
@@ -2276,23 +2371,54 @@ impl TuiPage for SessionsPage {
         _poller: &mut ClaudeStatePoller,
     ) {
         use crossterm::event::{MouseButton, MouseEventKind};
+
+        let row = event.row;
+        let col = event.column;
+
+        /// Returns true if (col, row) is inside `rect`.
+        fn hit(rect: Rect, col: u16, row: u16) -> bool {
+            col >= rect.x
+                && col < rect.x + rect.width
+                && row >= rect.y
+                && row < rect.y + rect.height
+        }
+
         match event.kind {
-            MouseEventKind::ScrollDown => self.nav_down(),
-            MouseEventKind::ScrollUp => self.nav_up(),
+            MouseEventKind::ScrollDown => {
+                if hit(self.panel_rect_preview, col, row) {
+                    // Scroll preview pane down.
+                    self.preview_scroll = (self.preview_scroll + 3).min(self.preview_content.len());
+                    self.preview_pinned = self.preview_scroll < self.preview_content.len();
+                    self.focused_panel = FocusedPanel::Preview;
+                } else if hit(self.panel_rect_agent, col, row) {
+                    self.nav_down();
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if hit(self.panel_rect_preview, col, row) {
+                    // Scroll preview pane up.
+                    self.preview_scroll = self.preview_scroll.saturating_sub(3).max(1);
+                    self.preview_pinned = true;
+                    self.focused_panel = FocusedPanel::Preview;
+                } else if hit(self.panel_rect_agent, col, row) {
+                    self.nav_up();
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                // The sessions table is rendered in chunks[0] which starts at
-                // the page area's top. The table has a Block with Borders::ALL
-                // (1 row top border) + 1 header row + 1 bottom_margin (not used
-                // here but header height=1). So data rows start at relative row 2
-                // (border + header).
-                // Mouse coordinates are absolute, and the page area starts at row 3
-                // (below the 3-row tab bar). So absolute data row 0 = row 3+1+1 = 5.
-                let data_start = 3 + 1 + 1; // tab_bar(3) + table border(1) + header(1)
-                if event.row >= data_start {
-                    let clicked_row = (event.row - data_start) as usize;
-                    if clicked_row < self.display_rows.len() {
-                        self.table_state.select(Some(clicked_row));
+                if hit(self.panel_rect_agent, col, row) {
+                    self.focused_panel = FocusedPanel::AgentList;
+                    // Select the clicked row within the agent table.
+                    let data_start = self.panel_rect_agent.y + 1 + 1; // border(1) + header(1)
+                    if row >= data_start {
+                        let clicked_row = (row - data_start) as usize;
+                        if clicked_row < self.display_rows.len() {
+                            self.table_state.select(Some(clicked_row));
+                        }
                     }
+                } else if hit(self.panel_rect_preview, col, row) {
+                    self.focused_panel = FocusedPanel::Preview;
+                } else if hit(self.panel_rect_chat, col, row) {
+                    self.focused_panel = FocusedPanel::Chat;
                 }
             }
             _ => {}
@@ -2960,7 +3086,7 @@ mod tests {
             selected_set: HashSet::new(),
             chat_input: String::new(),
             chat_cursor: 0,
-            chat_focused: false,
+            focused_panel: FocusedPanel::AgentList,
             chat_messages: VecDeque::new(),
             chat_status: None,
             chat_history: VecDeque::new(),
@@ -2969,6 +3095,9 @@ mod tests {
             autocomplete_items: Vec::new(),
             autocomplete_index: 0,
             autocomplete_active: false,
+            panel_rect_agent: Rect::default(),
+            panel_rect_preview: Rect::default(),
+            panel_rect_chat: Rect::default(),
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
@@ -3136,7 +3265,7 @@ mod tests {
     #[test]
     fn chat_input_char_and_backspace() {
         let mut page = page_with_sessions(vec![]);
-        page.chat_focused = true;
+        page.focused_panel = FocusedPanel::Chat;
         page.chat_handle_char('h');
         page.chat_handle_char('i');
         assert_eq!(page.chat_input, "hi");
@@ -3151,8 +3280,32 @@ mod tests {
     fn has_text_focus_when_chat_focused() {
         let mut page = page_with_sessions(vec![]);
         assert!(!page.has_text_focus());
-        page.chat_focused = true;
+        page.focused_panel = FocusedPanel::Chat;
         assert!(page.has_text_focus());
+    }
+
+    #[test]
+    fn tab_cycles_panel_focus_forward() {
+        let mut page = page_with_sessions(vec![]);
+        assert_eq!(page.focused_panel, FocusedPanel::AgentList);
+        page.focused_panel = page.focused_panel.next();
+        assert_eq!(page.focused_panel, FocusedPanel::Preview);
+        page.focused_panel = page.focused_panel.next();
+        assert_eq!(page.focused_panel, FocusedPanel::Chat);
+        page.focused_panel = page.focused_panel.next();
+        assert_eq!(page.focused_panel, FocusedPanel::AgentList);
+    }
+
+    #[test]
+    fn shift_tab_cycles_panel_focus_backward() {
+        let mut page = page_with_sessions(vec![]);
+        assert_eq!(page.focused_panel, FocusedPanel::AgentList);
+        page.focused_panel = page.focused_panel.prev();
+        assert_eq!(page.focused_panel, FocusedPanel::Chat);
+        page.focused_panel = page.focused_panel.prev();
+        assert_eq!(page.focused_panel, FocusedPanel::Preview);
+        page.focused_panel = page.focused_panel.prev();
+        assert_eq!(page.focused_panel, FocusedPanel::AgentList);
     }
 
     // ── Agent badges ────────────────────────────────────────────────────────

@@ -450,7 +450,11 @@ pub async fn run() -> anyhow::Result<()> {
             }
             HudMode::AgentTabs => {
                 // Fall back to agent tab rendering.
-                let sessions = poller.poll();
+                let mut sessions = poller.poll();
+
+                // Sort by workspace (same order as renderer) so click
+                // regions line up with rendered tabs.
+                sessions.sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
 
                 // Clamp active tab index.
                 if !sessions.is_empty() && active_tab >= sessions.len() {

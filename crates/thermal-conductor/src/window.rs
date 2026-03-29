@@ -1865,6 +1865,7 @@ impl ConductorWindow {
                             shell: Some(shell),
                             cwd: None,
                             worktree: false,
+                            name: None,
                         })
                         .await
                     {

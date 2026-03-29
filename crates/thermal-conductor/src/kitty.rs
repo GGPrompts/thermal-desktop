@@ -429,7 +429,7 @@ async fn sidecar_read() -> SidecarData {
 
 /// Acquire an exclusive flock on the sidecar lockfile, perform a read-modify-write,
 /// then release. This prevents concurrent thc invocations from clobbering each other.
-async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static) -> Result<()> {
+pub async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static) -> Result<()> {
     // Run the locked operation in a blocking task to avoid holding the lock
     // across an async suspension point.
     tokio::task::spawn_blocking(move || {
@@ -499,7 +499,7 @@ pub async fn sidecar_upsert_display_name(session_id: &str, model_display_base: &
 }
 
 /// Remove an entry from the sidecar by session ID (locked read-modify-write).
-async fn sidecar_remove(id: &str) -> Result<()> {
+pub async fn sidecar_remove(id: &str) -> Result<()> {
     let id = id.to_string();
     sidecar_locked_update(move |data| {
         data.sessions.retain(|e| e.session_id != id);
@@ -527,7 +527,7 @@ async fn run_kitty_ls() -> Result<String> {
 
 // ── Utilities ───────────────────────────────────────────────────────────────
 
-fn now_epoch() -> u64 {
+pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

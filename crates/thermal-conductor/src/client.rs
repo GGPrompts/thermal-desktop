@@ -246,21 +246,41 @@ impl DaemonClient {
     ///
     /// If `worktree` is true, the daemon will create a git worktree from the
     /// cwd's repo so this session gets its own working directory.
+    ///
+    /// The optional `name` sets the session's human-readable display name.
+    /// If `None`, the daemon auto-generates one from the shell basename.
+    ///
+    /// Returns `(session_id, display_name)`.
     pub async fn spawn_session(
         &mut self,
         shell: Option<String>,
         cwd: Option<String>,
         worktree: bool,
     ) -> Result<String> {
+        self.spawn_session_named(shell, cwd, worktree, None)
+            .await
+            .map(|(id, _name)| id)
+    }
+
+    /// Like [`spawn_session`](Self::spawn_session), but also accepts an
+    /// optional display name and returns both the session ID and assigned name.
+    pub async fn spawn_session_named(
+        &mut self,
+        shell: Option<String>,
+        cwd: Option<String>,
+        worktree: bool,
+        name: Option<String>,
+    ) -> Result<(String, String)> {
         let response = self
             .request(Request::SpawnSession {
                 shell,
                 cwd,
                 worktree,
+                name,
             })
             .await?;
         match response {
-            Response::SessionSpawned { id } => Ok(id),
+            Response::SessionSpawned { id, name } => Ok((id, name)),
             Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
             other => anyhow::bail!("Unexpected response: {other:?}"),
         }

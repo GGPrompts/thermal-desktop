@@ -36,6 +36,10 @@ pub enum Request {
         /// can work on the same repo without file-edit conflicts.
         #[serde(default)]
         worktree: bool,
+        /// Human-readable session name. If `None`, the daemon auto-generates
+        /// one from the shell basename or "session-N" fallback.
+        #[serde(default)]
+        name: Option<String>,
     },
 
     /// Kill a session (sends SIGHUP to PTY child).
@@ -73,7 +77,11 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     /// A new session was spawned successfully.
-    SessionSpawned { id: String },
+    SessionSpawned {
+        id: String,
+        /// The display name assigned to this session.
+        name: String,
+    },
 
     /// List of all active sessions.
     SessionList { sessions: Vec<SessionInfo> },
@@ -121,6 +129,9 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// Human-readable display name (e.g. "zsh", "bash", "session-1").
+    #[serde(default)]
+    pub name: Option<String>,
     /// Shell command that was spawned (e.g. "/bin/zsh").
     pub shell_command: String,
     /// Working directory the session was started in.
@@ -301,6 +312,7 @@ mod tests {
             shell: Some("/bin/zsh".into()),
             cwd: Some("/home/builder".into()),
             worktree: false,
+            name: Some("my-agent".into()),
         };
         let decoded = rt_request(&req);
         match decoded {
@@ -308,10 +320,12 @@ mod tests {
                 shell,
                 cwd,
                 worktree,
+                name,
             } => {
                 assert_eq!(shell.as_deref(), Some("/bin/zsh"));
                 assert_eq!(cwd.as_deref(), Some("/home/builder"));
                 assert!(!worktree);
+                assert_eq!(name.as_deref(), Some("my-agent"));
             }
             other => panic!("unexpected variant: {:?}", other),
         }
@@ -323,6 +337,7 @@ mod tests {
             shell: None,
             cwd: None,
             worktree: false,
+            name: None,
         };
         let decoded = rt_request(&req);
         match decoded {
@@ -330,10 +345,12 @@ mod tests {
                 shell,
                 cwd,
                 worktree,
+                name,
             } => {
                 assert!(shell.is_none());
                 assert!(cwd.is_none());
                 assert!(!worktree);
+                assert!(name.is_none());
             }
             other => panic!("unexpected variant: {:?}", other),
         }
@@ -474,9 +491,16 @@ mod tests {
     fn response_session_spawned_round_trip() {
         let resp = Response::SessionSpawned {
             id: "new-sess".into(),
+            name: "zsh".into(),
         };
         let decoded = rt_response(&resp);
-        assert!(matches!(decoded, Response::SessionSpawned { id } if id == "new-sess"));
+        match decoded {
+            Response::SessionSpawned { id, name } => {
+                assert_eq!(id, "new-sess");
+                assert_eq!(name, "zsh");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
     }
 
     #[test]
@@ -541,6 +565,7 @@ mod tests {
     fn response_session_list_with_entry_round_trip() {
         let info = SessionInfo {
             id: "info-1".into(),
+            name: Some("bash".into()),
             shell_command: "/bin/bash".into(),
             cwd: "/tmp".into(),
             shell_pid: 1234,
@@ -561,6 +586,7 @@ mod tests {
                 assert_eq!(sessions.len(), 1);
                 let si = &sessions[0];
                 assert_eq!(si.id, "info-1");
+                assert_eq!(si.name.as_deref(), Some("bash"));
                 assert_eq!(si.shell_command, "/bin/bash");
                 assert_eq!(si.cwd, "/tmp");
                 assert_eq!(si.shell_pid, 1234);
@@ -726,6 +752,7 @@ mod tests {
     fn session_info_not_alive_round_trip() {
         let info = SessionInfo {
             id: "dead-sess".into(),
+            name: None,
             shell_command: "/bin/sh".into(),
             cwd: "/".into(),
             shell_pid: 0,
@@ -925,6 +952,51 @@ mod tests {
                 assert_eq!(cells.len(), 80 * 24);
             }
             other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── Backward compatibility ───────────────────────────────────────────────
+
+    #[test]
+    fn session_info_deserializes_without_name_field() {
+        // Old daemon messages won't have the `name` field — serde(default) should
+        // deserialize it as None.
+        let info_without_name = SessionInfo {
+            id: "old-daemon".into(),
+            name: None,
+            shell_command: "/bin/bash".into(),
+            cwd: "/tmp".into(),
+            shell_pid: 42,
+            cols: 80,
+            rows: 24,
+            title: "bash".into(),
+            start_time: 1_700_000_000,
+            connected_client_count: 0,
+            is_alive: true,
+            worktree_path: None,
+        };
+        let bytes = rmp_serde::to_vec(&info_without_name).unwrap();
+        let decoded: SessionInfo = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(decoded.name.is_none());
+        assert_eq!(decoded.id, "old-daemon");
+    }
+
+    #[test]
+    fn spawn_session_request_deserializes_without_name_field() {
+        // Requests from old clients won't have `name`. serde(default) handles it.
+        let req = Request::SpawnSession {
+            shell: Some("/bin/zsh".into()),
+            cwd: None,
+            worktree: false,
+            name: None,
+        };
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Request::SpawnSession { name, .. } => {
+                assert!(name.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
         }
     }
 }

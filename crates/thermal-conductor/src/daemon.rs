@@ -18,6 +18,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
+use crate::kitty::{
+    SidecarEntry, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
+};
 use crate::protocol::{
     self, CellData, ColorData, CursorData, DirtyCellData, Request, Response, SessionInfo,
 };
@@ -30,6 +33,8 @@ use crate::terminal::Terminal;
 #[allow(dead_code)]
 struct Session {
     id: String,
+    /// Human-readable display name (e.g. "zsh", "bash-2", "session-1").
+    name: String,
     terminal: Terminal,
     pty: PtySession,
     /// The shell command that was spawned.
@@ -73,12 +78,18 @@ impl Daemon {
     /// When `worktree` is true, a git worktree is created from the cwd's repo
     /// and the PTY session runs in the worktree directory instead. If the cwd
     /// is not a git repo, the worktree request is silently ignored.
+    ///
+    /// If `name` is `Some`, it is used as the display name (with dedup
+    /// numbering against existing sessions). If `None`, a name is derived
+    /// from the shell basename (e.g. "zsh", "bash") or falls back to
+    /// "session-N".
     fn spawn_session(
         &self,
         shell: Option<String>,
         cwd: Option<String>,
         worktree: bool,
-    ) -> Result<String> {
+        name: Option<String>,
+    ) -> Result<(String, String)> {
         let shell_path =
             shell.unwrap_or_else(|| std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()));
         let cwd_path = cwd.unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
@@ -136,8 +147,27 @@ impl Daemon {
         let title = Arc::new(Mutex::new(String::from("thermal-conductor")));
         let attached_count = Arc::new(AtomicU64::new(0));
 
+        // Derive a unique display name for this session.
+        let display_name = {
+            let base = match name {
+                Some(ref n) if !n.is_empty() => n.clone(),
+                _ => generate_name_from_shell(&shell_path, id_num),
+            };
+            let sessions = self.sessions.lock();
+            let existing_names: Vec<String> = sessions
+                .values()
+                .map(|s| s.lock().name.clone())
+                .collect();
+            assign_unique_name(&base, &existing_names)
+        };
+
+        // Clone values for sidecar before they're moved into Session.
+        let sidecar_cwd = cwd_path.clone();
+        let sidecar_worktree = worktree_path.clone();
+
         let session = Session {
             id: id.clone(),
+            name: display_name.clone(),
             terminal,
             pty,
             shell_command: shell_path.clone(),
@@ -353,8 +383,32 @@ impl Daemon {
             });
         }
 
-        info!(session = %id, "Session spawned");
-        Ok(id)
+        // Write session metadata to the sidecar file so TUI and HUD can
+        // discover daemon sessions alongside kitty sessions.
+        {
+            let sidecar_id = id.clone();
+            let sidecar_name = display_name.clone();
+            tokio::spawn(async move {
+                if let Err(e) = sidecar_locked_update(move |data| {
+                    data.sessions.retain(|e| e.session_id != sidecar_id);
+                    data.sessions.push(SidecarEntry {
+                        session_id: sidecar_id,
+                        worktree_path: sidecar_worktree,
+                        profile_name: None,
+                        original_cwd: sidecar_cwd,
+                        spawn_time: now_epoch(),
+                        display_name: Some(sidecar_name),
+                    });
+                })
+                .await
+                {
+                    warn!("Failed to update sidecar on spawn: {e}");
+                }
+            });
+        }
+
+        info!(session = %id, name = %display_name, "Session spawned");
+        Ok((id, display_name))
     }
 
     /// Create a git worktree for a session.
@@ -446,6 +500,7 @@ impl Daemon {
                     .unwrap_or(0);
                 SessionInfo {
                     id: session.id.clone(),
+                    name: Some(session.name.clone()),
                     shell_command: session.shell_command.clone(),
                     cwd: session.cwd.clone(),
                     shell_pid: session.pty.child_pid().as_raw(),
@@ -501,8 +556,12 @@ impl Daemon {
                 shell,
                 cwd,
                 worktree,
-            } => match self.spawn_session(shell.clone(), cwd.clone(), *worktree) {
-                Ok(id) => Response::SessionSpawned { id },
+                name,
+            } => match self.spawn_session(shell.clone(), cwd.clone(), *worktree, name.clone()) {
+                Ok((id, session_name)) => Response::SessionSpawned {
+                    id,
+                    name: session_name,
+                },
                 Err(e) => Response::Error {
                     message: format!("Failed to spawn session: {e}"),
                 },
@@ -516,6 +575,13 @@ impl Daemon {
                         Self::remove_worktree(wt_path);
                     }
                     drop(session);
+                    // Remove from sidecar (fire-and-forget).
+                    let id_for_sidecar = id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = sidecar_remove_entry(&id_for_sidecar).await {
+                            warn!("Failed to remove sidecar entry on kill: {e}");
+                        }
+                    });
                     info!(session = %id, "Session killed");
                     Response::Ok
                 } else {
@@ -745,6 +811,42 @@ fn indexed_color_rgb(idx: u8) -> (u8, u8, u8) {
             let v = 8 + 10 * (idx - 232);
             (v, v, v)
         }
+    }
+}
+
+/// Generate a display name from the shell path.
+///
+/// Extracts the basename of the shell binary (e.g. "/bin/zsh" -> "zsh",
+/// "/usr/bin/bash" -> "bash"). Falls back to "session-N" if the path
+/// has no recognizable basename.
+fn generate_name_from_shell(shell_path: &str, id_num: u64) -> String {
+    std::path::Path::new(shell_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| format!("session-{id_num}"))
+}
+
+/// Assign a unique name given a base and a list of existing names.
+///
+/// - If `base` is not taken, returns it as-is (e.g. "zsh").
+/// - If taken, appends a dedup suffix: "zsh-2", "zsh-3", etc.
+///
+/// This mirrors `assign_display_name()` in kitty.rs but operates on a
+/// flat name list rather than `SidecarEntry` structs.
+fn assign_unique_name(base: &str, existing: &[String]) -> String {
+    if !existing.iter().any(|n| n == base) {
+        return base.to_string();
+    }
+
+    let mut suffix = 2u32;
+    loop {
+        let candidate = format!("{base}-{suffix}");
+        if !existing.iter().any(|n| n == &candidate) {
+            return candidate;
+        }
+        suffix += 1;
     }
 }
 
@@ -1396,6 +1498,200 @@ mod tests {
             }
             other => panic!("Expected SessionState, got: {other:?}"),
         }
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    // ── Name generation unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn generate_name_from_shell_basename() {
+        assert_eq!(generate_name_from_shell("/bin/zsh", 1), "zsh");
+        assert_eq!(generate_name_from_shell("/usr/bin/bash", 2), "bash");
+        assert_eq!(generate_name_from_shell("/bin/sh", 3), "sh");
+    }
+
+    #[test]
+    fn generate_name_from_shell_bare_name() {
+        assert_eq!(generate_name_from_shell("fish", 4), "fish");
+    }
+
+    #[test]
+    fn generate_name_from_shell_empty_fallback() {
+        // Empty path should fall back to session-N.
+        assert_eq!(generate_name_from_shell("", 5), "session-5");
+    }
+
+    #[test]
+    fn generate_name_from_shell_trailing_slash_fallback() {
+        // A path like "/" has no file_name, should fall back.
+        assert_eq!(generate_name_from_shell("/", 6), "session-6");
+    }
+
+    // ── Unique name assignment unit tests ───────────────────────────────────
+
+    #[test]
+    fn assign_unique_name_first_is_bare() {
+        let existing: Vec<String> = vec![];
+        assert_eq!(assign_unique_name("zsh", &existing), "zsh");
+    }
+
+    #[test]
+    fn assign_unique_name_dedup_second() {
+        let existing = vec!["zsh".to_string()];
+        assert_eq!(assign_unique_name("zsh", &existing), "zsh-2");
+    }
+
+    #[test]
+    fn assign_unique_name_dedup_third() {
+        let existing = vec!["zsh".to_string(), "zsh-2".to_string()];
+        assert_eq!(assign_unique_name("zsh", &existing), "zsh-3");
+    }
+
+    #[test]
+    fn assign_unique_name_different_bases_no_conflict() {
+        let existing = vec!["zsh".to_string()];
+        assert_eq!(assign_unique_name("bash", &existing), "bash");
+    }
+
+    #[test]
+    fn assign_unique_name_gap_fills_first_available() {
+        // "zsh" and "zsh-3" taken but not "zsh-2".
+        let existing = vec!["zsh".to_string(), "zsh-3".to_string()];
+        assert_eq!(assign_unique_name("zsh", &existing), "zsh-2");
+    }
+
+    // ── Integration: spawn returns name ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn spawn_session_returns_name() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let (session_id, name) = client
+            .spawn_session_named(Some("/bin/sh".to_string()), None, false, None)
+            .await
+            .expect("spawn_session_named failed");
+
+        assert!(session_id.starts_with("session-"));
+        // Auto-generated name from "/bin/sh" should be "sh".
+        assert_eq!(name, "sh");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_session_with_explicit_name() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let (_id, name) = client
+            .spawn_session_named(
+                Some("/bin/sh".to_string()),
+                None,
+                false,
+                Some("opus".to_string()),
+            )
+            .await
+            .expect("spawn_session_named failed");
+
+        assert_eq!(name, "opus");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_session_dedup_names() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        // Spawn two sessions with the same shell — names should be deduped.
+        let (_id1, name1) = client
+            .spawn_session_named(Some("/bin/sh".to_string()), None, false, None)
+            .await
+            .expect("first spawn failed");
+        let (_id2, name2) = client
+            .spawn_session_named(Some("/bin/sh".to_string()), None, false, None)
+            .await
+            .expect("second spawn failed");
+
+        assert_eq!(name1, "sh");
+        assert_eq!(name2, "sh-2");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_session_dedup_explicit_names() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let (_id1, name1) = client
+            .spawn_session_named(
+                Some("/bin/sh".to_string()),
+                None,
+                false,
+                Some("opus".to_string()),
+            )
+            .await
+            .expect("first spawn failed");
+        let (_id2, name2) = client
+            .spawn_session_named(
+                Some("/bin/sh".to_string()),
+                None,
+                false,
+                Some("opus".to_string()),
+            )
+            .await
+            .expect("second spawn failed");
+
+        assert_eq!(name1, "opus");
+        assert_eq!(name2, "opus-2");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn list_sessions_includes_name() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let (_id, _name) = client
+            .spawn_session_named(
+                Some("/bin/sh".to_string()),
+                None,
+                false,
+                Some("sonnet".to_string()),
+            )
+            .await
+            .expect("spawn failed");
+
+        let sessions = client.list_sessions().await.expect("list_sessions failed");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name.as_deref(), Some("sonnet"));
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    #[tokio::test]
+    async fn backward_compat_spawn_session_still_works() {
+        // The old spawn_session (without name) should still work and
+        // return a session ID (name is auto-generated but not returned
+        // by the old API).
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        assert!(session_id.starts_with("session-"));
+
+        // The session should have a name in the list.
+        let sessions = client.list_sessions().await.expect("list failed");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name.as_deref(), Some("sh"));
 
         let _ = shutdown_tx.send(()).await;
     }

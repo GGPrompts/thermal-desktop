@@ -577,37 +577,16 @@ fn scan_all_kitty_windows() -> HashMap<String, (String, i64)> {
 /// broadcast to `("*", "broadcast")`.
 fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool {
     let path = messages_socket_path();
-    let stream = match UnixStream::connect(&path) {
+    let mut stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(_) => return false,
     };
     let _ = stream.set_nonblocking(false);
 
-    // Send subscribe first, then the actual message.
-    let subscribe = Message {
-        seq: 0,
-        ts: 0,
-        from: AgentId::new("user", "tui"),
-        to: AgentId::new("daemon", "bus"),
-        context_id: None,
-        project: None,
-        content: String::new(),
-        msg_type: MessageType::Subscribe { since_seq: None },
-        metadata: Default::default(),
-    };
-    let mut json = match serde_json::to_string(&subscribe) {
-        Ok(j) => j,
-        Err(_) => return false,
-    };
-    json.push('\n');
-    let mut writer = stream.try_clone().unwrap_or_else(|_| {
-        // Fallback — just reuse the same stream (write + read on same fd).
-        UnixStream::connect(&path).unwrap()
-    });
-    if writer.write_all(json.as_bytes()).is_err() {
-        return false;
-    }
-
+    // Send the AgentMsg directly as a publisher connection.
+    // Do NOT send Subscribe first — that would put the daemon into subscriber
+    // mode for this connection, causing the AgentMsg to be silently discarded.
+    // Responses come back via the persistent BusConnection subscriber.
     let to = match target {
         Some(id) => id.clone(),
         None => AgentId::new("*", "broadcast"),
@@ -629,7 +608,7 @@ fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool {
         Err(_) => return false,
     };
     json.push('\n');
-    writer.write_all(json.as_bytes()).is_ok()
+    stream.write_all(json.as_bytes()).is_ok()
 }
 
 // ---------------------------------------------------------------------------

@@ -42,10 +42,6 @@ use wayland_client::{
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
-use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
-    zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
-    zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1},
-};
 
 use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -135,23 +131,6 @@ pub fn run() -> anyhow::Result<()> {
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg_wm_base is not available");
 
-    // ── Keyboard shortcuts inhibit (optional) ──────────────────────────────────
-    // Bind zwp_keyboard_shortcuts_inhibit_manager_v1 so the compositor
-    // forwards all key combos (Ctrl+Alt, Super, etc.) to us when focused.
-    let shortcuts_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1> =
-        match globals.bind::<ZwpKeyboardShortcutsInhibitManagerV1, _, _>(&qh, 1..=1, ()) {
-            Ok(manager) => {
-                tracing::info!("Keyboard shortcuts inhibit protocol available");
-                Some(manager)
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "zwp_keyboard_shortcuts_inhibit_manager_v1 not available — \
-                     compositor may intercept key combos"
-                );
-                None
-            }
-        };
 
     // ── Create xdg toplevel window ────────────────────────────────────────────
     let surface = compositor.create_surface(&qh);
@@ -507,8 +486,6 @@ pub fn run() -> anyhow::Result<()> {
         },
         pointer: None,
         mouse_left_held: false,
-        shortcuts_inhibit_manager,
-        shortcuts_inhibitor: None,
         repeat_key: None,
         repeat_next: None,
         repeat_delay: std::time::Duration::from_millis(400),
@@ -1089,18 +1066,12 @@ struct ConductorWindow {
     /// loop iteration and applied to the Wayland surface via `set_title()`.
     pending_title: Arc<Mutex<Option<String>>>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    /// The seat associated with our keyboard, needed for shortcuts inhibit.
     seat: Option<wl_seat::WlSeat>,
     modifiers: Modifiers,
     // Mouse / pointer state
     pointer: Option<wl_pointer::WlPointer>,
     /// Whether the left mouse button is currently held (for drag selection).
     mouse_left_held: bool,
-    // Keyboard shortcuts inhibit
-    /// Manager global — kept alive for the session.
-    shortcuts_inhibit_manager: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
-    /// Active inhibitor — created on keyboard focus, destroyed on blur.
-    shortcuts_inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
     // Key repeat state
     /// The last key event that should repeat, or None if no repeat is active.
     repeat_key: Option<KeyEvent>,
@@ -2367,15 +2338,6 @@ impl KeyboardHandler for ConductorWindow {
         _: &[u32],
         _keysyms: &[Keysym],
     ) {
-        // Create a keyboard shortcuts inhibitor so the compositor forwards
-        // all key combos (Ctrl+Alt, Super, etc.) to us while focused.
-        if self.shortcuts_inhibitor.is_none()
-            && let (Some(manager), Some(seat)) = (&self.shortcuts_inhibit_manager, &self.seat)
-        {
-            let inhibitor = manager.inhibit_shortcuts(surface, seat, qh, ());
-            tracing::debug!("Keyboard shortcuts inhibitor created");
-            self.shortcuts_inhibitor = Some(inhibitor);
-        }
     }
 
     fn leave(
@@ -2386,11 +2348,6 @@ impl KeyboardHandler for ConductorWindow {
         _surface: &wl_surface::WlSurface,
         _: u32,
     ) {
-        // Destroy the shortcuts inhibitor when we lose keyboard focus.
-        if let Some(inhibitor) = self.shortcuts_inhibitor.take() {
-            inhibitor.destroy();
-            tracing::debug!("Keyboard shortcuts inhibitor destroyed");
-        }
     }
 
     fn press_key(
@@ -2402,7 +2359,6 @@ impl KeyboardHandler for ConductorWindow {
         event: KeyEvent,
     ) {
         // ── Window close: Ctrl+Shift+Q ─────────────────────────────────
-        // keyboard-shortcuts-inhibit eats Super+Q, so we need our own close.
         if self.modifiers.ctrl && self.modifiers.shift
             && matches!(event.keysym, Keysym::Q | Keysym::q)
         {
@@ -2777,44 +2733,6 @@ impl ProvidesRegistryState for ConductorWindow {
         &mut self.registry_state
     }
     registry_handlers![OutputState, SeatState];
-}
-
-// ── Keyboard shortcuts inhibit dispatch ──────────────────────────────────────
-
-impl Dispatch<ZwpKeyboardShortcutsInhibitManagerV1, ()> for ConductorWindow {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpKeyboardShortcutsInhibitManagerV1,
-        _event: <ZwpKeyboardShortcutsInhibitManagerV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        // The manager has no events — it is a pure request interface.
-    }
-}
-
-impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for ConductorWindow {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpKeyboardShortcutsInhibitorV1,
-        event: <ZwpKeyboardShortcutsInhibitorV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        match event {
-            zwp_keyboard_shortcuts_inhibitor_v1::Event::Active => {
-                tracing::debug!("Keyboard shortcuts inhibitor: active");
-            }
-            zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => {
-                tracing::debug!(
-                    "Keyboard shortcuts inhibitor: inactive (compositor reclaimed shortcuts)"
-                );
-            }
-            _ => {}
-        }
-    }
 }
 
 // ── URL detection ─────────────────────────────────────────────────────────────

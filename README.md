@@ -168,11 +168,19 @@ thermal-launch
 ```
 
 ### thermal-conductor window shows black/purple grid
-The GPU terminal works in **standalone mode** (no daemon). If the daemon is running, screen streaming from daemon to window is not yet implemented — kill the daemon first:
+The GPU terminal supports **standalone mode** (own PTY) and **daemon client mode** (streams from `thc daemon`). A black/purple grid is a rendering bug, not expected behavior.
+
+Diagnostic steps:
 ```bash
-pkill -f "thermal-conductor.*daemon"
-rm -f /run/user/1000/thermal/conductor.sock
-thermal-conductor window
+# Check whether a daemon is running and the socket exists
+thc daemon &   # start one if needed
+ls /run/user/$UID/thermal/conductor.sock
+
+# Launch the window (auto-detects daemon via socket)
+thc window
+
+# If the grid persists in standalone mode, check for wgpu/driver errors in stderr
+thc window 2>&1 | head -50
 ```
 
 ### Duplicate instances

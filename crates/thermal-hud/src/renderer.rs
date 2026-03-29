@@ -390,25 +390,35 @@ impl Renderer {
                 text_buffers.push(buf);
                 text_placements.push((idx, text_x, text_y, text_color));
 
-                // Context % secondary line.
+                // Working directory secondary line (truncated to last 2 components).
+                let cwd_label = session
+                    .working_dir
+                    .as_deref()
+                    .map(|p| {
+                        let parts: Vec<&str> = p.rsplit('/').take(2).collect();
+                        parts.into_iter().rev().collect::<Vec<_>>().join("/")
+                    })
+                    .unwrap_or_default();
                 let ctx_pct = session.context_percent.unwrap_or(0.0);
-                let ctx_text = format!("ctx {:.0}%", ctx_pct);
-                let mut ctx_buf = Buffer::new(&mut self.font_system, Metrics::new(12.0, 16.0));
-                ctx_buf.set_size(
-                    &mut self.font_system,
-                    Some((tab_width - TAB_PADDING * 2.0 - STATUS_DOT_SIZE - 6.0).max(50.0)),
-                    Some(20.0),
-                );
-                ctx_buf.set_text(
-                    &mut self.font_system,
-                    &ctx_text,
-                    Attrs::new().family(Family::Monospace),
-                    Shaping::Basic,
-                );
-                ctx_buf.shape_until_scroll(&mut self.font_system, false);
-                let ctx_idx = text_buffers.len();
-                text_buffers.push(ctx_buf);
-                text_placements.push((ctx_idx, text_x, 26.0, context_text_color(ctx_pct)));
+                if !cwd_label.is_empty() {
+                    let mut cwd_buf =
+                        Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                    cwd_buf.set_size(
+                        &mut self.font_system,
+                        Some((tab_width - TAB_PADDING * 2.0 - STATUS_DOT_SIZE - 6.0).max(50.0)),
+                        Some(20.0),
+                    );
+                    cwd_buf.set_text(
+                        &mut self.font_system,
+                        &cwd_label,
+                        Attrs::new().family(Family::Monospace),
+                        Shaping::Basic,
+                    );
+                    cwd_buf.shape_until_scroll(&mut self.font_system, false);
+                    let cwd_idx = text_buffers.len();
+                    text_buffers.push(cwd_buf);
+                    text_placements.push((cwd_idx, text_x, 26.0, ThermalPalette::TEXT_MUTED));
+                }
 
                 // Context % progress bar at the bottom of the tab.
                 let bar_y = screen_h - CONTEXT_BAR_HEIGHT;

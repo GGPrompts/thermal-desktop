@@ -60,7 +60,32 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
+
+// ── Bell configuration ──────────────────────────────────────────────────────
+
+/// How to handle BEL (0x07) from the terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BellMode {
+    /// Brief translucent screen flash.
+    Visual,
+    /// Bell is silently ignored.
+    None,
+}
+
+impl BellMode {
+    /// Read from `THERMAL_BELL` env var. Defaults to `Visual`.
+    fn from_env() -> Self {
+        match std::env::var("THERMAL_BELL").as_deref() {
+            Ok("none") => BellMode::None,
+            _ => BellMode::Visual,
+        }
+    }
+}
+
+/// Duration of the visual bell flash overlay.
+const BELL_FLASH_DURATION: Duration = Duration::from_millis(200);
 
 use crate::agent_graph::{AgentGraph, GRAPH_OVERLAY_HEIGHT};
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
@@ -499,6 +524,8 @@ pub fn run() -> anyhow::Result<()> {
         context_critical_active: false,
         agent_timeline: AgentTimeline::new(),
         agent_graph: AgentGraph::new(),
+        bell_mode: BellMode::from_env(),
+        bell_flash_until: None,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -579,6 +606,13 @@ pub fn run() -> anyhow::Result<()> {
                 TermEvent::Title(title) => {
                     state.window.set_title(&title);
                 }
+                TermEvent::Bell => {
+                    if state.bell_mode == BellMode::Visual {
+                        state.bell_flash_until =
+                            Some(Instant::now() + BELL_FLASH_DURATION);
+                        state.dirty = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -646,6 +680,16 @@ pub fn run() -> anyhow::Result<()> {
         // Keep redrawing when the agent graph is visible (layout animation + arc fading).
         if state.agent_graph.visible && !state.agent_graph.nodes.is_empty() {
             state.dirty = true;
+        }
+
+        // Keep redrawing while bell flash is active; clear once expired.
+        if let Some(until) = state.bell_flash_until {
+            if Instant::now() < until {
+                state.dirty = true;
+            } else {
+                state.bell_flash_until = None;
+                state.dirty = true; // one final redraw to clear the overlay
+            }
         }
 
         if state.configured && state.dirty {
@@ -1092,6 +1136,11 @@ struct ConductorWindow {
     agent_timeline: AgentTimeline,
     /// Agent communication graph overlay (toggled with F3).
     agent_graph: AgentGraph,
+    // Bell (visual flash) state
+    /// How to handle BEL characters from the terminal.
+    bell_mode: BellMode,
+    /// When set, a translucent flash overlay is rendered until this instant.
+    bell_flash_until: Option<Instant>,
 }
 
 impl ConductorWindow {
@@ -1385,6 +1434,18 @@ impl ConductorWindow {
                         self.height,
                     );
 
+                    // ── Bell flash overlay ─────────────────────────────────
+                    if self.bell_flash_until.is_some() {
+                        self.grid_renderer.render_bell_flash(
+                            &self.wgpu.device,
+                            &self.wgpu.queue,
+                            &mut encoder,
+                            &view,
+                            self.width,
+                            self.height,
+                        );
+                    }
+
                     self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                     output.present();
                     return;
@@ -1555,6 +1616,18 @@ impl ConductorWindow {
             self.width,
             self.height,
         );
+
+        // ── Bell flash overlay ──────────────────────────────────────────
+        if self.bell_flash_until.is_some() {
+            self.grid_renderer.render_bell_flash(
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();

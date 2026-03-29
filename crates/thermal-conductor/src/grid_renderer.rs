@@ -2196,6 +2196,52 @@ impl GridRenderer {
         }
     }
 
+    /// Render a brief translucent flash overlay for the visual bell.
+    ///
+    /// Covers the entire terminal area with `ACCENT_WARM` at ~18% opacity.
+    /// Called from `render_frame()` when `bell_flash_until` is active.
+    pub fn render_bell_flash(
+        &self,
+        device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        surface_width: u32,
+        surface_height: u32,
+    ) {
+        let sw = surface_width as f32;
+        let sh = surface_height as f32;
+
+        let c = PaletteColor::ACCENT_WARM.to_f32_array();
+        let color = [c[0], c[1], c[2], 0.18];
+
+        let verts = pixel_rect_to_ndc(0.0, 0.0, sw, sh, sw, sh, color);
+        let data = bytemuck::cast_slice::<ColorVertex, u8>(&verts);
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bell_flash_overlay"),
+            contents: data,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("bell_flash_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.rect_pipeline);
+        pass.set_vertex_buffer(0, vbuf.slice(..));
+        pass.draw(0..6, 0..1);
+    }
+
     /// Render the agent timeline bar at the bottom of the window.
     ///
     /// Each tool entry is a colored horizontal segment. Time axis has newest

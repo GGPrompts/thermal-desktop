@@ -49,8 +49,8 @@ pub const HUD_HEIGHT: u32 = 48;
 pub enum ClickAction {
     /// Focus the session tab at this index.
     SelectTab(usize),
-    /// Focus the session's workspace via hyprctl.
-    SessionFocus(i64),
+    /// Select tab at index and focus the session's workspace via hyprctl.
+    SessionFocus(usize, i64),
 }
 
 /// A rectangular click target on the HUD surface.
@@ -393,7 +393,8 @@ pub async fn run() -> anyhow::Result<()> {
     let mut active_tab: usize = 0;
 
     loop {
-        // Non-blocking dispatch of any pending Wayland events.
+        // Dispatch Wayland events. We poll multiple times per render cycle
+        // to keep click response snappy (see sleep loop below).
         event_queue.dispatch_pending(&mut hud)?;
         conn.flush()?;
         if let Some(guard) = conn.prepare_read() {
@@ -413,8 +414,9 @@ pub async fn run() -> anyhow::Result<()> {
                     active_tab = *idx;
                     tracing::info!(tab = idx, "click: selected HUD tab");
                 }
-                ClickAction::SessionFocus(ws) => {
-                    tracing::info!(workspace = ws, "click: focusing session workspace");
+                ClickAction::SessionFocus(idx, ws) => {
+                    active_tab = *idx;
+                    tracing::info!(tab = idx, workspace = ws, "click: focusing session workspace");
                     let _ = std::process::Command::new("hyprctl")
                         .args(["dispatch", "workspace", &ws.to_string()])
                         .spawn();
@@ -473,8 +475,23 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
 
-        // Sleep ~1 second between frames — status HUD doesn't need high FPS.
-        std::thread::sleep(Duration::from_secs(1));
+        // Sleep ~1s for status updates but poll Wayland events every 100ms
+        // so clicks are processed within ~100ms instead of waiting a full second.
+        for _ in 0..9 {
+            std::thread::sleep(Duration::from_millis(100));
+            // Drain any click events that arrived during sleep.
+            event_queue.dispatch_pending(&mut hud)?;
+            if let Ok(()) = conn.flush() {
+                if let Some(guard) = conn.prepare_read() {
+                    let _ = guard.read();
+                    event_queue.dispatch_pending(&mut hud)?;
+                }
+            }
+            // If a click arrived, break out early to process + re-render.
+            if hud.pending_click.is_some() {
+                break;
+            }
+        }
     }
 
     Ok(())
@@ -515,24 +532,19 @@ fn build_tab_click_regions(
     for (i, session) in sessions.iter().enumerate() {
         let tab_x = LEFT_MARGIN + i as f32 * (tab_width + TAB_GAP);
 
-        // If the session has a known workspace, clicking focuses it.
-        // Otherwise just select the tab visually.
-        if let Some(ws) = session.workspace {
-            regions.push(ClickRegion {
-                x: tab_x,
-                y: 0.0,
-                width: tab_width,
-                height: tab_h,
-                action: ClickAction::SessionFocus(ws),
-            });
+        // Clicking always selects the tab. If the session also has a known
+        // workspace, focus that workspace via hyprctl.
+        let action = if let Some(ws) = session.workspace {
+            ClickAction::SessionFocus(i, ws)
         } else {
-            regions.push(ClickRegion {
-                x: tab_x,
-                y: 0.0,
-                width: tab_width,
-                height: tab_h,
-                action: ClickAction::SelectTab(i),
-            });
-        }
+            ClickAction::SelectTab(i)
+        };
+        regions.push(ClickRegion {
+            x: tab_x,
+            y: 0.0,
+            width: tab_width,
+            height: tab_h,
+            action,
+        });
     }
 }

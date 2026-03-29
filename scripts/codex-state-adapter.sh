@@ -166,7 +166,11 @@ cleanup() {
     for state_file in "${!WRITTEN_STATE_FILES[@]}"; do
         rm -f "$state_file" 2>/dev/null || true
     done
-    rm -f "$PID_FILE" 2>/dev/null || true
+    # Do NOT remove the pidfile — flock relies on the same inode existing so
+    # new instances can detect the lock. Removing it lets a new process create
+    # a fresh file and acquire a separate lock, defeating single-instance.
+    # The pidfile is small and harmless to leave behind; flock is released
+    # automatically when this process exits (fd 9 closes).
 }
 trap cleanup EXIT INT TERM
 

@@ -778,7 +778,7 @@ async fn send_tts(text: &str) {
     match UnixStream::connect(audio_socket_path()).await {
         Ok(stream) => {
             let msg = serde_json::json!({
-                "action": "speak",
+                "action": "tts",
                 "text": text,
             });
             let (_, mut writer) = stream.into_split();

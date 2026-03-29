@@ -83,6 +83,10 @@ struct ServiceDef {
 struct ServiceStatus {
     running: bool,
     pid: Option<u32>,
+    /// Binary on disk is newer than the running process (needs restart).
+    stale_binary: bool,
+    /// More than one instance of this service is running.
+    duplicate_count: u32,
 }
 
 const SERVICES: &[ServiceDef] = &[
@@ -205,9 +209,62 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
         PidSource::Pidfile(filename) => read_pid_from_file(filename),
         PidSource::Pgrep => pgrep_pid(def.binary),
     };
+
+    let stale_binary = pid.map_or(false, |p| is_stale_binary(p, def));
+    let duplicate_count = count_instances(def);
+
     ServiceStatus {
         running: pid.is_some(),
         pid,
+        stale_binary,
+        duplicate_count,
+    }
+}
+
+/// Check if the running process is using an older binary than what's on disk.
+/// Compares /proc/<pid>/exe mtime against the installed binary mtime.
+fn is_stale_binary(pid: u32, def: &ServiceDef) -> bool {
+    let exe_link = format!("/proc/{pid}/exe");
+    // Resolve the actual binary path the process is running.
+    let Ok(exe_path) = std::fs::read_link(&exe_link) else {
+        return false;
+    };
+    // Get mtime of the running binary (from /proc — reflects when process started).
+    let Ok(proc_meta) = std::fs::symlink_metadata(&exe_link) else {
+        return false;
+    };
+    // Get mtime of the on-disk binary.
+    let Ok(disk_meta) = std::fs::metadata(&exe_path) else {
+        return false;
+    };
+    let Ok(proc_mtime) = proc_meta.modified() else {
+        return false;
+    };
+    let Ok(disk_mtime) = disk_meta.modified() else {
+        return false;
+    };
+    // If the on-disk binary is newer than when the process started, it's stale.
+    disk_mtime > proc_mtime
+}
+
+/// Count how many instances of this service are running.
+fn count_instances(def: &ServiceDef) -> u32 {
+    let binary = def.binary;
+    // pgrep -cx counts exact matches; -cf counts full command line matches.
+    let (flag, pattern) = if binary.len() > 15 {
+        ("-cf", format!("(^|/){binary}$"))
+    } else {
+        ("-cx", binary.to_string())
+    };
+    let output = Command::new("pgrep").arg(flag).arg(&pattern).output().ok();
+    match output {
+        Some(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        }
+        _ => 0,
     }
 }
 
@@ -573,7 +630,13 @@ impl TuiPage for ServicesPage {
                 let selected = i == self.selected;
                 let pointer = if selected { "\u{25b8}" } else { " " };
                 let (status_text, status_color) = if status.running {
-                    if def.binary == "thermal-audio" && self.audio_state.last_fetched.is_some() {
+                    if status.stale_binary {
+                        ("stale".to_string(), WARM)
+                    } else if status.duplicate_count > 1 {
+                        (format!("{}x dup", status.duplicate_count), SEARING)
+                    } else if def.binary == "thermal-audio"
+                        && self.audio_state.last_fetched.is_some()
+                    {
                         if self.audio_state.muted {
                             ("muted".to_string(), Color::Rgb(200, 150, 50))
                         } else {
@@ -882,8 +945,12 @@ mod tests {
         let status = ServiceStatus {
             running: false,
             pid: None,
+            stale_binary: false,
+            duplicate_count: 0,
         };
         assert!(!status.running);
         assert!(status.pid.is_none());
+        assert!(!status.stale_binary);
+        assert_eq!(status.duplicate_count, 0);
     }
 }

@@ -263,7 +263,7 @@ impl AudioManager {
         })
     }
 
-    fn announce(&mut self, session_id: &str, voice: &str, text: &str) -> Result<()> {
+    async fn announce(&mut self, session_id: &str, voice: &str, text: &str) -> Result<()> {
         // Debounce check.
         if let Some(last) = self.last_play.get(session_id)
             && last.elapsed().as_millis() < DEBOUNCE_MS
@@ -273,7 +273,7 @@ impl AudioManager {
         self.last_play
             .insert(session_id.to_string(), Instant::now());
 
-        let path = self.generate_tts(voice, text)?;
+        let path = self.generate_tts(voice, text).await?;
         if let Err(e) = self.audio_tx.send(path) {
             warn!("audio channel send failed: {e}");
         }
@@ -281,8 +281,8 @@ impl AudioManager {
     }
 
     /// Speak text via the socket API. Supports high-priority (interrupt).
-    fn speak(&mut self, voice: &str, text: &str, high_priority: bool) -> Result<()> {
-        let path = self.generate_tts(voice, text)?;
+    async fn speak(&mut self, voice: &str, text: &str, high_priority: bool) -> Result<()> {
+        let path = self.generate_tts(voice, text).await?;
 
         if high_priority {
             // Kill current playback from this thread (not the audio thread).
@@ -307,7 +307,7 @@ impl AudioManager {
         }
     }
 
-    fn generate_tts(&self, voice: &str, text: &str) -> Result<PathBuf> {
+    async fn generate_tts(&self, voice: &str, text: &str) -> Result<PathBuf> {
         let mut hasher = Md5::new();
         hasher.update(voice.as_bytes());
         hasher.update(b"+20%");
@@ -325,7 +325,9 @@ impl AudioManager {
             anyhow::bail!("edge-tts not available");
         }
 
-        let status = std::process::Command::new("edge-tts")
+        // Use tokio::process::Command so edge-tts runs without blocking
+        // the event loop — socket TTS and other transitions stay responsive.
+        let status = tokio::process::Command::new("edge-tts")
             .arg("--voice")
             .arg(voice)
             .arg("--rate")
@@ -337,6 +339,7 @@ impl AudioManager {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
+            .await
             .context("failed to run edge-tts")?;
 
         if !status.success() {
@@ -612,7 +615,7 @@ async fn main() -> Result<()> {
     if let Some(text) = &cli.test {
         let voice = VOICES[0];
         info!("test mode: voice={voice}, text={text:?}");
-        match audio.generate_tts(voice, text) {
+        match audio.generate_tts(voice, text).await {
             Ok(path) => {
                 if let Err(e) = audio.audio_tx.send(path) {
                     warn!("audio send failed: {e}");
@@ -708,9 +711,28 @@ async fn main() -> Result<()> {
     }
 
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
+            // Bias toward socket TTS so direct requests aren't starved
+            // by the state-poller branch (which can await multiple edge-tts calls).
+            biased;
+
+            Some(req) = sock_rx.recv() => {
+                let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
+                let high_priority = req.priority == Priority::High;
+                info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
+                let is_muted = audio_state.lock().unwrap().muted;
+                if !is_muted {
+                    if let Err(e) = audio.speak(voice, &req.text, high_priority).await {
+                        warn!("socket TTS failed: {e}");
+                    }
+                } else {
+                    info!("socket TTS skipped (muted)");
+                }
+            }
+
             _ = poll_interval.tick() => {
                 let sessions = poller.poll();
 
@@ -734,7 +756,7 @@ async fn main() -> Result<()> {
                             let voice_active = is_voice_active();
                             if !is_muted && !voice_active {
                                 let voice = voices.assign(&session.session_id);
-                                if let Err(e) = audio.announce(&session.session_id, voice, &text) {
+                                if let Err(e) = audio.announce(&session.session_id, voice, &text).await {
                                     warn!("announce failed: {e}");
                                 }
                             } else if voice_active {
@@ -757,7 +779,7 @@ async fn main() -> Result<()> {
                             let is_muted = audio_state.lock().unwrap().muted;
                             if !is_muted && !is_voice_active() {
                                 let voice = voices.assign(&session.session_id);
-                                if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text) {
+                                if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text).await {
                                     warn!("context announce failed: {e}");
                                 }
                             }
@@ -774,19 +796,6 @@ async fn main() -> Result<()> {
                     .collect();
                 prev_states.retain(|id, _| active_ids.contains(id));
                 prev_context_alert.retain(|id, _| active_ids.contains(id));
-            }
-            Some(req) = sock_rx.recv() => {
-                let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
-                let high_priority = req.priority == Priority::High;
-                info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
-                let is_muted = audio_state.lock().unwrap().muted;
-                if !is_muted {
-                    if let Err(e) = audio.speak(voice, &req.text, high_priority) {
-                        warn!("socket TTS failed: {e}");
-                    }
-                } else {
-                    info!("socket TTS skipped (muted)");
-                }
             }
         }
     }

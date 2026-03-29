@@ -1398,52 +1398,18 @@ impl SessionsPage {
             return;
         }
 
-        // Collect (cwd, display_name) for selected sessions.
-        let selected_targets: Vec<(String, String)> = if !self.selected_set.is_empty() {
-            self.selected_set
-                .iter()
-                .filter_map(|&i| {
-                    self.display_rows.get(i).and_then(|row| {
-                        row.session.working_dir.clone().map(|cwd| {
-                            (cwd, row.session.model_display_name())
-                        })
-                    })
-                })
-                .collect()
-        } else if let Some(i) = self.table_state.selected() {
-            self.display_rows
-                .get(i)
-                .and_then(|row| {
-                    row.session.working_dir.clone().map(|cwd| {
-                        vec![(cwd, row.session.model_display_name())]
-                    })
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        // @-mention takes priority over session selection — the user is
+        // explicitly saying where this message should go.
+        let (mention_target, cleaned_content) =
+            parse_at_mention_with_sessions(&text, &self.sessions);
 
-        if selected_targets.is_empty() {
-            // No session selected — send to message bus.
-            // Parse @-mention for targeted routing.
-            let (mention_target, cleaned_content) =
-                parse_at_mention_with_sessions(&text, &self.sessions);
-            let (from_label, ok) = if let Some(ref target) = mention_target {
-                let label = format!("you \u{2192} @{}", target);
-                let ok = send_to_message_bus(&cleaned_content, Some(target));
-                (label, ok)
-            } else {
-                let ok = send_to_message_bus(&text, None);
-                ("you \u{2192} bus".to_string(), ok)
-            };
-            let display_content = if mention_target.is_some() {
-                cleaned_content.clone()
-            } else {
-                text.clone()
-            };
+        if let Some(ref target) = mention_target {
+            // Route via message bus to the mentioned target.
+            let label = format!("you \u{2192} @{}", target);
+            let ok = send_to_message_bus(&cleaned_content, Some(target));
             let entry = ChatEntry {
-                from_label,
-                content: display_content,
+                from_label: label,
+                content: cleaned_content.clone(),
                 timestamp: Instant::now(),
             };
             self.chat_messages.push_back(entry);
@@ -1455,7 +1421,49 @@ impl SessionsPage {
                 ));
             }
         } else {
-            // Send to kitty terminal(s) via cross-instance window map.
+            // No @-mention — route to selected/highlighted session(s), or bus as fallback.
+            let selected_targets: Vec<(String, String)> = if !self.selected_set.is_empty() {
+                self.selected_set
+                    .iter()
+                    .filter_map(|&i| {
+                        self.display_rows.get(i).and_then(|row| {
+                            row.session.working_dir.clone().map(|cwd| {
+                                (cwd, row.session.model_display_name())
+                            })
+                        })
+                    })
+                    .collect()
+            } else if let Some(i) = self.table_state.selected() {
+                self.display_rows
+                    .get(i)
+                    .and_then(|row| {
+                        row.session.working_dir.clone().map(|cwd| {
+                            vec![(cwd, row.session.model_display_name())]
+                        })
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            if selected_targets.is_empty() {
+                // No session available — send to message bus without target.
+                let ok = send_to_message_bus(&text, None);
+                let entry = ChatEntry {
+                    from_label: "you \u{2192} bus".to_string(),
+                    content: text.clone(),
+                    timestamp: Instant::now(),
+                };
+                self.chat_messages.push_back(entry);
+                if !ok {
+                    self.chat_status = Some((
+                        "Failed to send to message bus".into(),
+                        true,
+                        Instant::now(),
+                    ));
+                }
+            } else {
+                // Send to kitty terminal(s) via cross-instance window map.
             let text_with_enter = format!("{}\r", text);
             let mut success_count = 0;
             let mut target_label = String::new();
@@ -1495,6 +1503,7 @@ impl SessionsPage {
                     true,
                     Instant::now(),
                 ));
+            }
             }
         }
 

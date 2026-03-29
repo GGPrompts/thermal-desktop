@@ -245,11 +245,21 @@ impl Daemon {
 
                     let dirty_cells: Vec<DirtyCellData>;
                     let full_redraw;
+                    let cursor: CursorData;
 
                     match term.damage() {
                         TermDamage::Full => {
                             full_redraw = true;
                             dirty_cells = Vec::new();
+                            // Extract cursor from renderable content for the
+                            // full snapshot path below.
+                            let content = term.renderable_content();
+                            cursor = CursorData {
+                                col: content.cursor.point.column.0 as u16,
+                                row: content.cursor.point.line.0.max(0) as u16,
+                                visible: content.cursor.shape
+                                    != alacritty_terminal::vte::ansi::CursorShape::Hidden,
+                            };
                         }
                         TermDamage::Partial(iter) => {
                             full_redraw = false;
@@ -263,7 +273,16 @@ impl Daemon {
                                 continue;
                             }
 
+                            // Single renderable_content() call for both dirty
+                            // cells and cursor — avoids inconsistent state from
+                            // calling it twice.
                             let content = term.renderable_content();
+                            cursor = CursorData {
+                                col: content.cursor.point.column.0 as u16,
+                                row: content.cursor.point.line.0.max(0) as u16,
+                                visible: content.cursor.shape
+                                    != alacritty_terminal::vte::ansi::CursorShape::Hidden,
+                            };
                             dirty_cells = content
                                 .display_iter
                                 .filter_map(|indexed| {
@@ -287,14 +306,6 @@ impl Daemon {
                                 .collect();
                         }
                     }
-
-                    let content = term.renderable_content();
-                    let cursor = CursorData {
-                        col: content.cursor.point.column.0 as u16,
-                        row: content.cursor.point.line.0.max(0) as u16,
-                        visible: content.cursor.shape
-                            != alacritty_terminal::vte::ansi::CursorShape::Hidden,
-                    };
 
                     term.reset_damage();
                     drop(term);
@@ -780,7 +791,11 @@ fn snapshot_cells(terminal: &Terminal, screen_lines: usize, cols: usize) -> Vec<
 async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
     let (mut reader, mut writer) = stream.into_split();
     let mut attached_session: Option<String> = None;
-    let mut update_rx: Option<broadcast::Receiver<Response>> = None;
+
+    // Cancellation token for the broadcast forwarder task. When the client
+    // detaches or re-attaches to a different session, we abort the old
+    // forwarder so we don't duplicate messages.
+    let mut forwarder_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Spawn a task to forward update broadcasts to this client.
     let (client_tx, mut client_rx) = mpsc::channel::<Response>(64);
@@ -830,32 +845,56 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
         };
 
         // Handle attach specially — subscribe to the session's broadcast.
-        if let Request::Attach { ref id, .. } = request
-            && let Some(rx) = daemon.subscribe(id)
-        {
-            update_rx = Some(rx);
-            attached_session = Some(id.clone());
+        if let Request::Attach { ref id, .. } = request {
+            // If already attached to a session, detach from it first.
+            if let Some(ref prev_id) = attached_session {
+                // Abort the old forwarder task to stop duplicate messages.
+                if let Some(handle) = forwarder_handle.take() {
+                    handle.abort();
+                }
+                // Decrement the old session's attached count.
+                let sessions = daemon.sessions.lock();
+                if let Some(session_arc) = sessions.get(prev_id) {
+                    let session = session_arc.lock();
+                    session.attached_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
 
-            // Spawn a task to forward broadcasts to the client channel.
-            let client_tx_clone = client_tx.clone();
-            let mut rx = daemon.subscribe(id).unwrap();
-            tokio::spawn(async move {
-                loop {
-                    match rx.recv().await {
-                        Ok(response) => {
-                            if client_tx_clone.send(response).await.is_err() {
+            // Subscribe to the session's broadcast channel. Only one
+            // subscription is created and moved into the forwarder task.
+            if let Some(mut rx) = daemon.subscribe(id) {
+                attached_session = Some(id.clone());
+
+                // Spawn a task to forward broadcasts to the client channel.
+                let client_tx_clone = client_tx.clone();
+                forwarder_handle = Some(tokio::spawn(async move {
+                    loop {
+                        match rx.recv().await {
+                            Ok(response) => {
+                                if client_tx_clone.send(response).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Client lagged, skipped {n} updates");
+                            }
+                            Err(broadcast::error::RecvError::Closed) => {
                                 break;
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("Client lagged, skipped {n} updates");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            break;
-                        }
                     }
+                }));
+            }
+        }
+
+        // Handle detach — clean up forwarder and attached count.
+        if let Request::Detach { ref id } = request {
+            if attached_session.as_deref() == Some(id) {
+                if let Some(handle) = forwarder_handle.take() {
+                    handle.abort();
                 }
-            });
+                attached_session = None;
+            }
         }
 
         let response = daemon.handle_request(&request);
@@ -864,7 +903,10 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     }
 
-    // Clean up: detach from session if attached.
+    // Clean up: abort forwarder and detach from session if attached.
+    if let Some(handle) = forwarder_handle.take() {
+        handle.abort();
+    }
     if let Some(id) = attached_session {
         let sessions = daemon.sessions.lock();
         if let Some(session_arc) = sessions.get(&id) {
@@ -873,8 +915,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     }
 
-    // Drop the update receiver.
-    drop(update_rx);
     drop(client_tx);
     let _ = writer_handle.await;
 }
@@ -1054,5 +1094,309 @@ mod tests {
         let _ = daemon_handle.await;
 
         // Socket file is cleaned up when `_dir` is dropped.
+    }
+
+    /// Helper: spin up a daemon on a temp socket, return (shutdown_tx, sock_path, _dir).
+    async fn setup_daemon() -> (
+        tokio::sync::mpsc::Sender<()>,
+        PathBuf,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).expect("Failed to bind test socket");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        tokio::spawn(async move {
+            let _ = run_daemon_on(listener, shutdown_rx).await;
+        });
+
+        // Wait for daemon to start accepting.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        (shutdown_tx, sock_path, dir)
+    }
+
+    /// Helper: connect a client to the given socket path.
+    async fn connect_client(sock_path: &std::path::Path) -> DaemonClient {
+        DaemonClient::connect_to(PathBuf::from(sock_path))
+            .await
+            .expect("connect_to failed")
+            .expect("Expected Some(client)")
+    }
+
+    /// Attach to a session and verify we get a SessionState snapshot back.
+    #[tokio::test]
+    async fn attach_returns_session_state() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        let resp = client
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("attach failed");
+
+        match resp {
+            Response::SessionState { id, cols, rows, .. } => {
+                assert_eq!(id, session_id);
+                // Daemon applies the initial size when no other client is attached.
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+            }
+            other => panic!("Expected SessionState, got: {other:?}"),
+        }
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Verify that attached clients receive streamed ScreenUpdate messages
+    /// when input is sent to the session's PTY.
+    #[tokio::test]
+    async fn attach_streams_screen_updates() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        // Attach to get initial state.
+        let _ = client
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("attach failed");
+
+        // Take the response receiver so we can read streamed updates.
+        let mut rx = client.take_response_rx();
+
+        // Send input that will produce output (echo).
+        let tx = client.request_tx_clone();
+        tx.send(Request::SendInput {
+            id: session_id.clone(),
+            data: b"echo hello\n".to_vec(),
+        })
+        .await
+        .expect("send input");
+
+        // We should receive at least one ScreenUpdate or SessionState within
+        // a reasonable timeout (the daemon polls every 8ms + processing).
+        let mut got_update = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(Response::ScreenUpdate { .. })) => {
+                    got_update = true;
+                    break;
+                }
+                Ok(Some(Response::SessionState { .. })) => {
+                    got_update = true;
+                    break;
+                }
+                Ok(Some(Response::Ok)) => {
+                    // SendInput acknowledgment — keep waiting for the screen update.
+                    continue;
+                }
+                Ok(Some(_other)) => {
+                    // Some other response — keep waiting.
+                    continue;
+                }
+                Ok(None) => break,
+                Err(_timeout) => continue,
+            }
+        }
+        assert!(got_update, "Expected to receive a screen update after sending input");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Verify that detach decrements the attached count and works cleanly.
+    #[tokio::test]
+    async fn detach_decrements_attached_count() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        // Attach.
+        let _ = client
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("attach failed");
+
+        // List sessions to verify attached count is 1.
+        // Need a second client for listing since the first has its rx taken.
+        let mut client2 = connect_client(&sock_path).await;
+        let sessions = client2.list_sessions().await.expect("list failed");
+        assert_eq!(sessions[0].connected_client_count, 1);
+
+        // Detach.
+        client.detach(&session_id).await.expect("detach failed");
+
+        // Verify attached count went back to 0.
+        let sessions = client2.list_sessions().await.expect("list after detach failed");
+        assert_eq!(sessions[0].connected_client_count, 0);
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Two clients can attach to the same session simultaneously.
+    #[tokio::test]
+    async fn two_clients_attach_to_same_session() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client1 = connect_client(&sock_path).await;
+        let mut client2 = connect_client(&sock_path).await;
+
+        let session_id = client1
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        // Both attach.
+        let resp1 = client1
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("client1 attach failed");
+        assert!(matches!(resp1, Response::SessionState { .. }));
+
+        let resp2 = client2
+            .attach(&session_id, None)
+            .await
+            .expect("client2 attach failed");
+        assert!(matches!(resp2, Response::SessionState { .. }));
+
+        // List to verify both are counted.
+        let mut list_client = connect_client(&sock_path).await;
+        let sessions = list_client.list_sessions().await.expect("list failed");
+        assert_eq!(sessions[0].connected_client_count, 2);
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Resize request changes the PTY dimensions.
+    #[tokio::test]
+    async fn resize_session_changes_dimensions() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        // Resize to a specific size.
+        client
+            .resize(&session_id, 100, 50)
+            .await
+            .expect("resize failed");
+
+        // Allow the terminal to process the resize.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify via session list.
+        let sessions = client.list_sessions().await.expect("list failed");
+        assert_eq!(sessions[0].cols, 100);
+        assert_eq!(sessions[0].rows, 50);
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Sending input to a non-existent session returns an error.
+    #[tokio::test]
+    async fn send_input_to_nonexistent_session_errors() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let resp = client
+            .request(Request::SendInput {
+                id: "nonexistent".to_string(),
+                data: b"hello".to_vec(),
+            })
+            .await
+            .expect("request failed");
+
+        assert!(
+            matches!(resp, Response::Error { ref message } if message.contains("not found")),
+            "Expected error for nonexistent session, got: {resp:?}"
+        );
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Client disconnect properly cleans up attached count.
+    #[tokio::test]
+    async fn client_disconnect_cleanup() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+
+        let session_id;
+        {
+            let mut client = connect_client(&sock_path).await;
+
+            session_id = client
+                .spawn_session(Some("/bin/sh".to_string()), None, false)
+                .await
+                .expect("spawn_session failed");
+
+            let _ = client
+                .attach(&session_id, Some((80, 24)))
+                .await
+                .expect("attach failed");
+            // client drops here — connection closes.
+        }
+
+        // Give the daemon time to process the disconnect.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify count went back to 0.
+        let mut check_client = connect_client(&sock_path).await;
+        let sessions = check_client.list_sessions().await.expect("list failed");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].connected_client_count, 0);
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Get session state returns a full grid snapshot.
+    #[tokio::test]
+    async fn get_session_state_returns_snapshot() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        let resp = client
+            .get_session_state(&session_id)
+            .await
+            .expect("get_session_state failed");
+
+        match resp {
+            Response::SessionState {
+                id,
+                cols,
+                rows,
+                cells,
+                ..
+            } => {
+                assert_eq!(id, session_id);
+                assert!(cols > 0);
+                assert!(rows > 0);
+                // Grid should have cols * rows cells.
+                assert_eq!(cells.len(), cols as usize * rows as usize);
+            }
+            other => panic!("Expected SessionState, got: {other:?}"),
+        }
+
+        let _ = shutdown_tx.send(()).await;
     }
 }

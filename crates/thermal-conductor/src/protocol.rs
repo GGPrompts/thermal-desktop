@@ -742,4 +742,189 @@ mod tests {
         assert!(!decoded.is_alive);
         assert_eq!(decoded.connected_client_count, 0);
     }
+
+    // ── Async read_frame tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_frame_decodes_encoded_request() {
+        let req = Request::Ping;
+        let frame = encode_frame(&req).expect("encode_frame should succeed");
+        let mut cursor = std::io::Cursor::new(frame);
+        let payload = read_frame(&mut cursor)
+            .await
+            .expect("read_frame should succeed")
+            .expect("should not be None");
+        let decoded: Request = decode_payload(&payload).expect("decode should succeed");
+        assert!(matches!(decoded, Request::Ping));
+    }
+
+    #[tokio::test]
+    async fn read_frame_returns_none_on_empty_input() {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        let result = read_frame(&mut cursor)
+            .await
+            .expect("read_frame should succeed");
+        assert!(result.is_none(), "Empty input should return None");
+    }
+
+    #[tokio::test]
+    async fn read_frame_rejects_oversized_frame() {
+        // Create a frame header claiming 128 MB payload.
+        let len: u32 = 128 * 1024 * 1024;
+        let mut data = len.to_le_bytes().to_vec();
+        // Only provide 4 bytes of "payload" — the frame should be rejected
+        // before trying to read the full payload.
+        data.extend_from_slice(&[0u8; 4]);
+        let mut cursor = std::io::Cursor::new(data);
+        let result = read_frame(&mut cursor).await;
+        assert!(result.is_err(), "Oversized frame should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("frame too large"),
+            "Error should mention 'frame too large', got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn read_frame_multiple_frames_sequential() {
+        let req1 = Request::Ping;
+        let req2 = Request::ListSessions;
+        let mut frames = encode_frame(&req1).unwrap();
+        frames.extend_from_slice(&encode_frame(&req2).unwrap());
+
+        let mut cursor = std::io::Cursor::new(frames);
+
+        // Read first frame.
+        let payload1 = read_frame(&mut cursor)
+            .await
+            .unwrap()
+            .expect("first frame");
+        let decoded1: Request = decode_payload(&payload1).unwrap();
+        assert!(matches!(decoded1, Request::Ping));
+
+        // Read second frame.
+        let payload2 = read_frame(&mut cursor)
+            .await
+            .unwrap()
+            .expect("second frame");
+        let decoded2: Request = decode_payload(&payload2).unwrap();
+        assert!(matches!(decoded2, Request::ListSessions));
+
+        // Third read should return None (end of stream).
+        let result = read_frame(&mut cursor).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn read_frame_truncated_payload_errors() {
+        // Encode a frame but truncate the payload.
+        let req = Request::KillSession {
+            id: "test".into(),
+        };
+        let frame = encode_frame(&req).unwrap();
+        // Keep the length prefix but only half the payload.
+        let truncated = &frame[..4 + (frame.len() - 4) / 2];
+        let mut cursor = std::io::Cursor::new(truncated.to_vec());
+        let result = read_frame(&mut cursor).await;
+        assert!(
+            result.is_err(),
+            "Truncated payload should cause a read error"
+        );
+    }
+
+    /// End-to-end: encode a Response, write the frame, read it back, decode.
+    #[tokio::test]
+    async fn response_frame_round_trip_async() {
+        let resp = Response::ScreenUpdate {
+            id: "sess-1".into(),
+            seq: 42,
+            dirty_cells: vec![DirtyCellData {
+                col: 5,
+                row: 10,
+                cell: CellData {
+                    ch: 'X',
+                    fg: ColorData {
+                        r: 255,
+                        g: 0,
+                        b: 0,
+                    },
+                    bg: ColorData { r: 0, g: 0, b: 0 },
+                    flags: 0,
+                },
+            }],
+            cursor: CursorData {
+                col: 6,
+                row: 10,
+                visible: true,
+            },
+        };
+
+        let frame = encode_frame(&resp).expect("encode");
+        let mut cursor = std::io::Cursor::new(frame);
+        let payload = read_frame(&mut cursor)
+            .await
+            .expect("read")
+            .expect("not None");
+        let decoded: Response = decode_payload(&payload).expect("decode");
+
+        match decoded {
+            Response::ScreenUpdate {
+                id,
+                seq,
+                dirty_cells,
+                cursor,
+            } => {
+                assert_eq!(id, "sess-1");
+                assert_eq!(seq, 42);
+                assert_eq!(dirty_cells.len(), 1);
+                assert_eq!(dirty_cells[0].col, 5);
+                assert_eq!(dirty_cells[0].row, 10);
+                assert_eq!(dirty_cells[0].cell.ch, 'X');
+                assert!(cursor.visible);
+                assert_eq!(cursor.col, 6);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// Verify encode_frame produces valid frames for large payloads.
+    #[test]
+    fn encode_frame_large_session_state() {
+        let cells: Vec<CellData> = (0..80 * 24)
+            .map(|i| CellData {
+                ch: if i % 2 == 0 { 'A' } else { ' ' },
+                fg: ColorData {
+                    r: 200,
+                    g: 200,
+                    b: 200,
+                },
+                bg: ColorData { r: 0, g: 0, b: 0 },
+                flags: 0,
+            })
+            .collect();
+        let resp = Response::SessionState {
+            id: "large-sess".into(),
+            cols: 80,
+            rows: 24,
+            cells,
+            cursor: CursorData {
+                col: 0,
+                row: 0,
+                visible: true,
+            },
+            title: "test".into(),
+        };
+        let frame = encode_frame(&resp).expect("should encode large SessionState");
+        let payload_len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
+        assert_eq!(payload_len + 4, frame.len());
+        // Verify it decodes back.
+        let decoded: Response = decode_payload(&frame[4..]).expect("should decode");
+        match decoded {
+            Response::SessionState { cells, .. } => {
+                assert_eq!(cells.len(), 80 * 24);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
 }

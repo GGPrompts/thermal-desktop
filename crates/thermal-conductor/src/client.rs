@@ -377,3 +377,109 @@ impl DaemonClient {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_to_nonexistent_socket_returns_none() {
+        let path = PathBuf::from("/tmp/thermal-test-nonexistent-socket.sock");
+        // Ensure the socket does not exist.
+        let _ = std::fs::remove_file(&path);
+        let result = DaemonClient::connect_to(path)
+            .await
+            .expect("connect_to should not error for missing socket");
+        assert!(
+            result.is_none(),
+            "Missing socket should return Ok(None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_response_rx_returns_receiver() {
+        // Spin up a minimal echo-like server so we can test the client plumbing.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("client-test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Server: accept one connection, read one frame, reply with Pong.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut r, mut w) = stream.into_split();
+            // Read one request.
+            if let Some(payload) = protocol::read_frame(&mut r).await.expect("read") {
+                let _req: Request = protocol::decode_payload(&payload).expect("decode");
+                let resp = protocol::encode_frame(&Response::Pong).expect("encode");
+                use tokio::io::AsyncWriteExt;
+                w.write_all(&resp).await.expect("write");
+            }
+        });
+
+        let mut client = DaemonClient::connect_to(PathBuf::from(&sock_path))
+            .await
+            .expect("connect failed")
+            .expect("should be Some");
+
+        // take_response_rx gives us the receiver.
+        let mut rx = client.take_response_rx();
+
+        // Send a Ping — the server will reply with Pong.
+        client.send(Request::Ping).await.expect("send");
+
+        // The response should arrive on the taken receiver.
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            rx.recv(),
+        )
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+
+        assert!(matches!(resp, Response::Pong));
+
+        // After taking, try_recv on the client itself returns None.
+        assert!(client.try_recv().is_none());
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn is_healthy_returns_true_for_live_daemon() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("health-test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
+
+        // Server: respond to all requests with the appropriate response.
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut r, mut w) = stream.into_split();
+            loop {
+                match protocol::read_frame(&mut r).await {
+                    Ok(Some(payload)) => {
+                        let req: Request = protocol::decode_payload(&payload).expect("decode");
+                        let resp = match req {
+                            Request::Ping => Response::Pong,
+                            _ => Response::Ok,
+                        };
+                        let frame = protocol::encode_frame(&resp).expect("encode");
+                        use tokio::io::AsyncWriteExt;
+                        if w.write_all(&frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        });
+
+        let mut client = DaemonClient::connect_to(PathBuf::from(&sock_path))
+            .await
+            .expect("connect failed")
+            .expect("should be Some");
+
+        assert!(client.is_healthy().await);
+    }
+}

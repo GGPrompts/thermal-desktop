@@ -66,6 +66,7 @@ use crate::agent_graph::{AgentGraph, GRAPH_OVERLAY_HEIGHT};
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
+use crate::font_config::FontConfig;
 use crate::grid_renderer::{ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell};
 use crate::inject::{self, InjectWatcher};
 use crate::input;
@@ -190,6 +191,9 @@ pub fn run() -> anyhow::Result<()> {
     };
     wgpu_surface.configure(&device, &surface_config);
 
+    // ── Font configuration ─────────────────────────────────────────────────────
+    let font_config = FontConfig::from_env();
+
     // ── Grid renderer ─────────────────────────────────────────────────────────
     let grid_renderer = GridRenderer::new(
         &device,
@@ -197,6 +201,7 @@ pub fn run() -> anyhow::Result<()> {
         surface_format,
         DEFAULT_WIDTH,
         DEFAULT_HEIGHT,
+        font_config,
     );
 
     // ── Context heatmap pipeline ─────────────────────────────────────────────
@@ -2311,6 +2316,47 @@ impl KeyboardHandler for ConductorWindow {
         {
             self.spawn_continuation();
             return;
+        }
+
+        // ── Font size: Ctrl+Plus (increase), Ctrl+Minus (decrease), Ctrl+0 (reset)
+        if self.modifiers.ctrl && !self.modifiers.shift {
+            let font_changed = match event.keysym {
+                Keysym::plus | Keysym::equal | Keysym::KP_Add => {
+                    self.grid_renderer.font_config.increase()
+                }
+                Keysym::minus | Keysym::KP_Subtract => {
+                    self.grid_renderer.font_config.decrease()
+                }
+                Keysym::_0 | Keysym::KP_0 => {
+                    self.grid_renderer.font_config.reset()
+                }
+                _ => false,
+            };
+            if font_changed {
+                tracing::info!(
+                    font_size = self.grid_renderer.font_config.font_size,
+                    "Font size changed"
+                );
+                self.grid_renderer.update_font_metrics();
+                // Recalculate terminal grid dimensions for the new cell size.
+                let mut effective_h = self.height;
+                if self.agent_timeline.visible {
+                    effective_h = effective_h.saturating_sub(TIMELINE_BAR_HEIGHT);
+                }
+                if self.agent_graph.visible {
+                    effective_h = effective_h.saturating_sub(GRAPH_OVERLAY_HEIGHT);
+                }
+                let (cols, rows) = self.grid_renderer.grid_size(self.width, effective_h);
+                self.terminal.resize(
+                    cols,
+                    rows,
+                    self.grid_renderer.cell_width as u16,
+                    self.grid_renderer.cell_height as u16,
+                );
+                self.resize_session(cols as u16, rows as u16);
+                self.dirty = true;
+                return;
+            }
         }
 
         // ── Scrollback navigation (Shift+PageUp/Down/Home/End) ──────────

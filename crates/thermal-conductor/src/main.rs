@@ -10,6 +10,7 @@ mod client;
 mod context_environment;
 mod daemon;
 mod dbus_interface;
+mod font_config;
 mod grid_renderer;
 mod inject;
 mod input;

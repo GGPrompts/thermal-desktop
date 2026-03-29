@@ -27,25 +27,13 @@ use tracing::debug;
 
 use crate::agent_graph::{AgentGraph, GRAPH_OVERLAY_HEIGHT};
 use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT, ToolCategory};
+use crate::font_config::FontConfig;
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
 /// Near-black terminal background — neutral dark, not purple-tinted.
 /// Must match the clear color in window.rs.
 const TERM_BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
-
-// ── Constants ──────────────────────────────────────────────────────────────
-
-/// Font size in points for the terminal grid.
-const FONT_SIZE: f32 = 16.0;
-
-/// Line height in points (typically font_size * 1.2–1.4 for monospace).
-const LINE_HEIGHT: f32 = 22.0;
-
-/// Primary font family — Nerd Font Mono variant for terminal glyphs
-/// (box-drawing, Powerline, Nerd Font icons in the Private Use Area).
-/// cosmic-text will fall back to other system fonts for any remaining missing glyphs.
-const TERM_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
@@ -1027,6 +1015,9 @@ const ATLAS_TRIM_INTERVAL: u64 = 1000;
 const IMAGE_CLEANUP_INTERVAL: u64 = 1000;
 
 pub struct GridRenderer {
+    // Font configuration (family, size, line_height)
+    pub font_config: FontConfig,
+
     // Glyphon state
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -1109,7 +1100,11 @@ impl GridRenderer {
         surface_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        font_config: FontConfig,
     ) -> Self {
+        let font_size = font_config.font_size;
+        let line_height = font_config.line_height;
+        let font_family = font_config.family.clone();
         // ── Glyphon setup ────────────────────────────────────────────────
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
@@ -1131,13 +1126,13 @@ impl GridRenderer {
         );
 
         // ── Measure cell dimensions from font metrics ────────────────────
-        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let metrics = Metrics::new(font_size, line_height);
         let mut measure_buf = Buffer::new(&mut font_system, metrics);
-        measure_buf.set_size(&mut font_system, Some(1000.0), Some(LINE_HEIGHT * 2.0));
+        measure_buf.set_size(&mut font_system, Some(1000.0), Some(line_height * 2.0));
         measure_buf.set_text(
             &mut font_system,
             "M",
-            Attrs::new().family(Family::Name(TERM_FONT_FAMILY)),
+            Attrs::new().family(Family::Name(&font_family)),
             Shaping::Basic,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
@@ -1148,9 +1143,9 @@ impl GridRenderer {
             .next()
             .and_then(|run| run.glyphs.first())
             .map(|g| g.w)
-            .unwrap_or(FONT_SIZE * 0.6);
+            .unwrap_or(font_size * 0.6);
 
-        let cell_height = LINE_HEIGHT;
+        let cell_height = line_height;
 
         debug!(cell_width, cell_height, "Grid cell metrics computed");
 
@@ -1216,6 +1211,7 @@ impl GridRenderer {
         let image_pipeline = ImageRenderPipeline::new(device, surface_format);
 
         Self {
+            font_config,
             font_system,
             swash_cache,
             cache,
@@ -1269,6 +1265,50 @@ impl GridRenderer {
         self.overlay_atlas.trim();
 
         // Invalidate row cache and persistent cell buffers — resize triggers a full damage anyway.
+        self.row_cache.clear();
+        self.cell_buffers.clear();
+        self.last_cursor_pos = None;
+    }
+
+    /// Recalculate cell metrics after a font configuration change.
+    ///
+    /// Re-measures the "M" glyph width, updates cell_width/cell_height,
+    /// trims glyph atlases, and invalidates caches. The caller must
+    /// trigger a terminal resize and session resize afterward.
+    pub fn update_font_metrics(&mut self) {
+        let font_size = self.font_config.font_size;
+        let line_height = self.font_config.line_height;
+
+        let metrics = Metrics::new(font_size, line_height);
+        let mut measure_buf = Buffer::new(&mut self.font_system, metrics);
+        measure_buf.set_size(&mut self.font_system, Some(1000.0), Some(line_height * 2.0));
+        measure_buf.set_text(
+            &mut self.font_system,
+            "M",
+            Attrs::new().family(Family::Name(&self.font_config.family)),
+            Shaping::Basic,
+        );
+        measure_buf.shape_until_scroll(&mut self.font_system, false);
+
+        self.cell_width = measure_buf
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first())
+            .map(|g| g.w)
+            .unwrap_or(font_size * 0.6);
+        self.cell_height = line_height;
+
+        debug!(
+            cell_width = self.cell_width,
+            cell_height = self.cell_height,
+            font_size,
+            line_height,
+            "Font metrics recalculated"
+        );
+
+        // Invalidate all glyph caches.
+        self.atlas.trim();
+        self.overlay_atlas.trim();
         self.row_cache.clear();
         self.cell_buffers.clear();
         self.last_cursor_pos = None;
@@ -1399,7 +1439,7 @@ impl GridRenderer {
         }
 
         // ── Badge text ──────────────────────────────────────────────────
-        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
         let mut buf = Buffer::new(&mut self.font_system, metrics);
         buf.set_size(
             &mut self.font_system,
@@ -1411,7 +1451,7 @@ impl GridRenderer {
             &mut self.font_system,
             &label,
             Attrs::new()
-                .family(Family::Name(TERM_FONT_FAMILY))
+                .family(Family::Name(&self.font_config.family))
                 .color(f32_to_glyph_color(text_color)),
             Shaping::Basic,
         );
@@ -1638,7 +1678,7 @@ impl GridRenderer {
 
         // ── Render command labels via glyphon ──────────────────────────────
         if !label_entries.is_empty() {
-            let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+            let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
             let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
 
             for (_, _, text, color) in &label_entries {
@@ -1653,7 +1693,7 @@ impl GridRenderer {
                     &mut self.font_system,
                     text,
                     Attrs::new()
-                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .family(Family::Name(&self.font_config.family))
                         .color(GlyphColor::rgba(
                             (color[0] * 255.0) as u8,
                             (color[1] * 255.0) as u8,
@@ -1871,7 +1911,7 @@ impl GridRenderer {
         }
 
         // ── Badge text (all lines) ─────────────────────────────────────────
-        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
 
         // Determine per-line text colors.
         let status_color = match session.status {
@@ -1908,7 +1948,7 @@ impl GridRenderer {
                 &mut self.font_system,
                 line,
                 Attrs::new()
-                    .family(Family::Name(TERM_FONT_FAMILY))
+                    .family(Family::Name(&self.font_config.family))
                     .color(GlyphColor::rgba(color.r, color.g, color.b, 255)),
                 Shaping::Basic,
             );
@@ -2063,7 +2103,7 @@ impl GridRenderer {
         }
 
         // ── Warning text ────────────────────────────────────────────────
-        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
         let text_color = if critical {
             PaletteColor::WHITE_HOT
         } else {
@@ -2076,7 +2116,7 @@ impl GridRenderer {
             &mut self.font_system,
             &text,
             Attrs::new()
-                .family(Family::Name(TERM_FONT_FAMILY))
+                .family(Family::Name(&self.font_config.family))
                 .color(GlyphColor::rgba(
                     text_color.r,
                     text_color.g,
@@ -2366,7 +2406,7 @@ impl GridRenderer {
 
         // ── Draw tool name labels ─────────────────────────────────────────
         if !label_entries.is_empty() {
-            let metrics = Metrics::new(FONT_SIZE * 0.75, LINE_HEIGHT * 0.75);
+            let metrics = Metrics::new(self.font_config.font_size * 0.75, self.font_config.line_height * 0.75);
 
             let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
             for (_, max_w, _, text, color) in &label_entries {
@@ -2376,7 +2416,7 @@ impl GridRenderer {
                     &mut self.font_system,
                     text,
                     Attrs::new()
-                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .family(Family::Name(&self.font_config.family))
                         .color(GlyphColor::rgba(color.r, color.g, color.b, 220)),
                     Shaping::Basic,
                 );
@@ -2400,7 +2440,7 @@ impl GridRenderer {
                     TextArea {
                         buffer: buf,
                         left: *x,
-                        top: *y + (content_h - LINE_HEIGHT * 0.75) / 2.0,
+                        top: *y + (content_h - self.font_config.line_height * 0.75) / 2.0,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
@@ -2800,20 +2840,20 @@ impl GridRenderer {
         // ── Draw title text ─────────────────────────────────────────────────
         // Title + node labels via glyphon.
         if !label_entries.is_empty() || !nodes.is_empty() {
-            let metrics = Metrics::new(FONT_SIZE * 0.7, LINE_HEIGHT * 0.7);
-            let small_metrics = Metrics::new(FONT_SIZE * 0.6, LINE_HEIGHT * 0.6);
+            let metrics = Metrics::new(self.font_config.font_size * 0.7, self.font_config.line_height * 0.7);
+            let small_metrics = Metrics::new(self.font_config.font_size * 0.6, self.font_config.line_height * 0.6);
 
             let mut text_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
 
             // Title: "AGENT GRAPH" in top-left of the overlay area.
             {
                 let mut buf = Buffer::new(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(200.0), Some(LINE_HEIGHT));
+                buf.set_size(&mut self.font_system, Some(200.0), Some(self.font_config.line_height));
                 buf.set_text(
                     &mut self.font_system,
                     "AGENT GRAPH",
                     Attrs::new()
-                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .family(Family::Name(&self.font_config.family))
                         .color(GlyphColor::rgba(
                             (title_color_dim[0] * 255.0) as u8,
                             (title_color_dim[1] * 255.0) as u8,
@@ -2833,12 +2873,12 @@ impl GridRenderer {
 
                 let mut buf = Buffer::new(&mut self.font_system, m);
                 let max_w = 120.0;
-                buf.set_size(&mut self.font_system, Some(max_w), Some(LINE_HEIGHT));
+                buf.set_size(&mut self.font_system, Some(max_w), Some(self.font_config.line_height));
                 buf.set_text(
                     &mut self.font_system,
                     text,
                     Attrs::new()
-                        .family(Family::Name(TERM_FONT_FAMILY))
+                        .family(Family::Name(&self.font_config.family))
                         .color(GlyphColor::rgba(color.r, color.g, color.b, 200)),
                     Shaping::Basic,
                 );
@@ -3167,7 +3207,7 @@ impl GridRenderer {
         }
 
         // ── Rebuild only damaged per-cell glyphon Buffers ────────────────
-        let metrics = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+        let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
 
         let cursor_row = cursor.point.line.0 as usize;
         let cursor_col = cursor.point.column.0;
@@ -3272,7 +3312,7 @@ impl GridRenderer {
 
                 let s: String = ch.to_string();
                 let attrs = Attrs::new()
-                    .family(Family::Name(TERM_FONT_FAMILY))
+                    .family(Family::Name(&self.font_config.family))
                     .color(f32_to_glyph_color(fg));
                 buf.set_text(&mut self.font_system, &s, attrs, Shaping::Basic);
                 buf.shape_until_scroll(&mut self.font_system, false);

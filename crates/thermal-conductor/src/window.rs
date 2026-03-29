@@ -57,7 +57,7 @@ use std::collections::HashSet;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
@@ -131,7 +131,8 @@ pub fn run() -> anyhow::Result<()> {
     // ── Create xdg toplevel window ────────────────────────────────────────────
     let surface = compositor.create_surface(&qh);
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
-    window.set_title("Thermal Conductor");
+    // Initial title — will be updated once session mode is determined.
+    window.set_title("thermal");
     window.set_app_id("thermal-conductor");
     window.set_min_size(Some((400, 300)));
 
@@ -246,6 +247,10 @@ pub fn run() -> anyhow::Result<()> {
     // Shared flag for the daemon reader task to signal session exit.
     let daemon_exit_requested = Arc::new(AtomicBool::new(false));
 
+    // Shared slot for the daemon reader task to deliver title updates.
+    // The render loop drains this each iteration and calls window.set_title().
+    let pending_title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
     // Try to connect to the session daemon. If it is running, use client
     // mode; otherwise fall back to standalone mode with a local PTY.
     let (session_mode, term_event_rx, pty_child_pid) = tokio_rt.block_on(async {
@@ -358,6 +363,7 @@ pub fn run() -> anyhow::Result<()> {
                     response_rx,
                     Arc::clone(&pty_dirty),
                     Arc::clone(&daemon_exit_requested),
+                    Arc::clone(&pending_title),
                     task_wakeup_fd,
                 );
 
@@ -393,6 +399,24 @@ pub fn run() -> anyhow::Result<()> {
     });
 
     tracing::info!(cols = init_cols, rows = init_rows, "Terminal initialized");
+
+    // Set initial window title based on session mode.
+    {
+        let initial_title = match &session_mode {
+            SessionMode::Client { session_id, .. } => {
+                format!("thermal \u{2014} session {}", &session_id[..session_id.len().min(8)])
+            }
+            SessionMode::Standalone { .. } => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
+                let shell_name = std::path::Path::new(&shell)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("sh");
+                format!("thermal \u{2014} {shell_name}")
+            }
+        };
+        window.set_title(&initial_title);
+    }
 
     // ── Claude state poller ──────────────────────────────────────────────────
     let claude_poller = match ClaudeStatePoller::new() {
@@ -445,6 +469,7 @@ pub fn run() -> anyhow::Result<()> {
         height: DEFAULT_HEIGHT,
         exit: false,
         daemon_exit_requested,
+        pending_title,
         keyboard: None,
         seat: None,
         modifiers: Modifiers {
@@ -555,6 +580,13 @@ pub fn run() -> anyhow::Result<()> {
                     state.window.set_title(&title);
                 }
                 _ => {}
+            }
+        }
+
+        // Drain pending title from daemon reader task (client mode).
+        if let Ok(mut guard) = state.pending_title.try_lock() {
+            if let Some(title) = guard.take() {
+                state.window.set_title(&title);
             }
         }
 
@@ -693,6 +725,7 @@ fn spawn_daemon_reader_task(
     mut response_rx: tokio::sync::mpsc::Receiver<Response>,
     pty_dirty: Arc<AtomicBool>,
     exit_requested: Arc<AtomicBool>,
+    pending_title: Arc<Mutex<Option<String>>>,
     wakeup_write: std::os::fd::OwnedFd,
 ) {
     let term_handle = terminal.term_handle();
@@ -856,7 +889,12 @@ fn spawn_daemon_reader_task(
                 }
 
                 Response::TitleChanged { title, .. } => {
-                    tracing::debug!(title = %title, "Daemon title changed (not yet applied to window)");
+                    tracing::debug!(title = %title, "Daemon title changed — forwarding to window");
+                    if let Ok(mut guard) = pending_title.lock() {
+                        *guard = Some(title);
+                    }
+                    // Wake the render loop so it picks up the title promptly.
+                    wake_render_loop(wakeup_write_fd);
                 }
 
                 // Ignore request-response messages (Ok, Pong, Error, etc.)
@@ -1003,6 +1041,9 @@ struct ConductorWindow {
     /// Set to `true` by the daemon reader task when a `SessionExited` message
     /// arrives. Checked by `session_has_exited()` in client mode.
     daemon_exit_requested: Arc<AtomicBool>,
+    /// Pending title update from the daemon reader task. Drained each event
+    /// loop iteration and applied to the Wayland surface via `set_title()`.
+    pending_title: Arc<Mutex<Option<String>>>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     /// The seat associated with our keyboard, needed for shortcuts inhibit.
     seat: Option<wl_seat::WlSeat>,

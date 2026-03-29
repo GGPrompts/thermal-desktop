@@ -61,7 +61,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-core** | Production | Shared palette, GPU context factory, multi-agent StatePoller (Claude/Codex/Copilot), text rendering, PTY session mgmt |
 | **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size (used by thermal-conductor and thermobile) |
 | **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Profiles/Services/Messages) + GPU terminal window. Sessions tab: 3-panel layout with agent list, live kitty preview, @-mention chat with bus routing. Named agents (opus, sonnet, gpt5.4mini). Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
-| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions + voice level meter) |
+| **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions + voice level meter). Mouse click support: workspace switch, voice mute toggle, session focus |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
 | **thermal-launch** | Prototype | GPU fuzzy-search app launcher overlay |
 | **thermal-notify** | Production | GPU notification daemon implementing org.freedesktop.Notifications via D-Bus |
@@ -72,7 +72,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-messages** | Production | Agent message bus daemon — JSONL over Unix socket, ring buffer (500 msgs) with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends, optional JSONL persistence, kitty live-session routing with one-shot fallback |
 | **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — pane capture (kitty @ get-text), click, type, window mgmt, system metrics (JSON-RPC 2.0 over stdio) |
 | **thermal-face** | Prototype | GPU-rendered SDF avatar with thermal palette — animated face in layer-shell overlay, auto-blink, audio-driven mouth sync (planned) |
-| **thermal-hud** | Functional | Layer-shell HUD overlay — Claude session tabs, voice assistant state display |
+| **thermal-hud** | Production | Layer-shell HUD overlay — Claude session tabs with display names (opus, sonnet-2) and status labels (ready/active/tool/idle), voice assistant state display. Mouse click support: tab selection, session workspace focus |
 | **thermal-screensaver** | Functional | Idle-triggered thermal fluid simulation overlay — reaction-diffusion WGSL shader, ext-idle-notify-v1 |
 | **thermal-wallpaper** | Functional | Animated WGSL thermal shader wallpaper — simplex-noise heat field modulated by real-time system metrics |
 
@@ -85,7 +85,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 - **Pidfile guards**: Daemons (thermal-voice, thermal-dispatcher) use pidfiles in `/run/user/$UID/thermal/` for single-instance enforcement.
 - **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes). Sessions can be saved as profiles via 's' hotkey.
 - **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution. Used by thermal-messages routing (dispatcher delegates all actions to agents via route).
-- **Display name registry** (`sessions.json` sidecar): Maps session_id → display_name (opus, sonnet-2, gpt5.4mini). Dedup numbering for multiple sessions with same model. Used by TUI and message bus for @-mention routing.
+- **Display name registry** (`sessions.json` sidecar): Maps session_id → display_name (opus, sonnet-2, gpt5.4mini). Dedup numbering for multiple sessions with same model. Used by TUI, HUD, and message bus for @-mention routing.
 
 ## Color Palette
 All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.
@@ -106,6 +106,8 @@ cargo install --path crates/thermal-audio    # Installs to ~/.cargo/bin/thermal-
 cargo install --path crates/thermal-bar      # etc.
 ```
 `cargo build` alone does NOT update `~/.cargo/bin/`. Running daemons use the `~/.cargo/bin/` copies (resolved via PATH), so forgetting `cargo install` means your changes won't take effect at runtime.
+
+Use `/rebuild` to automatically detect changed crates, install binaries, and restart running daemons.
 
 ### Running from Source
 ```bash

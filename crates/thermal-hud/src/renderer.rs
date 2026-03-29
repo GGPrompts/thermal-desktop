@@ -417,7 +417,7 @@ impl Renderer {
                     cwd_buf.shape_until_scroll(&mut self.font_system, false);
                     let cwd_idx = text_buffers.len();
                     text_buffers.push(cwd_buf);
-                    text_placements.push((cwd_idx, text_x, 26.0, ThermalPalette::TEXT_MUTED));
+                    text_placements.push((cwd_idx, text_x, 26.0, ThermalPalette::TEXT));
                 }
 
                 // Context % progress bar at the bottom of the tab.

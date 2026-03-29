@@ -1,8 +1,9 @@
 /// wgpu rendering pipeline for thermal-hud.
 ///
 /// Renders a horizontal tab strip showing per-agent status tabs with
-/// session ID, current tool, status dot, and context % progress bar.
+/// display name, current tool, status dot, and context % progress bar.
 /// Adapted from thermal-bar's renderer.rs pattern.
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
 use bytemuck::{Pod, Zeroable};
@@ -319,6 +320,9 @@ impl Renderer {
             text_buffers.push(buf);
             text_placements.push((idx, LEFT_MARGIN, 14.0, ThermalPalette::TEXT_MUTED));
         } else {
+            // Load sidecar display names (if available) for friendly labels.
+            let sidecar_names = load_sidecar_display_names();
+
             // Compute tab width: distribute evenly, clamped to min/max.
             let available = screen_w - LEFT_MARGIN * 2.0;
             let count = sessions.len() as f32;
@@ -348,13 +352,13 @@ impl Renderer {
                 let dot_y = (screen_h - CONTEXT_BAR_HEIGHT) / 2.0 - STATUS_DOT_SIZE / 2.0;
                 rect_quads.push(([dot_x, dot_y, STATUS_DOT_SIZE, STATUS_DOT_SIZE], dot_color));
 
-                // Build tab text: "session_id  ToolName"
-                let session_label = truncate_session_id(&session.session_id, 12);
-                let tool_label = session.current_tool.as_deref().unwrap_or("").to_string();
-                let tab_text = if tool_label.is_empty() {
-                    format!("{session_label}  {}", status_label(&session.status))
-                } else {
+                // Build tab text: "display_name  ToolName/status"
+                let session_label = display_name_for_session(session, &sidecar_names);
+                let tool_label = session.current_tool.as_deref().unwrap_or("");
+                let tab_text = if !tool_label.is_empty() {
                     format!("{session_label}  {tool_label}")
+                } else {
+                    format!("{session_label}  {}", status_label(&session.status))
                 };
 
                 let text_x = dot_x + STATUS_DOT_SIZE + 6.0;
@@ -971,31 +975,83 @@ fn pixel_rect_to_ndc(
 }
 
 /// Map ClaudeStatus to a thermal color for the status dot.
+/// Matches thermal-conductor's sessions tab color scheme.
 fn status_color(status: &ClaudeStatus) -> [f32; 4] {
     match status {
-        ClaudeStatus::ToolUse => ThermalPalette::ACCENT_HOT,
-        ClaudeStatus::Processing => ThermalPalette::ACCENT_WARM,
-        ClaudeStatus::AwaitingInput => ThermalPalette::ACCENT_COOL,
-        ClaudeStatus::Idle => ThermalPalette::ACCENT_COLD,
+        ClaudeStatus::AwaitingInput => ThermalPalette::SEARING, // bright — ready for input
+        ClaudeStatus::ToolUse => ThermalPalette::HOT,
+        ClaudeStatus::Processing => ThermalPalette::WARM,
+        ClaudeStatus::Idle => ThermalPalette::COLD,
     }
 }
 
-/// Map ClaudeStatus to a short label.
+/// Map ClaudeStatus to a short, human-friendly label.
 fn status_label(status: &ClaudeStatus) -> &'static str {
     match status {
-        ClaudeStatus::ToolUse => "TOOL",
-        ClaudeStatus::Processing => "RUN",
-        ClaudeStatus::AwaitingInput => "WAIT",
-        ClaudeStatus::Idle => "IDLE",
+        ClaudeStatus::AwaitingInput => "ready",
+        ClaudeStatus::Processing => "active",
+        ClaudeStatus::ToolUse => "tool",
+        ClaudeStatus::Idle => "idle",
     }
 }
 
-/// Truncate a session ID to `max_len` characters with ellipsis.
-fn truncate_session_id(id: &str, max_len: usize) -> String {
-    if id.len() <= max_len {
-        id.to_string()
+/// Load display names from the sessions sidecar file (if available).
+///
+/// Returns a map of session_id -> display_name (e.g. "opus", "sonnet-2").
+/// Falls back to an empty map if the file is missing or unparseable.
+fn load_sidecar_display_names() -> HashMap<String, String> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+    if runtime_dir.is_empty() {
+        return HashMap::new();
+    }
+    let path = format!("{runtime_dir}/thermal/sessions.json");
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+
+    // Minimal deserialization — we only need session_id and display_name.
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        session_id: String,
+        display_name: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Sidecar {
+        sessions: Vec<Entry>,
+    }
+
+    let Ok(sidecar) = serde_json::from_str::<Sidecar>(&contents) else {
+        return HashMap::new();
+    };
+
+    sidecar
+        .sessions
+        .into_iter()
+        .filter_map(|e| e.display_name.map(|dn| (e.session_id, dn)))
+        .collect()
+}
+
+/// Get a human-friendly display name for a session.
+///
+/// Priority: sidecar display_name (dedup-numbered) > model_display_name() > truncated ID.
+fn display_name_for_session(
+    session: &ClaudeSessionState,
+    sidecar_names: &HashMap<String, String>,
+) -> String {
+    // 1. Sidecar display name (e.g. "opus", "sonnet-2")
+    if let Some(name) = sidecar_names.get(&session.session_id) {
+        return name.clone();
+    }
+    // 2. Model-based display name from ClaudeSessionState
+    let name = session.model_display_name();
+    if name != "unknown" {
+        return name;
+    }
+    // 3. Fallback: truncated session ID
+    if session.session_id.len() <= 10 {
+        session.session_id.clone()
     } else {
-        format!("{}...", &id[..max_len.saturating_sub(3)])
+        format!("{}...", &session.session_id[..7])
     }
 }
 

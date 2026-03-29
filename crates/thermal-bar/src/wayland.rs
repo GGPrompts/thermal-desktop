@@ -8,11 +8,15 @@ use smithay_client_toolkit as sctk;
 
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{Capability, SeatHandler, SeatState},
+    seat::{
+        Capability, SeatHandler, SeatState,
+        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
+    },
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -24,7 +28,7 @@ use sctk::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_seat, wl_surface},
+    protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
 };
 
 use crate::layout::BarLayout;
@@ -38,6 +42,40 @@ use crate::sparkline::SparklineSet;
 
 /// Height of the bar in pixels.
 pub const BAR_HEIGHT: u32 = 32;
+
+// ---------------------------------------------------------------------------
+// Click interaction types
+// ---------------------------------------------------------------------------
+
+/// An action to execute when a bar region is clicked.
+#[derive(Debug, Clone)]
+pub enum ClickAction {
+    /// Switch to workspace N via hyprctl.
+    WorkspaceSwitch(i64),
+    /// Toggle voice mute via the thermal-voice Unix socket.
+    VoiceMuteToggle,
+    /// Focus the session at the given workspace via hyprctl.
+    SessionFocus(i64),
+}
+
+/// A rectangular click target on the bar surface.
+#[derive(Debug, Clone)]
+pub struct ClickRegion {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub action: ClickAction,
+}
+
+impl ClickRegion {
+    /// Test whether a point falls within this region.
+    fn hit_test(&self, px: f64, py: f64) -> bool {
+        let px = px as f32;
+        let py = py as f32;
+        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
+    }
+}
 
 /// State for the thermal-bar Wayland client.
 pub struct BarState {
@@ -53,6 +91,14 @@ pub struct BarState {
     pub configured: bool,
     /// Set to true to exit the event loop.
     pub exit: bool,
+
+    // Pointer interaction state
+    pointer: Option<WlPointer>,
+    pointer_position: (f64, f64),
+    /// Click regions rebuilt each render cycle.
+    pub click_regions: Vec<ClickRegion>,
+    /// Pending click action to execute after event dispatch.
+    pub pending_click: Option<ClickAction>,
 }
 
 impl BarState {
@@ -189,11 +235,13 @@ impl SeatHandler for BarState {
     fn new_capability(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
     ) {
-        // No keyboard/pointer needed for a status bar.
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = Some(self.seat_state.get_pointer(qh, &seat).unwrap());
+        }
     }
 
     fn remove_capability(
@@ -201,11 +249,48 @@ impl SeatHandler for BarState {
         _conn: &Connection,
         _: &QueueHandle<Self>,
         _: wl_seat::WlSeat,
-        _capability: Capability,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+        }
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for BarState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { .. }
+                | PointerEventKind::Motion { .. } => {
+                    self.pointer_position = event.position;
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.pointer_position = (-1.0, -1.0);
+                }
+                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                    let (px, py) = self.pointer_position;
+                    for region in &self.click_regions {
+                        if region.hit_test(px, py) {
+                            self.pending_click = Some(region.action.clone());
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +300,7 @@ impl SeatHandler for BarState {
 delegate_compositor!(BarState);
 delegate_output!(BarState);
 delegate_seat!(BarState);
+delegate_pointer!(BarState);
 delegate_layer!(BarState);
 delegate_registry!(BarState);
 
@@ -270,6 +356,10 @@ pub async fn run() -> anyhow::Result<()> {
         width: 1920, // sane default until compositor configures us
         configured: false,
         exit: false,
+        pointer: None,
+        pointer_position: (-1.0, -1.0),
+        click_regions: Vec::new(),
+        pending_click: None,
     };
 
     tracing::info!("thermal-bar: waiting for compositor configure");
@@ -334,6 +424,11 @@ pub async fn run() -> anyhow::Result<()> {
             break;
         }
 
+        // Execute any pending click action from the previous dispatch.
+        if let Some(action) = bar.pending_click.take() {
+            execute_click_action(&action);
+        }
+
         // Check if the compositor resized us.
         if renderer.width != bar.width {
             renderer.resize(bar.width, BAR_HEIGHT);
@@ -353,6 +448,9 @@ pub async fn run() -> anyhow::Result<()> {
         right_outputs.extend(claude_module.render());
         right_outputs.extend(clock_module.render());
         layout.right = right_outputs;
+
+        // Rebuild click regions from the positioned module layout.
+        build_click_regions(&layout, &mut bar.click_regions);
 
         // Update sparklines once per second.
         if last_metrics.elapsed() >= Duration::from_secs(1) {
@@ -389,4 +487,100 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Click region helpers
+// ---------------------------------------------------------------------------
+
+/// Rebuild click regions from the current layout.
+///
+/// Maps positioned modules to clickable actions:
+/// - Center zone modules (workspace map): each module text starts with the
+///   workspace ID number, so we parse it and create a WorkspaceSwitch action.
+/// - Right zone voice module: first right-zone module is always the voice
+///   status — clicking it toggles mute.
+fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
+    regions.clear();
+
+    let positioned = layout.compute_positions();
+    let bar_h = BAR_HEIGHT as f32;
+
+    for module in &positioned {
+        match module.zone {
+            crate::layout::Zone::Center => {
+                // Workspace modules have text like "3 \u{f120} \u{f269}".
+                // The workspace ID is the first whitespace-delimited token.
+                if let Some(ws_id) = module
+                    .text
+                    .split_whitespace()
+                    .next()
+                    .and_then(|tok| tok.parse::<i64>().ok())
+                {
+                    regions.push(ClickRegion {
+                        x: module.x,
+                        y: 0.0,
+                        width: module.width,
+                        height: bar_h,
+                        action: ClickAction::WorkspaceSwitch(ws_id),
+                    });
+                }
+            }
+            crate::layout::Zone::Right => {
+                // The voice module is always the first right-zone module
+                // (it renders before agent/clock modules in layout.right).
+                // Detect it by checking for known mic icon codepoints.
+                let is_voice = module.text.starts_with('\u{1F507}')   // muted
+                    || module.text.starts_with('\u{1F50E}')           // monitoring
+                    || module.text.starts_with('\u{1F514}')           // wake word
+                    || module.text.starts_with('\u{1F3A4}')           // listening
+                    || module.text.starts_with('\u{1F525}');          // processing/fire
+                if is_voice {
+                    regions.push(ClickRegion {
+                        x: module.x,
+                        y: 0.0,
+                        width: module.width,
+                        height: bar_h,
+                        action: ClickAction::VoiceMuteToggle,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Execute a click action by spawning the appropriate command.
+fn execute_click_action(action: &ClickAction) {
+    match action {
+        ClickAction::WorkspaceSwitch(ws) => {
+            tracing::info!(workspace = ws, "click: switching workspace");
+            let _ = std::process::Command::new("hyprctl")
+                .args(["dispatch", "workspace", &ws.to_string()])
+                .spawn();
+        }
+        ClickAction::VoiceMuteToggle => {
+            tracing::info!("click: toggling voice mute");
+            // Send toggle command to thermal-voice via its Unix socket.
+            let Some(runtime_dir) = std::env::var("XDG_RUNTIME_DIR").ok() else {
+                tracing::warn!("XDG_RUNTIME_DIR not set, cannot toggle voice");
+                return;
+            };
+            let sock_path = format!("{runtime_dir}/thermal/voice.sock");
+            // Fire-and-forget: try to connect and send the toggle command.
+            // If the socket doesn't exist (daemon not running), silently ignore.
+            std::thread::spawn(move || {
+                use std::io::Write;
+                if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
+                    let _ = stream.write_all(b"toggle\n");
+                }
+            });
+        }
+        ClickAction::SessionFocus(ws) => {
+            tracing::info!(workspace = ws, "click: focusing session workspace");
+            let _ = std::process::Command::new("hyprctl")
+                .args(["dispatch", "workspace", &ws.to_string()])
+                .spawn();
+        }
+    }
 }

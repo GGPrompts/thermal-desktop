@@ -9,11 +9,15 @@ use smithay_client_toolkit as sctk;
 
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_seat,
+    delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    seat::{Capability, SeatHandler, SeatState},
+    seat::{
+        Capability, SeatHandler, SeatState,
+        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
+    },
     shell::{
         WaylandSurface,
         wlr_layer::{
@@ -25,7 +29,7 @@ use sctk::{
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
-    protocol::{wl_output, wl_seat, wl_surface},
+    protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
 };
 
 use thermal_core::ClaudeStatePoller;
@@ -35,6 +39,38 @@ use crate::voice::{HudMode, VoiceStatePoller};
 
 /// Height of the HUD header bar in pixels.
 pub const HUD_HEIGHT: u32 = 48;
+
+// ---------------------------------------------------------------------------
+// Click interaction types
+// ---------------------------------------------------------------------------
+
+/// An action to execute when a HUD region is clicked.
+#[derive(Debug, Clone)]
+pub enum ClickAction {
+    /// Focus the session tab at this index.
+    SelectTab(usize),
+    /// Focus the session's workspace via hyprctl.
+    SessionFocus(i64),
+}
+
+/// A rectangular click target on the HUD surface.
+#[derive(Debug, Clone)]
+pub struct ClickRegion {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub action: ClickAction,
+}
+
+impl ClickRegion {
+    /// Test whether a point falls within this region.
+    fn hit_test(&self, px: f64, py: f64) -> bool {
+        let px = px as f32;
+        let py = py as f32;
+        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
+    }
+}
 
 /// State for the thermal-hud Wayland client.
 pub struct HudState {
@@ -50,6 +86,14 @@ pub struct HudState {
     pub configured: bool,
     /// Set to true to exit the event loop.
     pub exit: bool,
+
+    // Pointer interaction state
+    pointer: Option<WlPointer>,
+    pointer_position: (f64, f64),
+    /// Click regions rebuilt each render cycle.
+    pub click_regions: Vec<ClickRegion>,
+    /// Pending click action to execute after event dispatch.
+    pub pending_click: Option<ClickAction>,
 }
 
 impl HudState {
@@ -181,10 +225,13 @@ impl SeatHandler for HudState {
     fn new_capability(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wl_seat::WlSeat,
-        _capability: Capability,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = Some(self.seat_state.get_pointer(qh, &seat).unwrap());
+        }
     }
 
     fn remove_capability(
@@ -192,11 +239,48 @@ impl SeatHandler for HudState {
         _conn: &Connection,
         _: &QueueHandle<Self>,
         _: wl_seat::WlSeat,
-        _capability: Capability,
+        capability: Capability,
     ) {
+        if capability == Capability::Pointer {
+            if let Some(pointer) = self.pointer.take() {
+                pointer.release();
+            }
+        }
     }
 
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for HudState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &WlPointer,
+        events: &[PointerEvent],
+    ) {
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { .. }
+                | PointerEventKind::Motion { .. } => {
+                    self.pointer_position = event.position;
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.pointer_position = (-1.0, -1.0);
+                }
+                PointerEventKind::Press { button, .. } if button == BTN_LEFT => {
+                    let (px, py) = self.pointer_position;
+                    for region in &self.click_regions {
+                        if region.hit_test(px, py) {
+                            self.pending_click = Some(region.action.clone());
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +290,7 @@ impl SeatHandler for HudState {
 delegate_compositor!(HudState);
 delegate_output!(HudState);
 delegate_seat!(HudState);
+delegate_pointer!(HudState);
 delegate_layer!(HudState);
 delegate_registry!(HudState);
 
@@ -261,6 +346,10 @@ pub async fn run() -> anyhow::Result<()> {
         width: 1920, // sane default until compositor configures us
         configured: false,
         exit: false,
+        pointer: None,
+        pointer_position: (-1.0, -1.0),
+        click_regions: Vec::new(),
+        pending_click: None,
     };
 
     tracing::info!("thermal-hud: waiting for compositor configure");
@@ -317,6 +406,22 @@ pub async fn run() -> anyhow::Result<()> {
             break;
         }
 
+        // Execute any pending click action from the previous dispatch.
+        if let Some(action) = hud.pending_click.take() {
+            match &action {
+                ClickAction::SelectTab(idx) => {
+                    active_tab = *idx;
+                    tracing::info!(tab = idx, "click: selected HUD tab");
+                }
+                ClickAction::SessionFocus(ws) => {
+                    tracing::info!(workspace = ws, "click: focusing session workspace");
+                    let _ = std::process::Command::new("hyprctl")
+                        .args(["dispatch", "workspace", &ws.to_string()])
+                        .spawn();
+                }
+            }
+        }
+
         // Check if the compositor resized us.
         if renderer.width != hud.width {
             renderer.resize(hud.width, HUD_HEIGHT);
@@ -334,6 +439,8 @@ pub async fn run() -> anyhow::Result<()> {
         // Render based on the current HUD mode.
         let render_result = match &voice_mode {
             HudMode::VoiceActive { .. } => {
+                // Clear click regions when in voice mode — no tabs to click.
+                hud.click_regions.clear();
                 // Compute how long the result has been shown (for auto-dim).
                 let result_age = voice_poller.result_shown_at.map(|t| t.elapsed().as_secs());
                 tracing::debug!(?voice_mode, "rendering voice state");
@@ -347,6 +454,13 @@ pub async fn run() -> anyhow::Result<()> {
                 if !sessions.is_empty() && active_tab >= sessions.len() {
                     active_tab = sessions.len() - 1;
                 }
+
+                // Rebuild click regions from session tab layout.
+                build_tab_click_regions(
+                    &sessions,
+                    hud.width as f32,
+                    &mut hud.click_regions,
+                );
 
                 renderer.render_tabs(&sessions, active_tab)
             }
@@ -364,4 +478,61 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Click region helpers
+// ---------------------------------------------------------------------------
+
+/// Tab layout constants — must match those in renderer.rs.
+const TAB_MIN_WIDTH: f32 = 200.0;
+const TAB_MAX_WIDTH: f32 = 400.0;
+const TAB_GAP: f32 = 2.0;
+const LEFT_MARGIN: f32 = 8.0;
+
+/// Rebuild click regions from the current session tab layout.
+///
+/// Each session tab becomes a click region. Clicking a tab both selects it
+/// (visual highlight) and, if the session has a workspace, focuses that
+/// workspace via hyprctl.
+fn build_tab_click_regions(
+    sessions: &[thermal_core::ClaudeSessionState],
+    screen_w: f32,
+    regions: &mut Vec<ClickRegion>,
+) {
+    regions.clear();
+
+    if sessions.is_empty() {
+        return;
+    }
+
+    let available = screen_w - LEFT_MARGIN * 2.0;
+    let count = sessions.len() as f32;
+    let tab_width =
+        ((available - TAB_GAP * (count - 1.0)) / count).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+    let tab_h = HUD_HEIGHT as f32;
+
+    for (i, session) in sessions.iter().enumerate() {
+        let tab_x = LEFT_MARGIN + i as f32 * (tab_width + TAB_GAP);
+
+        // If the session has a known workspace, clicking focuses it.
+        // Otherwise just select the tab visually.
+        if let Some(ws) = session.workspace {
+            regions.push(ClickRegion {
+                x: tab_x,
+                y: 0.0,
+                width: tab_width,
+                height: tab_h,
+                action: ClickAction::SessionFocus(ws),
+            });
+        } else {
+            regions.push(ClickRegion {
+                x: tab_x,
+                y: 0.0,
+                width: tab_width,
+                height: tab_h,
+                action: ClickAction::SelectTab(i),
+            });
+        }
+    }
 }

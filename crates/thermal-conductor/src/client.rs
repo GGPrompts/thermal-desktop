@@ -354,6 +354,25 @@ impl DaemonClient {
         }
     }
 
+    /// Send text to a session's PTY with a trailing `\r` (Enter).
+    ///
+    /// This mirrors `kitty @ send-text` behavior: the text is written as
+    /// UTF-8 with a carriage return appended, so it appears as if the user
+    /// typed the text and pressed Enter.
+    pub async fn send_text(&mut self, id: &str, text: &str) -> Result<()> {
+        let response = self
+            .request(Request::SendText {
+                id: id.to_string(),
+                text: text.to_string(),
+            })
+            .await?;
+        match response {
+            Response::Ok => Ok(()),
+            Response::Error { message } => anyhow::bail!("Daemon error: {message}"),
+            _ => Ok(()),
+        }
+    }
+
     /// Resize a session's PTY.
     pub async fn resize(&mut self, id: &str, cols: u16, rows: u16) -> Result<()> {
         let response = self

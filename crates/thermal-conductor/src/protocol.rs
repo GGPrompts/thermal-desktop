@@ -51,6 +51,13 @@ pub enum Request {
     /// Send input bytes to a session's PTY.
     SendInput { id: String, data: Vec<u8> },
 
+    /// Send text to a session's PTY, with a trailing `\r` appended automatically.
+    ///
+    /// This is a convenience wrapper over `SendInput` that mirrors what
+    /// `kitty @ send-text` does: encode the text as UTF-8, append `\r` to
+    /// press Enter, and write to the PTY.
+    SendText { id: String, text: String },
+
     /// Request a full grid snapshot for a session.
     GetSessionState { id: String },
 

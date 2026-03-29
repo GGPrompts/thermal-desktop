@@ -615,6 +615,27 @@ impl Daemon {
                 }
             }
 
+            Request::SendText { id, text } => {
+                let sessions = self.sessions.lock();
+                match sessions.get(id) {
+                    Some(session_arc) => {
+                        let session = session_arc.lock();
+                        // Append \r to press Enter, matching kitty @ send-text behavior.
+                        let mut payload = text.as_bytes().to_vec();
+                        payload.push(b'\r');
+                        match session.pty.write(&payload) {
+                            Ok(_) => Response::Ok,
+                            Err(e) => Response::Error {
+                                message: format!("PTY write failed: {e}"),
+                            },
+                        }
+                    }
+                    None => Response::Error {
+                        message: format!("Session not found: {id}"),
+                    },
+                }
+            }
+
             Request::GetSessionState { id } => match self.get_session_state(id) {
                 Some(state) => state,
                 None => Response::Error {

@@ -790,8 +790,6 @@ impl TuiPage for ServicesPage {
         f.render_widget(table, chunks[1]);
 
         // Hints
-        let selected_has_dupes = self.statuses.get(self.selected)
-            .map_or(false, |s| s.duplicate_count > 1);
         let mut hints = vec![
             Span::styled(
                 "Enter/Space",
@@ -805,15 +803,11 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": restart  ", Style::default().fg(TEXT_MUTED)),
-        ];
-        if selected_has_dupes {
-            hints.push(Span::styled(
+            Span::styled(
                 "K",
                 Style::default().fg(SEARING).add_modifier(Modifier::BOLD),
-            ));
-            hints.push(Span::styled(": kill all  ", Style::default().fg(TEXT_MUTED)));
-        }
-        hints.extend([
+            ),
+            Span::styled(": force kill  ", Style::default().fg(TEXT_MUTED)),
             Span::styled(
                 "j/k",
                 Style::default()
@@ -821,7 +815,7 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": navigate", Style::default().fg(TEXT_MUTED)),
-        ]);
+        ];
         if self.selected_is_audio() {
             hints.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
             hints.push(Span::styled(

@@ -356,6 +356,16 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         if stop_reason == "end_turn" || stop_reason == "max_tokens" {
             // Extract final text response
             let text = extract_text_response(&content);
+
+            // Fallback: qwen3 sometimes outputs tool calls as plain text
+            // (e.g. `speak("hello")`) instead of structured tool_calls.
+            // Parse and execute these before returning.
+            if let Some(result) = try_parse_text_tool_calls(&text).await {
+                let mut ctx = state.conversation.lock().await;
+                ctx.add_turn(transcript, &result);
+                return Ok(result);
+            }
+
             // Record the completed turn in conversational context
             let mut ctx = state.conversation.lock().await;
             ctx.add_turn(transcript, &text);
@@ -459,6 +469,100 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         let ollama_results = api::convert_tool_results_for_ollama(&tool_result_msg);
         messages.extend(ollama_results);
     }
+}
+
+/// Fallback parser for when qwen3 outputs tool calls as plain text instead of
+/// structured tool_calls. Matches patterns like `speak("text")`, `read()`,
+/// `route(to="@claude", message="...")`.
+/// Returns Some(result) if any tool calls were found and executed, None otherwise.
+async fn try_parse_text_tool_calls(text: &str) -> Option<String> {
+    let mut results = Vec::new();
+
+    // Parse speak("...") or speak('...')
+    for arg in extract_single_arg_calls(text, "speak") {
+        info!(text = %arg, "fallback: parsed speak() from text output");
+        let input = serde_json::json!({"text": arg});
+        if let Ok(r) = executor::execute_tool("speak", &input).await {
+            results.push(r);
+        }
+    }
+
+    // Parse read()
+    if text.contains("read()") {
+        info!("fallback: parsed read() from text output");
+        let input = serde_json::json!({});
+        if let Ok(r) = executor::execute_tool("read", &input).await {
+            results.push(r);
+        }
+    }
+
+    // Parse route(to="@agent", message="...")
+    if let Some((to, message)) = extract_route_call(text) {
+        info!(to = %to, message = %message, "fallback: parsed route() from text output");
+        let input = serde_json::json!({"to": to, "message": message});
+        if let Ok(r) = executor::execute_tool("route", &input).await {
+            results.push(r);
+        }
+    }
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results.join("; "))
+    }
+}
+
+/// Extract arguments from `funcname("arg")` or `funcname('arg')` patterns.
+fn extract_single_arg_calls(text: &str, func: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let pattern = format!("{func}(");
+    let mut search_from = 0;
+    while let Some(start) = text[search_from..].find(&pattern) {
+        let abs_start = search_from + start + pattern.len();
+        if abs_start >= text.len() {
+            break;
+        }
+        // Skip whitespace, find quote char
+        let rest = text[abs_start..].trim_start();
+        let quote = match rest.chars().next() {
+            Some(q @ ('"' | '\'')) => q,
+            _ => { search_from = abs_start; continue; }
+        };
+        let after_quote = &rest[1..];
+        if let Some(end) = after_quote.find(quote) {
+            results.push(after_quote[..end].to_string());
+        }
+        search_from = abs_start;
+    }
+    results
+}
+
+/// Extract `route(to="@agent", message="...")` from text.
+fn extract_route_call(text: &str) -> Option<(String, String)> {
+    let start = text.find("route(")?;
+    let rest = &text[start + 6..];
+    let close = rest.find(')')?;
+    let args = &rest[..close];
+
+    // Parse to="..." and message="..."
+    let to = extract_kwarg(args, "to")?;
+    let message = extract_kwarg(args, "message")?;
+    Some((to, message))
+}
+
+/// Extract a keyword argument value: `key="value"` or `key='value'`.
+fn extract_kwarg(text: &str, key: &str) -> Option<String> {
+    let patterns = [format!("{key}=\""), format!("{key}='"), format!("{key} = \""), format!("{key} = '")];
+    for pat in &patterns {
+        if let Some(start) = text.find(pat.as_str()) {
+            let quote = pat.chars().last()?;
+            let after = &text[start + pat.len()..];
+            if let Some(end) = after.find(quote) {
+                return Some(after[..end].to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Extract concatenated text from an array of content blocks.

@@ -246,8 +246,8 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
             })
             .await;
 
-            // Send TTS
-            send_tts(&response_text).await;
+            // TTS is handled by the `speak` tool — the model calls it explicitly
+            // when it wants to talk to the user. No automatic TTS here.
 
             let resp = DispatcherResponse {
                 status: "ok".into(),

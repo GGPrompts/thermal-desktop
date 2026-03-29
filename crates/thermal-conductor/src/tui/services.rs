@@ -332,25 +332,61 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
 }
 
 fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> {
+    // When duplicates exist, kill ALL instances — not just one.
+    if status.duplicate_count > 1 {
+        return kill_all_instances(def);
+    }
+
     if let Some(pid) = status.pid {
         // Send SIGTERM.
         match signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Clean up stale socket if the service has one.
+                cleanup_stale_socket(def);
+                Ok(())
+            }
             Err(e) => Err(format!("Failed to kill PID {}: {}", pid, e)),
         }
     } else {
         // No known PID — try pkill as fallback.
-        let (flag, pattern) = if def.binary.len() > 15 {
-            ("-f", format!("(^|/){}", def.binary))
-        } else {
-            ("-x", def.binary.to_string())
-        };
-        let result = Command::new("pkill").arg(flag).arg(&pattern).status();
-        match result {
-            Ok(s) if s.success() => Ok(()),
-            Ok(_) => Err(format!("{} not running", def.binary)),
-            Err(e) => Err(format!("pkill failed: {}", e)),
-        }
+        kill_all_instances(def)
+    }
+}
+
+/// Kill ALL instances of a service via pkill, then clean up stale socket.
+fn kill_all_instances(def: &ServiceDef) -> Result<(), String> {
+    let (flag, pattern) = if def.binary.len() > 15 {
+        ("-f", format!("(^|/){}", def.binary))
+    } else {
+        ("-x", def.binary.to_string())
+    };
+    let result = Command::new("pkill").arg(flag).arg(&pattern).status();
+    cleanup_stale_socket(def);
+    match result {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err(format!("{} not running", def.binary)),
+        Err(e) => Err(format!("pkill failed: {}", e)),
+    }
+}
+
+/// Remove stale Unix socket after stopping a service.
+fn cleanup_stale_socket(def: &ServiceDef) {
+    // Map binary name to socket filename.
+    let sock_name = match def.binary {
+        "thermal-dispatcher" => Some("dispatcher.sock"),
+        "thermal-messages" => Some("messages.sock"),
+        "thermal-audio" => Some("audio.sock"),
+        "thermal-voice" => Some("voice.sock"),
+        _ => None,
+    };
+    if let Some(name) = sock_name {
+        let sock_path = runtime_dir().join(name);
+        let _ = std::fs::remove_file(&sock_path);
+    }
+    // Also clean up pidfile if present.
+    if let PidSource::Pidfile(filename) = &def.pid_source {
+        let pidfile = runtime_dir().join(filename);
+        let _ = std::fs::remove_file(&pidfile);
     }
 }
 
@@ -535,6 +571,51 @@ impl ServicesPage {
             }
         }
     }
+
+    /// Force-kill ALL instances of the selected service (SIGKILL).
+    fn force_kill_selected(&mut self) {
+        let def = &SERVICES[self.selected];
+        let status = &self.statuses[self.selected];
+
+        if !status.running {
+            self.status_msg = Some((format!("{} not running", def.binary), true, Instant::now()));
+            return;
+        }
+
+        let (flag, pattern) = if def.binary.len() > 15 {
+            ("-f", format!("(^|/){}", def.binary))
+        } else {
+            ("-x", def.binary.to_string())
+        };
+        let result = Command::new("pkill")
+            .arg("-9") // SIGKILL
+            .arg(flag)
+            .arg(&pattern)
+            .status();
+
+        // Clean up socket and pidfile.
+        cleanup_stale_socket(def);
+
+        match result {
+            Ok(s) if s.success() => {
+                let count = status.duplicate_count;
+                let msg = if count > 1 {
+                    format!("Force-killed {} ({count} instances)", def.binary)
+                } else {
+                    format!("Force-killed {}", def.binary)
+                };
+                self.status_msg = Some((msg, false, Instant::now()));
+            }
+            Ok(_) => {
+                self.status_msg =
+                    Some((format!("{} already gone", def.binary), false, Instant::now()));
+            }
+            Err(e) => {
+                self.status_msg = Some((format!("pkill -9 failed: {e}"), true, Instant::now()));
+            }
+        }
+        self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
+    }
 }
 
 impl TuiPage for ServicesPage {
@@ -709,6 +790,8 @@ impl TuiPage for ServicesPage {
         f.render_widget(table, chunks[1]);
 
         // Hints
+        let selected_has_dupes = self.statuses.get(self.selected)
+            .map_or(false, |s| s.duplicate_count > 1);
         let mut hints = vec![
             Span::styled(
                 "Enter/Space",
@@ -722,6 +805,15 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": restart  ", Style::default().fg(TEXT_MUTED)),
+        ];
+        if selected_has_dupes {
+            hints.push(Span::styled(
+                "K",
+                Style::default().fg(SEARING).add_modifier(Modifier::BOLD),
+            ));
+            hints.push(Span::styled(": kill all  ", Style::default().fg(TEXT_MUTED)));
+        }
+        hints.extend([
             Span::styled(
                 "j/k",
                 Style::default()
@@ -729,7 +821,7 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": navigate", Style::default().fg(TEXT_MUTED)),
-        ];
+        ]);
         if self.selected_is_audio() {
             hints.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
             hints.push(Span::styled(
@@ -779,6 +871,9 @@ impl TuiPage for ServicesPage {
             }
             KeyCode::Char('r') => {
                 self.restart_selected();
+            }
+            KeyCode::Char('K') => {
+                self.force_kill_selected();
             }
             KeyCode::Char('m') => {
                 if self.selected_is_audio() {

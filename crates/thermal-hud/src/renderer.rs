@@ -352,13 +352,17 @@ impl Renderer {
                 let dot_y = (screen_h - CONTEXT_BAR_HEIGHT) / 2.0 - STATUS_DOT_SIZE / 2.0;
                 rect_quads.push(([dot_x, dot_y, STATUS_DOT_SIZE, STATUS_DOT_SIZE], dot_color));
 
-                // Build tab text: "display_name  ToolName/status"
+                // Build tab text: "ws#:display_name  ToolName/status"
                 let session_label = display_name_for_session(session, &sidecar_names);
+                let ws_prefix = session
+                    .workspace
+                    .map(|ws| format!("{ws}:"))
+                    .unwrap_or_default();
                 let tool_label = session.current_tool.as_deref().unwrap_or("");
                 let tab_text = if !tool_label.is_empty() {
-                    format!("{session_label}  {tool_label}")
+                    format!("{ws_prefix}{session_label}  {tool_label}")
                 } else {
-                    format!("{session_label}  {}", status_label(&session.status))
+                    format!("{ws_prefix}{session_label}  {}", status_label(&session.status))
                 };
 
                 let text_x = dot_x + STATUS_DOT_SIZE + 6.0;
@@ -389,7 +393,7 @@ impl Renderer {
                 // Context % secondary line.
                 let ctx_pct = session.context_percent.unwrap_or(0.0);
                 let ctx_text = format!("ctx {:.0}%", ctx_pct);
-                let mut ctx_buf = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                let mut ctx_buf = Buffer::new(&mut self.font_system, Metrics::new(12.0, 16.0));
                 ctx_buf.set_size(
                     &mut self.font_system,
                     Some((tab_width - TAB_PADDING * 2.0 - STATUS_DOT_SIZE - 6.0).max(50.0)),
@@ -1070,7 +1074,9 @@ fn context_bar_color(pct: f32) -> [f32; 4] {
     }
 }
 
-/// Like `context_bar_color` but with a brighter floor for text readability.
+/// Map context percentage to a text color. High % gets warm/hot tones as a
+/// warning; low-to-mid % uses TEXT_BRIGHT for reliable readability at small
+/// font sizes on dark backgrounds (the progress bar already shows the gradient).
 fn context_text_color(pct: f32) -> [f32; 4] {
     if pct >= 90.0 {
         ThermalPalette::SEARING
@@ -1078,9 +1084,7 @@ fn context_text_color(pct: f32) -> [f32; 4] {
         ThermalPalette::HOT
     } else if pct >= 50.0 {
         ThermalPalette::ACCENT_WARM
-    } else if pct >= 30.0 {
-        ThermalPalette::MILD
     } else {
-        ThermalPalette::ACCENT_COOL // bright blue — readable on dark bg
+        ThermalPalette::TEXT_BRIGHT
     }
 }

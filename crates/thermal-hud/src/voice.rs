@@ -161,14 +161,9 @@ impl VoiceStatePoller {
                     state: VoiceState::Transcribing,
                 }
             }
-            "monitoring" | "wake_word" => {
-                self.result_shown_at = None;
-                HudMode::VoiceActive {
-                    transcript: String::new(),
-                    state: VoiceState::Listening,
-                }
-            }
-            // "muted" or unknown — fall back to agent tabs.
+            // "monitoring" is VAD idle (always-listening background), "muted" is off —
+            // both should show agent tabs, not the voice UI.
+            // "wake_word" is a transient pre-listening state — also show tabs.
             _ => {
                 self.result_shown_at = None;
                 HudMode::AgentTabs

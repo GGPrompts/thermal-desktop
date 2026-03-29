@@ -400,7 +400,7 @@ impl Renderer {
                 ctx_buf.shape_until_scroll(&mut self.font_system, false);
                 let ctx_idx = text_buffers.len();
                 text_buffers.push(ctx_buf);
-                text_placements.push((ctx_idx, text_x, 26.0, ThermalPalette::TEXT_MUTED));
+                text_placements.push((ctx_idx, text_x, 26.0, context_text_color(ctx_pct)));
 
                 // Context % progress bar at the bottom of the tab.
                 let bar_y = screen_h - CONTEXT_BAR_HEIGHT;
@@ -1011,5 +1011,20 @@ fn context_bar_color(pct: f32) -> [f32; 4] {
         ThermalPalette::MILD
     } else {
         ThermalPalette::COOL
+    }
+}
+
+/// Like `context_bar_color` but with a brighter floor for text readability.
+fn context_text_color(pct: f32) -> [f32; 4] {
+    if pct >= 90.0 {
+        ThermalPalette::SEARING
+    } else if pct >= 70.0 {
+        ThermalPalette::HOT
+    } else if pct >= 50.0 {
+        ThermalPalette::ACCENT_WARM
+    } else if pct >= 30.0 {
+        ThermalPalette::MILD
+    } else {
+        ThermalPalette::ACCENT_COOL // bright blue — readable on dark bg
     }
 }

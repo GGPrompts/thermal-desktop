@@ -271,6 +271,8 @@ fn collapse_sessions_by_id(
 
     let mut collapsed: Vec<_> = by_id.into_values().collect();
     collapsed.extend(anonymous);
+    // Stable ordering so UI tab positions don't shuffle every poll cycle.
+    collapsed.sort_by(|a, b| a.session_id.cmp(&b.session_id));
     collapsed
 }
 

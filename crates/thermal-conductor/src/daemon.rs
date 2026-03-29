@@ -60,13 +60,13 @@ struct Session {
 // ── Daemon state ─────────────────────────────────────────────────────────────
 
 /// The session daemon, managing all sessions and client connections.
-struct Daemon {
+pub(crate) struct Daemon {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
     next_id: AtomicU64,
 }
 
 impl Daemon {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
@@ -83,7 +83,7 @@ impl Daemon {
     /// numbering against existing sessions). If `None`, a name is derived
     /// from the shell basename (e.g. "zsh", "bash") or falls back to
     /// "session-N".
-    fn spawn_session(
+    pub(crate) fn spawn_session(
         &self,
         shell: Option<String>,
         cwd: Option<String>,
@@ -484,7 +484,7 @@ impl Daemon {
     }
 
     /// Get a list of all sessions.
-    fn list_sessions(&self) -> Vec<SessionInfo> {
+    pub(crate) fn list_sessions(&self) -> Vec<SessionInfo> {
         let sessions = self.sessions.lock();
         sessions
             .values()
@@ -550,7 +550,7 @@ impl Daemon {
     }
 
     /// Handle a single client request and return the response.
-    fn handle_request(&self, request: &Request) -> Response {
+    pub(crate) fn handle_request(&self, request: &Request) -> Response {
         match request {
             Request::SpawnSession {
                 shell,
@@ -1063,7 +1063,10 @@ pub async fn run_daemon_on(
 /// Run the session daemon.
 ///
 /// This is an async function that runs until interrupted (SIGTERM/SIGINT).
-/// It binds a Unix socket and accepts client connections.
+/// It binds a Unix socket and accepts client connections. It also registers
+/// a D-Bus interface (`org.thermal.Conductor`) on the session bus so that
+/// thermal-bar, thermal-hud, and other components can discover sessions
+/// without a direct Unix socket connection.
 pub async fn run_daemon() -> Result<()> {
     let socket_path = protocol::socket_path();
     info!(path = %socket_path.display(), "Starting session daemon");
@@ -1087,6 +1090,32 @@ pub async fn run_daemon() -> Result<()> {
     info!(path = %socket_path.display(), "Daemon listening");
 
     let daemon = Arc::new(Daemon::new());
+
+    // Register D-Bus interface on the session bus.
+    let dbus_interface = crate::dbus_interface::ConductorInterface::new(Arc::clone(&daemon));
+    let _dbus_conn = match zbus::connection::Builder::session()
+        .and_then(|b| b.name(crate::dbus_interface::BUS_NAME))
+        .and_then(|b| b.serve_at(crate::dbus_interface::OBJECT_PATH, dbus_interface))
+    {
+        Ok(builder) => match builder.build().await {
+            Ok(conn) => {
+                info!(
+                    name = crate::dbus_interface::BUS_NAME,
+                    path = crate::dbus_interface::OBJECT_PATH,
+                    "D-Bus interface registered"
+                );
+                Some(conn)
+            }
+            Err(e) => {
+                warn!("Failed to connect to D-Bus session bus: {e} — running without D-Bus");
+                None
+            }
+        },
+        Err(e) => {
+            warn!("Failed to build D-Bus connection: {e} — running without D-Bus");
+            None
+        }
+    };
 
     // Install shutdown handler.
     let shutdown = tokio::signal::ctrl_c();

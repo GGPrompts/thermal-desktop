@@ -9,6 +9,7 @@ pub(crate) mod backend;
 mod client;
 mod context_environment;
 mod daemon;
+mod dbus_interface;
 mod grid_renderer;
 mod inject;
 mod input;

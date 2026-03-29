@@ -1,0 +1,14 @@
+[Unit]
+Description=Thermal Conductor session daemon (PTY ownership + D-Bus)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.cargo/bin/thermal-conductor daemon
+Restart=on-failure
+RestartSec=2s
+# Propagate the Wayland environment so child shells inherit WAYLAND_DISPLAY etc.
+Environment="PATH=/usr/bin:/bin:%h/.cargo/bin"
+
+[Install]
+WantedBy=graphical-session.target

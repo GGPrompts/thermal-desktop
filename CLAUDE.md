@@ -16,7 +16,7 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio, messages)
 - **Agent message bus**: thermal-messages daemon — JSONL over Unix socket, ring buffer with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends
 - **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components; `/tmp/thermal-voice-state.json` for voice state + audio level
-- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (local Ollama qwen3:8b) → tool execution
+- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (local Ollama qwen3:8b) → speak/read/route (delegates actions to agents)
 - **Voice Activity Detection**: Energy-based VAD with hysteresis (silero-vad-rust planned)
 - **LLM dispatch**: Local Ollama (qwen3:8b) — no API key required. Model configurable via `THERMAL_DISPATCHER_MODEL` env var
 
@@ -24,7 +24,7 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 thermal-conductor has two primary modes and one optional backend:
 
 1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 4 tabs — Sessions (3-panel: agent list + live kitty preview + @-mention chat with bus routing), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management with auto-conflict resolution for shared-binary services), Messages (read-only message bus log).
-2. **GPU terminal** (`thermal-conductor window`): Standalone wgpu-rendered terminal with alacritty_terminal backend and agent overlay HUD (badge + timeline bar).
+2. **GPU terminal** (`thermal-conductor window`): wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from session daemon). Agent overlay HUD (badge + timeline bar).
 3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Not required when kitty is available.
 
 The TUI hub uses a pluggable backend layer to manage terminal sessions:
@@ -41,15 +41,17 @@ Backend is selected via `--backend=auto|kitty|daemon` (default: `auto`). In `aut
 #### Sessions Tab (3-Panel Layout)
 The Sessions tab is designed as a command center for a vertical monitor:
 - **Top**: Agent session list with model-based display names (opus, sonnet, gpt5.4mini instead of hex IDs), status badges, context %, workspace number. Single-select focuses the agent's kitty window (workspace switch). Multi-select (Space/Ctrl+A) for broadcast.
-- **Middle**: Live terminal preview via `kitty @ get-text --extent=screen` of the selected session, refreshed every 500ms. PgUp/PgDn/Home/End to scroll.
-- **Bottom**: Chat input with @-mention routing (@dispatcher, @claude, @system, etc.) and response display via message bus subscriber. Tab-triggered autocomplete popup for live agents. Command history (up/down arrows). Press 's' on a session to save it as a spawn profile.
+- **Middle**: Live terminal preview via `kitty @ get-text --extent=screen` of the selected session, refreshed every 500ms. PgUp/PgDn/Home/End to scroll. Mouse scroll when preview is focused.
+- **Bottom**: Chat input with @-mention routing (@dispatcher, @claude, @system, etc.) and response display via message bus subscriber. @-mentions take priority over highlighted session routing. Tab-triggered autocomplete popup for live agents. Command history (up/down arrows). Press 's' on a session to save it as a spawn profile.
+
+**Panel focus**: Tri-state focus system (`FocusedPanel` enum: AgentList/Preview/Chat). Tab/Shift+Tab cycles panels, click-to-focus, Esc returns to AgentList. Focused panel has accent-colored border.
 
 ### Roadmap: GPU AI Terminal
 Evolving toward a fully integrated GPU terminal with native agent orchestration:
 
 - **Phase 1** (done): GPU terminal window rendering a single PTY via alacritty_terminal + wgpu
 - **Phase 2**: Multi-pane layout with agent-aware overlays
-- **Phase 3** (partial): Session daemon for persistence without tmux/kitty
+- **Phase 3** (done): Session daemon streaming to GPU terminal — daemon broadcasts ScreenUpdate diffs, GPU window consumes via `spawn_daemon_reader_task()`
 - **Phase 4**: AI-native features (semantic scrollback, context heatmaps, smart routing)
 
 ### Components
@@ -66,7 +68,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-audio** | Production | TTS daemon — 12-voice pool, per-agent voices, state transition alerts (edge-tts + Unix socket API) |
 | **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all agent sessions (Claude/Codex/Copilot) with color-coded status |
 | **thermal-voice** | Production | Voice input daemon — always-listening VAD mode with PTT override, cpal audio capture, RMS level export, local Whisper STT, Unix socket API |
-| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via local Ollama (qwen3:8b), trust-tier gated execution, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
+| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via local Ollama (qwen3:8b) with 3-tool schema (speak/read/route), delegates all actions to agents, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
 | **thermal-messages** | Production | Agent message bus daemon — JSONL over Unix socket, ring buffer (500 msgs) with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends, optional JSONL persistence, kitty live-session routing with one-shot fallback |
 | **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — pane capture (kitty @ get-text), click, type, window mgmt, system metrics (JSON-RPC 2.0 over stdio) |
 | **thermal-face** | Prototype | GPU-rendered SDF avatar with thermal palette — animated face in layer-shell overlay, auto-blink, audio-driven mouth sync (planned) |
@@ -82,7 +84,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 - **Voice state** (`/tmp/thermal-voice-state.json`): Written by thermal-voice with `state` (muted/monitoring/listening/processing), optional `label`, and `level` (RMS energy 0.0–1.0, updated ~5Hz). Read by thermal-bar for the voice level meter.
 - **Pidfile guards**: Daemons (thermal-voice, thermal-dispatcher) use pidfiles in `/run/user/$UID/thermal/` for single-instance enforcement.
 - **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes). Sessions can be saved as profiles via 's' hotkey.
-- **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution. Used by both thermal-dispatcher and thermal-messages routing.
+- **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution. Used by thermal-messages routing (dispatcher delegates all actions to agents via route).
 - **Display name registry** (`sessions.json` sidecar): Maps session_id → display_name (opus, sonnet-2, gpt5.4mini). Dedup numbering for multiple sessions with same model. Used by TUI and message bus for @-mention routing.
 
 ## Color Palette
@@ -130,7 +132,7 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 ## Known Issues
 - **thermal-lock on NVIDIA**: GPU context clash when kitty (OpenGL/Vulkan) and thermal-lock (wgpu) compete for GPU. Surface format fix applied (queries capabilities instead of hardcoding Bgra8UnormSrgb), but still disabled in Hyprland config pending further testing.
 - **thermal-launch**: Functional but fuzzy matching and reticle UI need refinement.
-- **thermal-conductor GPU window**: Runs in standalone mode only (no connection to kitty or daemon backends); agent overlay HUD is decorative until backend streaming is implemented.
+- **thermal-conductor GPU window**: Supports standalone mode and daemon client mode (`SessionMode::Client` streams from `thc daemon`). Agent overlay HUD is decorative. Daemon streaming is implemented but needs end-to-end testing.
 - **NVIDIA DPMS resume** (therm-uqay): After 1-2hr AFK, terminals could become unresponsive. Mitigated: hypridle now uses brightness 0 instead of DPMS off, `NVD_BACKEND=direct` added, and thermal-wallpaper/bar/screensaver have non-fatal `conn.flush()` + screensaver has 5min watchdog for keyboard grab release.
 
 ## Voice Pipeline
@@ -140,9 +142,10 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 thermal-voice (cpal + whisper-cpp STT)
     ├─ VAD mode: speech → dispatcher socket → Ollama qwen3:8b → tool execution
     └─ PTT mode: speech → wtype at cursor + clipboard + dispatcher
-thermal-dispatcher (Ollama qwen3:8b, local, no API key)
-    ├─ send_message tool → thermal-messages bus → @claude/@codex/@planner/@system
-    └─ direct tools → thermal-commander (trust-tier gated)
+thermal-dispatcher (Ollama qwen3:8b, local, no API key, 3 tools only)
+    ├─ speak(text) → thermal-audio socket → TTS
+    ├─ read() → thermal-commander capture_pane → LLM summarizes
+    └─ route(to, msg) → thermal-messages bus → @claude/@codex/@planner/@system
 thermal-messages (agent message bus)
     ├─ @claude/@codex → kitty live session (via send-text) or one-shot CLI fallback
     ├─ @system → thermal-commander MCP (trust-tier gated)

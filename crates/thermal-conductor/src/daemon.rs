@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 use crate::kitty::{
     SidecarEntry, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
 };
+use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
     self, CellData, ColorData, CursorData, DirtyCellData, Request, Response, SessionInfo,
 };
@@ -700,6 +701,50 @@ impl Daemon {
             session.update_tx.subscribe()
         })
     }
+
+    /// Collect current session state for persistence.
+    ///
+    /// Snapshots all active sessions into a `PersistedState` that can be
+    /// written to disk on graceful shutdown.
+    pub(crate) fn collect_persisted_state(&self) -> PersistedState {
+        let sessions = self.sessions.lock();
+        let persisted_sessions: Vec<PersistedSession> = sessions
+            .values()
+            .map(|s| {
+                let session = s.lock();
+                let term_handle = session.terminal.term_handle();
+                let term = term_handle.lock();
+                use alacritty_terminal::grid::Dimensions;
+                let cols = term.columns() as u16;
+                let rows = term.screen_lines() as u16;
+                drop(term);
+
+                let created_secs = session
+                    .created_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                PersistedSession {
+                    id: session.id.clone(),
+                    name: session.name.clone(),
+                    shell_pid: session.pty.child_pid().as_raw(),
+                    shell_command: session.shell_command.clone(),
+                    cwd: session.cwd.clone(),
+                    cols,
+                    rows,
+                    title: session.title.lock().clone(),
+                    created_at: created_secs,
+                    worktree_path: session.worktree_path.clone(),
+                }
+            })
+            .collect();
+
+        PersistedState {
+            saved_at: now_epoch(),
+            sessions: persisted_sessions,
+        }
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -1056,6 +1101,18 @@ pub async fn run_daemon_on(
         }
     }
 
+    // Persist session state on shutdown.
+    let state = daemon.collect_persisted_state();
+    if !state.sessions.is_empty() {
+        match persist::save_state(&state) {
+            Ok(()) => info!(
+                sessions = state.sessions.len(),
+                "Session state persisted for recovery"
+            ),
+            Err(e) => error!("Failed to persist session state: {e}"),
+        }
+    }
+
     info!("Daemon shut down");
     Ok(())
 }
@@ -1090,6 +1147,48 @@ pub async fn run_daemon() -> Result<()> {
     info!(path = %socket_path.display(), "Daemon listening");
 
     let daemon = Arc::new(Daemon::new());
+
+    // ── Session recovery from previous daemon instance ──────────────────
+    match persist::recover_sessions() {
+        Ok(recovered) if !recovered.is_empty() => {
+            let alive_count = recovered.iter().filter(|r| r.shell_alive).count();
+            let dead_count = recovered.len() - alive_count;
+            info!(
+                total = recovered.len(),
+                alive = alive_count,
+                dead = dead_count,
+                "Recovered sessions from previous daemon"
+            );
+
+            for r in &recovered {
+                if r.shell_alive {
+                    // The shell is still running, but we've lost the PTY master fd.
+                    // Log as orphaned — future versions can re-adopt via fd passing.
+                    warn!(
+                        id = %r.session.id,
+                        name = %r.session.name,
+                        pid = r.session.shell_pid,
+                        "Orphaned session: shell alive but PTY master lost — \
+                         cannot re-attach (run `kill {}` to clean up)",
+                        r.session.shell_pid
+                    );
+                } else {
+                    info!(
+                        id = %r.session.id,
+                        name = %r.session.name,
+                        pid = r.session.shell_pid,
+                        "Previous session shell has exited — no recovery needed"
+                    );
+                }
+            }
+        }
+        Ok(_) => {
+            // No state file or empty — fresh start.
+        }
+        Err(e) => {
+            warn!("Failed to recover sessions from previous daemon: {e}");
+        }
+    }
 
     // Register D-Bus interface on the session bus.
     let dbus_interface = crate::dbus_interface::ConductorInterface::new(Arc::clone(&daemon));
@@ -1140,6 +1239,21 @@ pub async fn run_daemon() -> Result<()> {
                 break;
             }
         }
+    }
+
+    // ── Persist session state before shutdown ─────────────────────────────
+    let state = daemon.collect_persisted_state();
+    if !state.sessions.is_empty() {
+        match persist::save_state(&state) {
+            Ok(()) => info!(
+                sessions = state.sessions.len(),
+                "Session state persisted for recovery"
+            ),
+            Err(e) => error!("Failed to persist session state: {e}"),
+        }
+    } else {
+        // No sessions to save — clean up any stale state file.
+        let _ = persist::remove_state_file();
     }
 
     // Clean up socket.

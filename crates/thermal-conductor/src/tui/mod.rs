@@ -115,7 +115,7 @@ impl App {
         let poller = ClaudeStatePoller::new()?;
 
         let pages: Vec<Box<dyn TuiPage>> = vec![
-            Box::new(SessionsPage::new()),
+            Box::new(SessionsPage::new(backend_pref)),
             Box::new(ProfilesPage::new(backend_pref)),
             Box::new(ServicesPage::new()),
             Box::new(ChatPage::new()),

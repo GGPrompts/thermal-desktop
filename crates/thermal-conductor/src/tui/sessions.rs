@@ -22,6 +22,9 @@ use thermal_core::message::{AgentId, Message, MessageType};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
 
 use crate::agent_timeline::{AgentTimeline, ToolCategory};
+use crate::backend::BackendPreference;
+use crate::client::DaemonClient;
+use crate::protocol::{CellData, Response};
 use crate::profiles_config::{Profile, load_profiles, save_profiles};
 
 use super::TuiPage;
@@ -365,6 +368,97 @@ fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon cell grid → ratatui Line conversion
+// ---------------------------------------------------------------------------
+
+/// Alacritty terminal cell flag bits (from alacritty_terminal::term::cell::Flags).
+const FLAG_INVERSE: u16   = 0b0000_0000_0000_0001;
+const FLAG_BOLD: u16      = 0b0000_0000_0000_0010;
+const FLAG_ITALIC: u16    = 0b0000_0000_0000_0100;
+const FLAG_UNDERLINE: u16 = 0b0000_0000_0000_1000;
+const FLAG_DIM: u16       = 0b0000_0000_1000_0000;
+const FLAG_STRIKEOUT: u16 = 0b0000_0010_0000_0000;
+
+/// Convert a flat grid of `CellData` (row-major, length = cols * rows) into
+/// styled ratatui `Line`s suitable for the preview pane.
+fn cells_to_lines(cells: &[CellData], cols: usize) -> Vec<Line<'static>> {
+    if cols == 0 {
+        return Vec::new();
+    }
+
+    cells
+        .chunks(cols)
+        .map(|row_cells| {
+            // Build spans by coalescing runs of cells with the same style.
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut run_text = String::new();
+            let mut run_style: Option<Style> = None;
+
+            for cell in row_cells {
+                let style = cell_style(cell);
+                if run_style.as_ref() == Some(&style) {
+                    run_text.push(cell.ch);
+                } else {
+                    if let Some(prev_style) = run_style.take() {
+                        spans.push(Span::styled(
+                            std::mem::take(&mut run_text),
+                            prev_style,
+                        ));
+                    }
+                    run_text.push(cell.ch);
+                    run_style = Some(style);
+                }
+            }
+            // Flush the last run.
+            if let Some(style) = run_style {
+                spans.push(Span::styled(run_text, style));
+            }
+
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Map a single `CellData` to a ratatui `Style`, applying RGB colors and
+/// flag-based modifiers.
+fn cell_style(cell: &CellData) -> Style {
+    let flags = cell.flags;
+
+    let (fg_r, fg_g, fg_b, bg_r, bg_g, bg_b) = if flags & FLAG_INVERSE != 0 {
+        // Inverse: swap fg and bg.
+        (cell.bg.r, cell.bg.g, cell.bg.b, cell.fg.r, cell.fg.g, cell.fg.b)
+    } else {
+        (cell.fg.r, cell.fg.g, cell.fg.b, cell.bg.r, cell.bg.g, cell.bg.b)
+    };
+
+    let mut style = Style::default()
+        .fg(Color::Rgb(fg_r, fg_g, fg_b))
+        .bg(Color::Rgb(bg_r, bg_g, bg_b));
+
+    let mut modifier = Modifier::empty();
+    if flags & FLAG_BOLD != 0 {
+        modifier |= Modifier::BOLD;
+    }
+    if flags & FLAG_ITALIC != 0 {
+        modifier |= Modifier::ITALIC;
+    }
+    if flags & FLAG_UNDERLINE != 0 {
+        modifier |= Modifier::UNDERLINED;
+    }
+    if flags & FLAG_DIM != 0 {
+        modifier |= Modifier::DIM;
+    }
+    if flags & FLAG_STRIKEOUT != 0 {
+        modifier |= Modifier::CROSSED_OUT;
+    }
+    if !modifier.is_empty() {
+        style = style.add_modifier(modifier);
+    }
+
+    style
+}
+
+// ---------------------------------------------------------------------------
 // Messages socket path
 // ---------------------------------------------------------------------------
 
@@ -694,8 +788,8 @@ pub struct SessionsPage {
     chat_saved_input: String,
 
     // -- Preview pane --
-    /// Cached lines from last `kitty @ get-text` call.
-    preview_content: Vec<String>,
+    /// Cached styled lines from last preview fetch (kitty or daemon).
+    preview_content: Vec<Line<'static>>,
     /// Scroll offset for PgUp/PgDn within the preview pane.
     preview_scroll: usize,
     /// True when user has manually scrolled — suppresses auto-scroll to bottom.
@@ -708,6 +802,12 @@ pub struct SessionsPage {
     kitty_window_map: HashMap<String, (String, i64)>,
     /// Last time we refreshed the kitty window map.
     last_kitty_ls: Option<Instant>,
+    /// Backend preference — determines whether to use kitty or daemon for preview.
+    backend_pref: BackendPreference,
+    /// Cached daemon cwd → daemon session ID mapping.
+    daemon_session_map: HashMap<String, String>,
+    /// Last time we refreshed the daemon session map.
+    last_daemon_ls: Option<Instant>,
 
     // -- Focus throttle --
     /// Last time we issued a kitty focus-window for single-select navigation.
@@ -737,7 +837,7 @@ pub struct SessionsPage {
 }
 
 impl SessionsPage {
-    pub fn new() -> Self {
+    pub fn new(backend_pref: BackendPreference) -> Self {
         Self {
             sessions: Vec::new(),
             display_rows: Vec::new(),
@@ -765,6 +865,9 @@ impl SessionsPage {
             last_preview_update: None,
             kitty_window_map: HashMap::new(),
             last_kitty_ls: None,
+            backend_pref,
+            daemon_session_map: HashMap::new(),
+            last_daemon_ls: None,
             last_focus_time: None,
             autocomplete_items: Vec::new(),
             autocomplete_index: 0,
@@ -1230,10 +1333,19 @@ impl SessionsPage {
 
     // -- Preview pane --
 
-    /// Fetch terminal content from the selected session's kitty window via
-    /// `kitty @ get-text`. Throttled to at most once every 500ms.
+    /// Build a diagnostic line for the preview pane.
+    fn preview_diagnostic(msg: &str) -> Vec<Line<'static>> {
+        vec![Line::from(Span::styled(
+            msg.to_string(),
+            Style::default().fg(TEXT_MUTED),
+        ))]
+    }
+
+    /// Fetch terminal content for the selected session's preview pane.
+    /// Uses kitty `get-text` for the kitty backend, or `DaemonClient::get_session_state`
+    /// for the daemon backend. Throttled to at most once every 500ms.
     fn fetch_preview(&mut self) {
-        // Determine the currently selected session's PID.
+        // Determine the currently selected session's working directory.
         let selected = self.table_state.selected().and_then(|i| {
             self.display_rows.get(i).map(|row| {
                 let cwd = row.session.working_dir.clone().unwrap_or_default();
@@ -1245,16 +1357,16 @@ impl SessionsPage {
             Some((id, cwd)) if !cwd.is_empty() => (id, cwd),
             Some((id, _)) => {
                 // Session selected but no working_dir — show diagnostic.
-                self.preview_content = vec![
-                    format!("(no working_dir for session {})", &id[..id.len().min(12)]),
-                ];
+                self.preview_content = Self::preview_diagnostic(
+                    &format!("(no working_dir for session {})", &id[..id.len().min(12)]),
+                );
                 self.preview_scroll = self.preview_content.len();
                 self.last_preview_session = Some(id);
                 return;
             }
             _ => {
                 self.preview_content =
-                    vec!["(select a session with arrow keys)".to_string()];
+                    Self::preview_diagnostic("(select a session with arrow keys)");
                 self.preview_scroll = self.preview_content.len();
                 self.last_preview_session = None;
                 return;
@@ -1279,19 +1391,35 @@ impl SessionsPage {
         }
         self.last_preview_update = Some(Instant::now());
 
-        // Resolve the kitty (socket, window_id) for this cwd by scanning all
-        // kitty instances. Then fetch text with `kitty @ --to <socket> get-text`.
-        let resolved = self.resolve_kitty_window(&cwd);
+        // Try daemon preview first for Daemon or Auto backends.
+        match self.backend_pref {
+            BackendPreference::Daemon => {
+                self.fetch_preview_daemon(&cwd);
+                return;
+            }
+            BackendPreference::Auto => {
+                // Try kitty first, fall back to daemon.
+                if self.fetch_preview_kitty(&cwd) {
+                    return;
+                }
+                self.fetch_preview_daemon(&cwd);
+                return;
+            }
+            BackendPreference::Kitty => {
+                self.fetch_preview_kitty(&cwd);
+            }
+        }
+    }
+
+    /// Fetch preview via `kitty @ get-text`. Returns `true` if a kitty window was
+    /// found (regardless of whether the fetch succeeded), `false` if no window
+    /// was matched (caller should try daemon fallback).
+    fn fetch_preview_kitty(&mut self, cwd: &str) -> bool {
+        let resolved = self.resolve_kitty_window(cwd);
 
         let (socket, window_id) = match resolved {
             Some(pair) => pair,
-            None => {
-                self.preview_content = vec![
-                    format!("(no kitty window found for cwd: {cwd})"),
-                ];
-                self.preview_scroll = self.preview_content.len();
-                return;
-            }
+            None => return false,
         };
 
         let match_arg = format!("id:{window_id}");
@@ -1302,14 +1430,121 @@ impl SessionsPage {
         match result {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout);
-                self.preview_content = text.lines().map(|l| l.to_string()).collect();
+                self.preview_content = text
+                    .lines()
+                    .map(|l| {
+                        Line::from(Span::styled(
+                            l.to_string(),
+                            Style::default().fg(TEXT_MUTED),
+                        ))
+                    })
+                    .collect();
                 if !self.preview_pinned {
                     self.preview_scroll = self.preview_content.len();
                 }
             }
             _ => {
-                self.preview_content = vec![format!("(preview failed for kitty window {window_id})")];
+                self.preview_content = Self::preview_diagnostic(
+                    &format!("(preview failed for kitty window {window_id})"),
+                );
                 self.preview_scroll = self.preview_content.len();
+            }
+        }
+        true
+    }
+
+    /// Fetch preview via `DaemonClient::get_session_state`. Uses a small
+    /// tokio runtime (same pattern as ProfilesPage spawn). Resolves daemon
+    /// session by matching cwd against the daemon session list.
+    fn fetch_preview_daemon(&mut self, cwd: &str) {
+        // Refresh daemon session map every 3 seconds.
+        let stale = self
+            .last_daemon_ls
+            .map(|t| t.elapsed() >= std::time::Duration::from_secs(3))
+            .unwrap_or(true);
+
+        if stale {
+            self.last_daemon_ls = Some(Instant::now());
+            self.refresh_daemon_session_map();
+        }
+
+        let daemon_id = match self.daemon_session_map.get(cwd) {
+            Some(id) => id.clone(),
+            None => {
+                self.preview_content = Self::preview_diagnostic(
+                    &format!("(no daemon session for cwd: {cwd})"),
+                );
+                self.preview_scroll = self.preview_content.len();
+                return;
+            }
+        };
+
+        // Fetch session state via a short-lived tokio runtime.
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => {
+                self.preview_content = Self::preview_diagnostic("(failed to create async runtime)");
+                self.preview_scroll = self.preview_content.len();
+                return;
+            }
+        };
+
+        let result = rt.block_on(async {
+            let mut client = match DaemonClient::connect().await? {
+                Some(c) => c,
+                None => anyhow::bail!("daemon not running"),
+            };
+            client.get_session_state(&daemon_id).await
+        });
+
+        match result {
+            Ok(Response::SessionState { cols, cells, .. }) => {
+                self.preview_content = cells_to_lines(&cells, cols as usize);
+                if !self.preview_pinned {
+                    self.preview_scroll = self.preview_content.len();
+                }
+            }
+            Ok(_) => {
+                self.preview_content =
+                    Self::preview_diagnostic("(unexpected daemon response)");
+                self.preview_scroll = self.preview_content.len();
+            }
+            Err(e) => {
+                self.preview_content = Self::preview_diagnostic(
+                    &format!("(daemon preview error: {})", e),
+                );
+                self.preview_scroll = self.preview_content.len();
+            }
+        }
+    }
+
+    /// Refresh the daemon cwd → session ID map by listing all daemon sessions.
+    fn refresh_daemon_session_map(&mut self) {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return,
+        };
+
+        let sessions = rt.block_on(async {
+            let mut client = match DaemonClient::connect().await {
+                Ok(Some(c)) => c,
+                _ => return Vec::new(),
+            };
+            client.list_sessions().await.unwrap_or_default()
+        });
+
+        self.daemon_session_map.clear();
+        for info in sessions {
+            if info.is_alive && !info.cwd.is_empty() {
+                self.daemon_session_map
+                    .entry(info.cwd)
+                    .or_insert(info.id);
             }
         }
     }
@@ -1847,10 +2082,7 @@ impl TuiPage for SessionsPage {
                 let total = self.preview_content.len();
                 let end = self.preview_scroll.max(1).min(total);
                 let start = end.saturating_sub(inner_height);
-                let visible_lines: Vec<Line> = self.preview_content[start..end]
-                    .iter()
-                    .map(|l| Line::from(Span::styled(l.as_str(), Style::default().fg(TEXT_MUTED))))
-                    .collect();
+                let visible_lines: Vec<Line> = self.preview_content[start..end].to_vec();
 
                 let scroll_indicator = if total > inner_height {
                     let pct = if total == 0 {
@@ -3087,6 +3319,9 @@ mod tests {
             last_preview_update: None,
             kitty_window_map: HashMap::new(),
             last_kitty_ls: None,
+            backend_pref: BackendPreference::Auto,
+            daemon_session_map: HashMap::new(),
+            last_daemon_ls: None,
             last_focus_time: None,
         }
     }

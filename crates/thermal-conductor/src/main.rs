@@ -25,6 +25,7 @@ mod window;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 
@@ -100,6 +101,16 @@ enum Commands {
     Audio {
         #[command(subcommand)]
         action: AudioAction,
+    },
+
+    /// Speak text via the running TTS daemon (thermal-audio)
+    Say {
+        /// Text to speak
+        text: String,
+
+        /// Voice name (e.g. en-US-GuyNeural, en-GB-SoniaNeural)
+        #[arg(short, long)]
+        voice: Option<String>,
     },
 
     /// Launch the GPU-rendered terminal window
@@ -180,6 +191,7 @@ fn main() -> Result<()> {
                 Commands::List { json } => cmd_list(json, backend_pref).await,
                 Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
+                Commands::Say { text, voice } => cmd_say(text, voice).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
@@ -563,6 +575,45 @@ async fn cmd_audio(action: AudioAction) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// Speak text via the running thermal-audio daemon's Unix socket.
+async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
+    let uid = nix::unistd::getuid().as_raw();
+    let sock_path = format!("/run/user/{uid}/thermal/audio.sock");
+
+    let stream = tokio::net::UnixStream::connect(&sock_path)
+        .await
+        .with_context(|| format!("cannot connect to audio daemon at {sock_path} — is thermal-audio running?"))?;
+
+    let mut request = serde_json::json!({
+        "action": "tts",
+        "text": text,
+    });
+    if let Some(v) = voice {
+        request["voice"] = serde_json::Value::String(v);
+    }
+
+    let (reader, mut writer) = stream.into_split();
+    let mut payload = serde_json::to_string(&request)?;
+    payload.push('\n');
+    writer.write_all(payload.as_bytes()).await?;
+    writer.flush().await?;
+
+    // Read ack
+    let mut buf_reader = tokio::io::BufReader::new(reader);
+    let mut response = String::new();
+    buf_reader.read_line(&mut response).await?;
+
+    let parsed: serde_json::Value = serde_json::from_str(response.trim()).unwrap_or_default();
+    if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
+        // Silent success
+    } else {
+        let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        bail!("TTS failed: {err}");
+    }
+
     Ok(())
 }
 

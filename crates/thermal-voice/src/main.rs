@@ -566,14 +566,6 @@ async fn dispatch_to_dispatcher(transcript: String) {
     }
 }
 
-/// to thermal-audio for TTS. Runs as a background task — does not block
-/// the socket response so the caller gets the transcript immediately.
-fn spawn_claude_dispatch(transcript: String) {
-    tokio::spawn(async move {
-        dispatch_to_claude(&transcript).await;
-    });
-}
-
 /// Run `claude -p "{transcript}"`, send response to TTS, update state.
 async fn dispatch_to_claude(transcript: &str) {
     write_state(VoiceState::Processing, Some("dispatching"));
@@ -1539,7 +1531,6 @@ async fn run_listen_daemon(
                             "VAD: speech ended ({:.1}s buffered)",
                             speech_buffer.len() as f64 / native_rate as f64
                         );
-                        current_voice_state = VoiceState::Processing;
                         write_state(VoiceState::Processing, Some("transcribing"));
 
                         // Choose transcription path: streaming or batch

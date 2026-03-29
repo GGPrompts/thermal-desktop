@@ -38,7 +38,7 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
@@ -1204,6 +1204,7 @@ impl ConductorWindow {
     }
 
     /// Render a frame: clear to BG, then render the terminal grid.
+    // TODO: [code-review] extract render_terminal_grid, render_overlays, render_hud sub-methods
     fn render_frame(&mut self) {
         let output = match self.wgpu.surface.get_current_texture() {
             Ok(t) => t,

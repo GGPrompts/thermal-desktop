@@ -64,6 +64,7 @@ pub struct SidecarData {
 impl SidecarData {
     /// Look up a session by its display name (e.g. "opus", "sonnet-2").
     /// Returns the first entry whose `display_name` matches (case-sensitive).
+    #[cfg(test)]
     pub fn find_by_display_name(&self, name: &str) -> Option<&SidecarEntry> {
         self.sessions
             .iter()
@@ -471,8 +472,7 @@ pub async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'st
 
 /// Add an entry to the sidecar (locked read-modify-write).
 /// If the entry has no `display_name` and a `model_display_base` is provided,
-/// a unique display name will be assigned. Use [`sidecar_upsert_display_name`]
-/// to assign/update display names on existing entries.
+/// a unique display name will be assigned.
 #[allow(dead_code)]
 async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
     sidecar_locked_update(move |data| {
@@ -482,21 +482,6 @@ async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
     .await
 }
 
-/// Assign or update the display name for an existing sidecar entry.
-///
-/// Reads the current sidecar under lock, derives a unique display name from
-/// `model_display_base`, and writes it back. No-op if the session is not found.
-pub async fn sidecar_upsert_display_name(session_id: &str, model_display_base: &str) -> Result<()> {
-    let sid = session_id.to_string();
-    let base = model_display_base.to_string();
-    sidecar_locked_update(move |data| {
-        let name = assign_display_name(&base, &data.sessions, Some(&sid));
-        if let Some(entry) = data.sessions.iter_mut().find(|e| e.session_id == sid) {
-            entry.display_name = Some(name);
-        }
-    })
-    .await
-}
 
 /// Remove an entry from the sidecar by session ID (locked read-modify-write).
 pub async fn sidecar_remove(id: &str) -> Result<()> {

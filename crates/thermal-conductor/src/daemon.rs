@@ -84,6 +84,7 @@ impl Daemon {
     /// numbering against existing sessions). If `None`, a name is derived
     /// from the shell basename (e.g. "zsh", "bash") or falls back to
     /// "session-N".
+    // TODO: [code-review] decompose into pty_setup, event_relay, update_broadcaster, sidecar_write helpers
     pub(crate) fn spawn_session(
         &self,
         shell: Option<String>,

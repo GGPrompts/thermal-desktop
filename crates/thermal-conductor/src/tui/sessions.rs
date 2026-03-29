@@ -548,17 +548,6 @@ const VALID_MENTION_TARGETS: &[&str] = &[
     "system", "claude", "codex", "planner", "user", "dispatcher",
 ];
 
-/// Parse an @-mention from chat input text.
-///
-/// Accepts both static agent types (@claude, @system, @dispatcher, etc.) and
-/// live session display names (@opus, @sonnet-2, @gpt5.4mini, etc.).
-/// Display names are resolved by checking against the provided session list.
-///
-/// Returns `(Option<AgentId>, cleaned_content)`.
-fn parse_at_mention(text: &str) -> (Option<AgentId>, String) {
-    parse_at_mention_with_sessions(text, &[])
-}
-
 /// Parse @-mention with live session display names for resolution.
 fn parse_at_mention_with_sessions(
     text: &str,
@@ -3550,6 +3539,11 @@ mod tests {
     }
 
     // ── parse_at_mention ──────────────────────────────────────────────────────
+
+    /// Test-only wrapper: calls parse_at_mention_with_sessions with no sessions.
+    fn parse_at_mention(text: &str) -> (Option<AgentId>, String) {
+        parse_at_mention_with_sessions(text, &[])
+    }
 
     #[test]
     fn parse_at_mention_dispatcher_with_content() {

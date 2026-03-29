@@ -1084,17 +1084,3 @@ fn context_bar_color(pct: f32) -> [f32; 4] {
     }
 }
 
-/// Map context percentage to a text color. High % gets warm/hot tones as a
-/// warning; low-to-mid % uses TEXT_BRIGHT for reliable readability at small
-/// font sizes on dark backgrounds (the progress bar already shows the gradient).
-fn context_text_color(pct: f32) -> [f32; 4] {
-    if pct >= 90.0 {
-        ThermalPalette::SEARING
-    } else if pct >= 70.0 {
-        ThermalPalette::HOT
-    } else if pct >= 50.0 {
-        ThermalPalette::ACCENT_WARM
-    } else {
-        ThermalPalette::TEXT_BRIGHT
-    }
-}

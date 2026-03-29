@@ -569,10 +569,10 @@ fn execute_click_action(action: &ClickAction) {
             let sock_path = format!("{runtime_dir}/thermal/voice.sock");
             // Fire-and-forget: try to connect and send the toggle command.
             // If the socket doesn't exist (daemon not running), silently ignore.
-            std::thread::spawn(move || {
-                use std::io::Write;
-                if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
-                    let _ = stream.write_all(b"toggle\n");
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                if let Ok(mut stream) = tokio::net::UnixStream::connect(&sock_path).await {
+                    let _ = stream.write_all(b"toggle\n").await;
                 }
             });
         }

@@ -27,7 +27,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
         WaylandSurface,
@@ -1770,7 +1770,16 @@ impl ConductorWindow {
     }
 
     /// Open a URL via `xdg-open` (spawned detached, non-blocking).
+    /// Only http:// and https:// URIs are allowed — other schemes (file://,
+    /// javascript:, data:, etc.) are rejected to prevent local file access
+    /// and code execution via crafted terminal hyperlinks.
     fn open_url(&self, url: &str) {
+        // Validate URI scheme — only allow http(s)
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            tracing::warn!(url, "Rejected hyperlink with disallowed URI scheme");
+            return;
+        }
+
         tracing::info!(url, "Opening hyperlink via xdg-open");
         match std::process::Command::new("xdg-open")
             .arg(url)
@@ -2643,7 +2652,7 @@ impl PointerHandler for ConductorWindow {
                         let btn = match button {
                             BTN_LEFT => 0,
                             BTN_MIDDLE => 1,
-                            0x111 => 2, // BTN_RIGHT
+                            BTN_RIGHT => 2,
                             _ => continue,
                         };
                         Some(format!("\x1b[<{btn};{cx};{cy}M"))
@@ -2652,7 +2661,7 @@ impl PointerHandler for ConductorWindow {
                         let btn = match button {
                             BTN_LEFT => 0,
                             BTN_MIDDLE => 1,
-                            0x111 => 2,
+                            BTN_RIGHT => 2,
                             _ => continue,
                         };
                         Some(format!("\x1b[<{btn};{cx};{cy}m"))

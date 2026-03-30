@@ -582,6 +582,11 @@ async fn send_to_live_session(session: &LiveSession, text: &str) -> Result<Strin
             daemon_send_text(&session.session_id, text).await
         }
         SessionSource::Kitty => {
+            // Validate session_id before interpolating into a regex match
+            // string to prevent regex injection via crafted sidecar entries.
+            if !session.session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+                bail!("session_id contains invalid characters: {:?}", session.session_id);
+            }
             let window_match = format!("title:^thermal-{}$", session.session_id);
             kitty_send_text(&window_match, text).await
         }

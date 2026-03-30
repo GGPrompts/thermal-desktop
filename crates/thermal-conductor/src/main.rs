@@ -160,17 +160,31 @@ fn main() -> Result<()> {
         let log_path = std::path::PathBuf::from(log_dir)
             .join("thermal")
             .join("conductor-tui.log");
-        let _ = std::fs::create_dir_all(log_path.parent().unwrap());
-        let log_file = std::fs::OpenOptions::new()
+        if let Some(parent) = log_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("warning: could not create log directory {}: {e}", parent.display());
+            }
+        }
+        match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&log_path)
-            .expect("failed to open TUI log file");
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(log_file)
-            .with_ansi(false)
-            .init();
+        {
+            Ok(log_file) => {
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .with_writer(log_file)
+                    .with_ansi(false)
+                    .init();
+            }
+            Err(e) => {
+                eprintln!("warning: failed to open TUI log file {}: {e}", log_path.display());
+                eprintln!("TUI logs will go to stderr (may corrupt TUI display)");
+                tracing_subscriber::fmt()
+                    .with_env_filter(env_filter)
+                    .init();
+            }
+        }
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)

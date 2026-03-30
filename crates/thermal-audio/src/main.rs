@@ -387,7 +387,7 @@ fn play_file(path: &Path, current_child: &CurrentChild, volume: u8) -> Result<()
 
     // Register child so it can be killed on interrupt.
     {
-        let mut guard = current_child.lock().unwrap();
+        let mut guard = current_child.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(child);
     }
 
@@ -395,7 +395,7 @@ fn play_file(path: &Path, current_child: &CurrentChild, volume: u8) -> Result<()
     // reflected promptly rather than blocking forever on wait().
     loop {
         // Take the child out briefly to check status.
-        let mut guard = current_child.lock().unwrap();
+        let mut guard = current_child.lock().unwrap_or_else(|p| p.into_inner());
         match guard.as_mut() {
             Some(c) => {
                 match c.try_wait() {
@@ -632,14 +632,14 @@ async fn main() -> Result<()> {
     // Load persisted audio state (mute/volume).
     let audio_state = Arc::new(Mutex::new(load_audio_state()));
     {
-        let st = audio_state.lock().unwrap();
+        let st = audio_state.lock().unwrap_or_else(|p| p.into_inner());
         info!(
             "loaded audio state: muted={}, volume={:.2}",
             st.muted, st.volume
         );
     }
 
-    let initial_volume = audio_state.lock().unwrap().volume;
+    let initial_volume = audio_state.lock().unwrap_or_else(|p| p.into_inner()).volume;
     let mut audio = AudioManager::new(initial_volume)?;
     let mut voices = VoicePool::new();
 
@@ -755,7 +755,7 @@ async fn main() -> Result<()> {
                 let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
                 let high_priority = req.priority == Priority::High;
                 info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
-                let is_muted = audio_state.lock().unwrap().muted;
+                let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                 if !is_muted {
                     if let Err(e) = audio.speak(voice, &req.text, high_priority).await {
                         warn!("socket TTS failed: {e}");
@@ -788,7 +788,7 @@ async fn main() -> Result<()> {
                     if changed {
                         if let Some(text) = transition_text(&label, &prev.0, &session.status, session) {
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
-                            let is_muted = audio_state.lock().unwrap().muted;
+                            let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                             let voice_active = is_voice_active();
                             if !is_muted && !voice_active {
                                 let voice = voices.assign(&session.session_id);
@@ -812,7 +812,7 @@ async fn main() -> Result<()> {
                             let urgency = if pct >= 90 { "Alert" } else { "Warning" };
                             let text = format!("{urgency}, {label} at {pct}% context");
                             info!("[{}] context alert: {text}", session.session_id);
-                            let is_muted = audio_state.lock().unwrap().muted;
+                            let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                             if !is_muted && !is_voice_active() {
                                 let voice = voices.assign(&session.session_id);
                                 if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text).await {
@@ -925,7 +925,7 @@ async fn handle_socket_connection(
         }
         SocketMessage::ToggleMute => {
             let state = {
-                let mut st = audio_state.lock().unwrap();
+                let mut st = audio_state.lock().unwrap_or_else(|p| p.into_inner());
                 st.muted = !st.muted;
                 info!("toggle_mute: muted={}", st.muted);
                 st.clone()
@@ -941,7 +941,7 @@ async fn handle_socket_connection(
         }
         SocketMessage::SetMute { muted } => {
             let state = {
-                let mut st = audio_state.lock().unwrap();
+                let mut st = audio_state.lock().unwrap_or_else(|p| p.into_inner());
                 st.muted = muted;
                 info!("set_mute: muted={muted}");
                 st.clone()
@@ -958,7 +958,7 @@ async fn handle_socket_connection(
         SocketMessage::SetVolume { value } => {
             let clamped = value.clamp(0.0, 1.0);
             let state = {
-                let mut st = audio_state.lock().unwrap();
+                let mut st = audio_state.lock().unwrap_or_else(|p| p.into_inner());
                 st.volume = clamped;
                 info!("set_volume: volume={clamped:.2}");
                 st.clone()
@@ -975,7 +975,7 @@ async fn handle_socket_connection(
             writer.write_all(b"\n").await?;
         }
         SocketMessage::GetStatus => {
-            let state = audio_state.lock().unwrap().clone();
+            let state = audio_state.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let resp = serde_json::to_string(&ControlResponse {
                 ok: true,
                 muted: state.muted,

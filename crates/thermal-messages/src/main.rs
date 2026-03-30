@@ -283,6 +283,10 @@ impl DaemonState {
 // Per-client handler
 // ---------------------------------------------------------------------------
 
+/// Maximum allowed line size (4 MiB). Lines exceeding this are dropped to
+/// prevent memory exhaustion from oversized or malicious payloads.
+const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
 async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) {
     let (reader, writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -290,6 +294,11 @@ async fn handle_client(stream: UnixStream, state: Arc<DaemonState>) {
 
     // Read the first line to determine if this is a Subscribe or a publish client.
     let first_line = match lines.next_line().await {
+        Ok(Some(line)) if line.len() > MAX_LINE_BYTES => {
+            warn!(len = line.len(), "dropping oversized line from client");
+            let _ = send_error(&writer, "line too large").await;
+            return;
+        }
         Ok(Some(line)) => line,
         Ok(None) => return,
         Err(e) => {
@@ -454,6 +463,11 @@ async fn handle_publisher(
         match lines.next_line().await {
             Ok(Some(line)) => {
                 if line.trim().is_empty() {
+                    continue;
+                }
+                if line.len() > MAX_LINE_BYTES {
+                    warn!(len = line.len(), "dropping oversized line from publisher");
+                    let _ = send_error(&writer, "line too large").await;
                     continue;
                 }
                 match serde_json::from_str::<Message>(&line) {

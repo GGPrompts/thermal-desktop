@@ -3170,8 +3170,9 @@ impl GridRenderer {
 
         // ── Cursor rect ──────────────────────────────────────────────────
         if cursor.shape != CursorShape::Hidden {
-            let cursor_row = cursor.point.line.0 as usize;
-            if cursor_row < screen_lines {
+            let cursor_line = cursor.point.line.0;
+            if cursor_line >= 0 && (cursor_line as usize) < screen_lines {
+                let cursor_row = cursor_line as usize;
                 let col_idx = cursor.point.column.0;
                 let cx = self.padding_x + col_idx as f32 * self.cell_width;
                 let cy = self.padding_y + cursor_row as f32 * self.cell_height;
@@ -3294,7 +3295,8 @@ impl GridRenderer {
         // ── Rebuild only damaged per-cell glyphon Buffers ────────────────
         let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
 
-        let cursor_row = cursor.point.line.0 as usize;
+        let cursor_line = cursor.point.line.0;
+        let cursor_row = if cursor_line >= 0 { cursor_line as usize } else { usize::MAX };
         let cursor_col = cursor.point.column.0;
 
         // Ensure cell_buffers has enough rows.

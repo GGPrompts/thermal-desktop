@@ -230,7 +230,10 @@ impl SeatHandler for HudState {
         capability: Capability,
     ) {
         if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = Some(self.seat_state.get_pointer(qh, &seat).unwrap());
+            match self.seat_state.get_pointer(qh, &seat) {
+                Ok(ptr) => self.pointer = Some(ptr),
+                Err(e) => tracing::warn!("failed to get pointer from seat: {e}"),
+            }
         }
     }
 

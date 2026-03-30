@@ -257,6 +257,9 @@ impl Terminal {
                             }
                             drop(store);
                             term_guard = term.lock();
+                            // Note: cursor position is re-read fresh from
+                            // term_guard below if OSC 633 marks are found,
+                            // so no stale-snapshot risk from this drop cycle.
                         }
 
                         // Use the filtered bytes (graphics stripped) for the
@@ -276,6 +279,16 @@ impl Terminal {
                             }
                             drop(t);
                             term_guard = term.lock();
+                            // Refresh cursor after re-acquiring the FairMutex —
+                            // another thread may have modified Term while the
+                            // lock was released, making the previous snapshot
+                            // stale for any subsequent tracker updates in this
+                            // batch.
+                            let refreshed_line = term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            if refreshed_line != cursor_line {
+                                let mut t = tracker.lock();
+                                t.set_current_line(refreshed_line);
+                            }
                         }
                         processor.advance(&mut *term_guard, filtered);
                     }

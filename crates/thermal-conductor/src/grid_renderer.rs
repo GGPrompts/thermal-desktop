@@ -3404,7 +3404,8 @@ impl GridRenderer {
                 let attrs = Attrs::new()
                     .family(Family::Name(&self.font_config.family))
                     .color(f32_to_glyph_color(fg));
-                buf.set_text(&mut self.font_system, &s, attrs, Shaping::Advanced);
+                let shaping = if ch.is_ascii() { Shaping::Basic } else { Shaping::Advanced };
+                buf.set_text(&mut self.font_system, &s, attrs, shaping);
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }

@@ -74,7 +74,7 @@ impl DaemonClient {
                     );
                     // Best-effort cleanup of the stale socket file so future
                     // probes don't need to attempt a connect() syscall.
-                    let _ = std::fs::remove_file(&socket_path);
+                    let _ = tokio::fs::remove_file(&socket_path).await;
                     return Ok(None);
                 }
                 return Err(e).context("Failed to connect to daemon socket");

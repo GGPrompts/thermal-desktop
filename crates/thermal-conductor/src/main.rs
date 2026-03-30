@@ -150,7 +150,8 @@ fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Commands::Tui);
 
     let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive("thermal_conductor=info".parse().unwrap());
+        .add_directive("thermal_conductor=info".parse().unwrap())
+        .add_directive("thermal_core=info".parse().unwrap());
 
     // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
     // alternate screen. Other modes log to stderr as normal.
@@ -165,6 +166,7 @@ fn main() -> Result<()> {
                 eprintln!("warning: could not create log directory {}: {e}", parent.display());
             }
         }
+        eprintln!("TUI logs → {}", log_path.display());
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)

@@ -93,11 +93,16 @@ All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` con
 ## Development
 
 ### Build Environment
-`CARGO_TARGET_DIR` is set to `/tmp/cargo-target` (for Android NDK cross-compilation support). This means:
-- `cargo build` outputs go to `/tmp/cargo-target/debug/`, **not** `target/debug/`
+`CARGO_TARGET_DIR` is set to `~/.cargo-target` (keeps build artifacts outside the project tree for Android NDK cross-compilation support). This means:
+- `cargo build` outputs go to `~/.cargo-target/debug/`, **not** `target/debug/`
 - Stale binaries may exist at `target/debug/` or `target/release/` from before this was set — **do not trust them**
-- `/usr/local/bin/thermal-*` are symlinks to `target/release/` — these are **dead links**, ignore them
 - The authoritative installed binaries live in `~/.cargo/bin/` via `cargo install`
+
+### Code Generation (ggl)
+`thermal-core` uses [ggl](~/projects/ggl) codegen for wire protocol types. Schema source is `crates/thermal-core/schemas/thermal-protocol.ggl`, built via `build.rs` → `ggl-build` → generated Rust in `OUT_DIR`. Integration layer at `src/ggl_types.rs` (type aliases + manual trait impls).
+- **Edit the `.ggl` file** to change type definitions, not the generated output
+- **`ggl_types.rs`** is hand-written glue (aliases, Display, Default) — safe to edit
+- Types not yet migrated to ggl (e.g., `ClaudeStatus`, `ClaudeSessionState`) remain hand-written in their original modules
 
 ### Installing / Updating Binaries
 After making changes to a crate, **you must `cargo install`** to update the running binary:

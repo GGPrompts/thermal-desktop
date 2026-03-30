@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use time::OffsetDateTime;
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
+use tracing::{debug, trace, warn};
 
 /// The directory where Claude Code state JSON files are written.
 const CLAUDE_STATE_DIR: &str = "/tmp/claude-code-state";
@@ -289,6 +290,7 @@ fn session_is_dead(state: &ClaudeSessionState) -> bool {
         if let Ok(updated_at) = OffsetDateTime::parse(last_updated, &Rfc3339) {
             let now = OffsetDateTime::now_utc();
             if (now - updated_at) < RECENT_UPDATE_GRACE {
+                trace!(session_id = %state.session_id, "session in grace period, skipping dead check");
                 return false;
             }
         }
@@ -297,6 +299,7 @@ fn session_is_dead(state: &ClaudeSessionState) -> bool {
     // PID-based liveness check.
     if let Some(pid) = state.pid {
         if pid > 0 && !pid_is_alive(pid) {
+            debug!(session_id = %state.session_id, pid, "session dead: PID not alive");
             return true;
         }
         // PID is alive — session is live regardless of age.
@@ -310,7 +313,11 @@ fn session_is_dead(state: &ClaudeSessionState) -> bool {
     let Ok(updated_at) = OffsetDateTime::parse(last_updated, &Rfc3339) else {
         return false;
     };
-    (OffsetDateTime::now_utc() - updated_at) > SESSION_MAX_AGE
+    let dead = (OffsetDateTime::now_utc() - updated_at) > SESSION_MAX_AGE;
+    if dead {
+        debug!(session_id = %state.session_id, last_updated, "session dead: no PID and timestamp is stale");
+    }
+    dead
 }
 
 /// Watches `/tmp/claude-code-state/` and `/tmp/codex-state/` for agent session
@@ -396,8 +403,8 @@ impl ClaudeStatePoller {
                     }
                     _ => {}
                 },
-                Err(_) => {
-                    // Watcher error — silently skip.
+                Err(e) => {
+                    warn!(error = %e, "file watcher error");
                 }
             }
         }
@@ -454,8 +461,20 @@ impl ClaudeStatePoller {
     /// Parse a single JSON state file, setting `agent_type` based on the
     /// parent directory if not already set in the JSON.
     fn read_file(path: &Path) -> Option<ClaudeSessionState> {
-        let data = std::fs::read_to_string(path).ok()?;
-        let mut state: ClaudeSessionState = serde_json::from_str(&data).ok()?;
+        let data = match std::fs::read_to_string(path) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "failed to read state file");
+                return None;
+            }
+        };
+        let mut state: ClaudeSessionState = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "failed to parse state file JSON");
+                return None;
+            }
+        };
         // Set agent_type from directory if not already specified in JSON.
         if state.agent_type.is_none() {
             state.agent_type = agent_type_for_path(path);
@@ -463,6 +482,7 @@ impl ClaudeStatePoller {
         if session_is_dead(&state) {
             return None;
         }
+        trace!(session_id = %state.session_id, status = ?state.status, "loaded session state");
         Some(state)
     }
 
@@ -482,9 +502,16 @@ impl ClaudeStatePoller {
             .collect();
 
         for path in dead_paths {
+            let session_id = self.sessions.get(&path)
+                .map(|s| s.session_id.as_str())
+                .unwrap_or("?")
+                .to_string();
+            debug!(session_id = %session_id, path = %path.display(), "pruning dead session");
             self.sessions.remove(&path);
             // Best-effort cleanup of the orphaned state file.
-            let _ = std::fs::remove_file(&path);
+            if let Err(e) = std::fs::remove_file(&path) {
+                warn!(path = %path.display(), error = %e, "failed to remove dead state file");
+            }
         }
     }
 }

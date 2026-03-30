@@ -7,7 +7,7 @@ argument-hint: [crate name or "all" — default: changed crates only]
 
 Rebuild affected thermal binaries, install to `~/.cargo/bin/`, kill stale processes, and restart daemons.
 
-IMPORTANT: `CARGO_TARGET_DIR=/tmp/cargo-target` — `cargo build` alone does NOT update `~/.cargo/bin/`. You must use `cargo install --path`.
+IMPORTANT: `CARGO_TARGET_DIR=~/.cargo-target` — `cargo build` alone does NOT update `~/.cargo/bin/`. You must use `cargo install --path`.
 
 ## All installable crates
 

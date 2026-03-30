@@ -31,9 +31,11 @@ use crate::font_config::FontConfig;
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
-/// Near-black terminal background — neutral dark, not purple-tinted.
-/// Must match the clear color in window.rs.
-const TERM_BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
+/// Terminal background — must match the clear color in window.rs.
+/// Pure black to match the shell's truecolor black (\e[48;2;0;0;0m).
+/// Spec(0,0,0) and palette BG are suppressed in ansi_to_glyphon_bg
+/// so they don't draw redundant bg rects over this clear color.
+const TERM_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
@@ -3582,12 +3584,24 @@ fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
         AnsiColor::Named(NamedColor::Background) => None,
         AnsiColor::Named(NamedColor::Black) => None,
         AnsiColor::Named(named) => Some(named_to_thermal_bg(*named)),
-        AnsiColor::Spec(rgb) => Some([
-            rgb.r as f32 / 255.0,
-            rgb.g as f32 / 255.0,
-            rgb.b as f32 / 255.0,
-            1.0,
-        ]),
+        AnsiColor::Spec(rgb) => {
+            // Treat pure black and palette BG (#0a0010) as transparent —
+            // shells often send \e[48;2;0;0;0m (truecolor black) which should
+            // be equivalent to Named(Black). Drawing redundant rects at these
+            // colors wastes GPU and creates visible seams against the clear color.
+            if (rgb.r == 0 && rgb.g == 0 && rgb.b == 0)
+                || (rgb.r == 10 && rgb.g == 0 && rgb.b == 16)
+            {
+                None
+            } else {
+                Some([
+                    rgb.r as f32 / 255.0,
+                    rgb.g as f32 / 255.0,
+                    rgb.b as f32 / 255.0,
+                    1.0,
+                ])
+            }
+        }
         AnsiColor::Indexed(idx) => {
             if *idx == 0 {
                 None

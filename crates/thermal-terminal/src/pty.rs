@@ -56,6 +56,25 @@ impl PtySession {
         Self::spawn_command(shell, &[shell], cwd, env)
     }
 
+    /// Spawn a new PTY session with a specific initial window size.
+    ///
+    /// Sets the PTY dimensions at creation time (via `openpty`) so the shell
+    /// starts with the correct size and avoids a SIGWINCH resize cycle that
+    /// creates spurious scrollback content.
+    pub fn spawn_sized(shell: &str, cwd: Option<&str>, cols: u16, rows: u16) -> Result<Self> {
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+
+        let ws = nix::pty::Winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        Self::spawn_command_sized(shell, &[shell], cwd, env, Some(ws))
+    }
+
     /// Spawn a PTY session running an arbitrary command with arguments.
     ///
     /// Opens a PTY pair, forks a child process that execs the program with the
@@ -73,8 +92,23 @@ impl PtySession {
         cwd: Option<&str>,
         extra_env: HashMap<String, String>,
     ) -> Result<Self> {
-        // Open the PTY pair.
-        let pty = openpty(None, None).context("openpty() failed")?;
+        Self::spawn_command_sized(program, args, cwd, extra_env, None)
+    }
+
+    /// Spawn a PTY session with an optional initial window size.
+    ///
+    /// If `winsize` is `Some`, the PTY is created with that size so the child
+    /// process starts at the correct dimensions without needing a subsequent
+    /// SIGWINCH resize.
+    pub fn spawn_command_sized(
+        program: &str,
+        args: &[&str],
+        cwd: Option<&str>,
+        extra_env: HashMap<String, String>,
+        winsize: Option<nix::pty::Winsize>,
+    ) -> Result<Self> {
+        // Open the PTY pair (with optional initial window size).
+        let pty = openpty(winsize.as_ref(), None).context("openpty() failed")?;
         let master_fd = pty.master;
         let slave_fd = pty.slave;
 

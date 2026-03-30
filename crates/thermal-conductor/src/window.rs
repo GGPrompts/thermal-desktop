@@ -715,7 +715,10 @@ fn setup_standalone_session(
     i32,
 ) {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut pty = PtySession::spawn(&shell, None).expect("Failed to spawn PTY");
+    // Spawn the PTY at the correct initial size so the shell doesn't need a
+    // SIGWINCH resize cycle (which creates spurious scrollback on launch).
+    let mut pty = PtySession::spawn_sized(&shell, None, init_cols as u16, init_rows as u16)
+        .expect("Failed to spawn PTY");
 
     // Connect PTY output to the terminal byte processor.
     let pty_output_rx = pty.take_output();
@@ -723,9 +726,6 @@ fn setup_standalone_session(
 
     // Take the terminal event receiver.
     let term_event_rx = terminal.take_event_rx().expect("event_rx already taken");
-
-    // Resize PTY to match grid.
-    let _ = pty.resize(init_cols as u16, init_rows as u16);
 
     let child_pid = pty.child_pid().as_raw();
 
@@ -1231,8 +1231,11 @@ impl ConductorWindow {
                 });
 
         // ── Clear pass ───────────────────────────────────────────────────
-        // Near-black background — neutral dark instead of purple-tinted palette BG
-        let bg: [f32; 4] = [0.03, 0.03, 0.04, 1.0]; // ~#080808-#0a0a0a
+        // Pure black — the shell sends truecolor black (\e[48;2;0;0;0m) for
+        // cell backgrounds. Spec(0,0,0) is suppressed in ansi_to_glyphon_bg
+        // so the clear color shows through uniformly without seams.
+        // Must match TERM_BG in grid_renderer.rs.
+        let bg: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("conductor clear pass"),

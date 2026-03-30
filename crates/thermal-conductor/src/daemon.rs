@@ -115,10 +115,9 @@ impl Daemon {
             (cwd_path.clone(), None)
         };
 
-        let mut pty = PtySession::spawn(&shell_path, Some(&effective_cwd))
-            .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?;
-
         let terminal = Terminal::with_size(120, 36);
+        let mut pty = PtySession::spawn_sized(&shell_path, Some(&effective_cwd), 120, 36)
+            .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?;
         let pty_output_rx = pty.take_output();
 
         // Shared dirty flag for the byte processor.

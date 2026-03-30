@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::kitty::{
-    SidecarEntry, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
+    SidecarEntry, next_unique_name, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
 };
 use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
@@ -899,21 +899,9 @@ fn generate_name_from_shell(shell_path: &str, id_num: u64) -> String {
 /// - If `base` is not taken, returns it as-is (e.g. "zsh").
 /// - If taken, appends a dedup suffix: "zsh-2", "zsh-3", etc.
 ///
-/// This mirrors `assign_display_name()` in kitty.rs but operates on a
-/// flat name list rather than `SidecarEntry` structs.
+/// Delegates to the shared `next_unique_name()` helper in kitty.rs.
 fn assign_unique_name(base: &str, existing: &[String]) -> String {
-    if !existing.iter().any(|n| n == base) {
-        return base.to_string();
-    }
-
-    let mut suffix = 2u32;
-    loop {
-        let candidate = format!("{base}-{suffix}");
-        if !existing.iter().any(|n| n == &candidate) {
-            return candidate;
-        }
-        suffix += 1;
-    }
+    next_unique_name(base, |candidate| existing.iter().any(|n| n == candidate))
 }
 
 /// Create a full grid snapshot from a Terminal.
@@ -1092,14 +1080,16 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
 /// Run the session daemon on a given `UnixListener` until the `shutdown` receiver
 /// fires.
 ///
-/// This is the core accept loop, factored out so that tests and alternative
-/// entry points can supply their own socket path and shutdown signal.
-#[allow(dead_code)]
+/// This is the core accept loop, factored out so that tests, alternative entry
+/// points, and `run_daemon()` can supply their own socket path and shutdown
+/// signal. An optional pre-created `Daemon` can be passed in; if `None`, a
+/// fresh one is created.
 pub async fn run_daemon_on(
     listener: UnixListener,
     mut shutdown: tokio::sync::mpsc::Receiver<()>,
-) -> Result<()> {
-    let daemon = Arc::new(Daemon::new());
+    daemon: Option<Arc<Daemon>>,
+) -> Result<Arc<Daemon>> {
+    let daemon = daemon.unwrap_or_else(|| Arc::new(Daemon::new()));
 
     loop {
         tokio::select! {
@@ -1122,20 +1112,7 @@ pub async fn run_daemon_on(
         }
     }
 
-    // Persist session state on shutdown.
-    let state = daemon.collect_persisted_state();
-    if !state.sessions.is_empty() {
-        match persist::save_state(&state) {
-            Ok(()) => info!(
-                sessions = state.sessions.len(),
-                "Session state persisted for recovery"
-            ),
-            Err(e) => error!("Failed to persist session state: {e}"),
-        }
-    }
-
-    info!("Daemon shut down");
-    Ok(())
+    Ok(daemon)
 }
 
 /// Run the session daemon.
@@ -1237,30 +1214,15 @@ pub async fn run_daemon() -> Result<()> {
         }
     };
 
-    // Install shutdown handler.
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
+    // Bridge ctrl_c into an mpsc channel so we can reuse run_daemon_on().
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(()).await;
+    });
 
-    loop {
-        tokio::select! {
-            accept_result = listener.accept() => {
-                match accept_result {
-                    Ok((stream, _addr)) => {
-                        info!("Client connected");
-                        let daemon_clone = Arc::clone(&daemon);
-                        tokio::spawn(handle_client(daemon_clone, stream));
-                    }
-                    Err(e) => {
-                        error!("Failed to accept connection: {e}");
-                    }
-                }
-            }
-            _ = &mut shutdown => {
-                info!("Shutdown signal received");
-                break;
-            }
-        }
-    }
+    // Delegate to the shared accept loop.
+    let daemon = run_daemon_on(listener, shutdown_rx, Some(daemon)).await?;
 
     // ── Persist session state before shutdown ─────────────────────────────
     let state = daemon.collect_persisted_state();
@@ -1310,7 +1272,7 @@ mod tests {
 
         // Spawn daemon in background.
         let daemon_handle = tokio::spawn(async move {
-            let _ = run_daemon_on(listener, shutdown_rx).await;
+            let _ = run_daemon_on(listener, shutdown_rx, None).await;
         });
 
         // Give the daemon a moment to start accepting.
@@ -1374,7 +1336,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
         tokio::spawn(async move {
-            let _ = run_daemon_on(listener, shutdown_rx).await;
+            let _ = run_daemon_on(listener, shutdown_rx, None).await;
         });
 
         // Wait for daemon to start accepting.

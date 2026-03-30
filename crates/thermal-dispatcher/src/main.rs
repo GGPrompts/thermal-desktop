@@ -538,11 +538,27 @@ fn extract_single_arg_calls(text: &str, func: &str) -> Vec<String> {
 }
 
 /// Extract `route(to="@agent", message="...")` from text.
+///
+/// Tracks quote depth so parentheses inside quoted strings (e.g.
+/// `message="explain foo()"`) are not mistaken for the closing paren.
 fn extract_route_call(text: &str) -> Option<(String, String)> {
     let start = text.find("route(")?;
     let rest = &text[start + 6..];
-    let close = rest.find(')')?;
-    let args = &rest[..close];
+
+    // Find the closing ')' that is outside double quotes.
+    let mut in_quotes = false;
+    let mut close = None;
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ')' if !in_quotes => {
+                close = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let args = &rest[..close?];
 
     // Parse to="..." and message="..."
     let to = extract_kwarg(args, "to")?;
@@ -687,7 +703,11 @@ async fn send_tts(text: &str) {
             let payload = serde_json::to_string(&msg).unwrap_or_default() + "\n";
             if let Err(e) = writer.write_all(payload.as_bytes()).await {
                 warn!("failed to write to audio socket: {e}");
-                // Fall back to voice state file
+                send_tts_via_state_file(text).await;
+                return;
+            }
+            if let Err(e) = writer.flush().await {
+                warn!("failed to flush audio socket: {e}");
                 send_tts_via_state_file(text).await;
             }
         }

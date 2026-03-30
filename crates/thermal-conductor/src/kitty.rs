@@ -72,25 +72,15 @@ impl SidecarData {
     }
 }
 
-/// Derive a unique display name from a base model name, avoiding collisions with
-/// names already present in `existing` entries.
+/// Generate a unique name from a base string, using a caller-supplied predicate
+/// to check whether a candidate is already taken.
 ///
 /// - If `base` is not taken, returns it as-is (e.g. "opus").
-/// - If taken, appends a suffix: "opus-2", "opus-3", etc.
-/// - Skips the entry with `exclude_session_id` (so re-upserts don't collide with
-///   the session's own prior name).
-pub fn assign_display_name(base: &str, existing: &[SidecarEntry], exclude_session_id: Option<&str>) -> String {
-    let is_taken = |candidate: &str| -> bool {
-        existing.iter().any(|e| {
-            if let Some(exc) = exclude_session_id {
-                if e.session_id == exc {
-                    return false;
-                }
-            }
-            e.display_name.as_deref() == Some(candidate)
-        })
-    };
-
+/// - If taken, appends a dedup suffix: "opus-2", "opus-3", etc.
+///
+/// This is the shared dedup engine used by both `assign_display_name()` (sidecar
+/// display names) and `daemon::assign_unique_name()` (daemon session names).
+pub fn next_unique_name(base: &str, is_taken: impl Fn(&str) -> bool) -> String {
     if !is_taken(base) {
         return base.to_string();
     }
@@ -103,6 +93,26 @@ pub fn assign_display_name(base: &str, existing: &[SidecarEntry], exclude_sessio
         }
         suffix += 1;
     }
+}
+
+/// Derive a unique display name from a base model name, avoiding collisions with
+/// names already present in `existing` entries.
+///
+/// - If `base` is not taken, returns it as-is (e.g. "opus").
+/// - If taken, appends a suffix: "opus-2", "opus-3", etc.
+/// - Skips the entry with `exclude_session_id` (so re-upserts don't collide with
+///   the session's own prior name).
+pub fn assign_display_name(base: &str, existing: &[SidecarEntry], exclude_session_id: Option<&str>) -> String {
+    next_unique_name(base, |candidate| {
+        existing.iter().any(|e| {
+            if let Some(exc) = exclude_session_id {
+                if e.session_id == exc {
+                    return false;
+                }
+            }
+            e.display_name.as_deref() == Some(candidate)
+        })
+    })
 }
 
 // ── kitty @ ls JSON structures ──────────────────────────────────────────────

@@ -2366,13 +2366,21 @@ impl KeyboardHandler for ConductorWindow {
     fn enter(
         &mut self,
         _: &Connection,
-        qh: &QueueHandle<Self>,
+        _qh: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
-        surface: &wl_surface::WlSurface,
+        _surface: &wl_surface::WlSurface,
         _: u32,
         _: &[u32],
         _keysyms: &[Keysym],
     ) {
+        // DECSET 1004 focus reporting: send CSI I (focus in)
+        {
+            let handle = self.terminal.term_handle();
+            let term = handle.lock();
+            if term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                self.write_session(b"\x1b[I");
+            }
+        }
     }
 
     fn leave(
@@ -2383,6 +2391,14 @@ impl KeyboardHandler for ConductorWindow {
         _surface: &wl_surface::WlSurface,
         _: u32,
     ) {
+        // DECSET 1004 focus reporting: send CSI O (focus out)
+        {
+            let handle = self.terminal.term_handle();
+            let term = handle.lock();
+            if term.mode().contains(TermMode::FOCUS_IN_OUT) {
+                self.write_session(b"\x1b[O");
+            }
+        }
     }
 
     fn press_key(

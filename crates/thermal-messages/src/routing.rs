@@ -5,9 +5,11 @@
 //! to backend implementations. Each backend knows how to dispatch a message and
 //! return a response.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -119,6 +121,80 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/tmp"))
 }
 
+// ---------------------------------------------------------------------------
+// Rate limiter for @system routes (therm-rrz3)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of @system commands allowed within the rate limit window.
+const SYSTEM_RATE_LIMIT_MAX: usize = 3;
+
+/// Duration of the sliding window for @system rate limiting.
+const SYSTEM_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+
+/// Sliding-window timestamps of recent @system command executions.
+/// Protected by a Mutex for safe access from async dispatch.
+static SYSTEM_COMMAND_TIMESTAMPS: Mutex<Option<VecDeque<Instant>>> = Mutex::new(None);
+
+/// Check the @system rate limiter. Returns Ok(()) if the command is allowed,
+/// or Err with a message if rate-limited.
+fn check_system_rate_limit() -> Result<(), String> {
+    let mut guard = SYSTEM_COMMAND_TIMESTAMPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let timestamps = guard.get_or_insert_with(VecDeque::new);
+
+    let now = Instant::now();
+
+    // Evict entries older than the window
+    while let Some(&front) = timestamps.front() {
+        if now.duration_since(front) > SYSTEM_RATE_LIMIT_WINDOW {
+            timestamps.pop_front();
+        } else {
+            break;
+        }
+    }
+
+    if timestamps.len() >= SYSTEM_RATE_LIMIT_MAX {
+        let oldest = timestamps.front().unwrap();
+        let wait_secs = SYSTEM_RATE_LIMIT_WINDOW
+            .saturating_sub(now.duration_since(*oldest))
+            .as_secs();
+        Err(format!(
+            "RATE LIMITED: @system commands capped at {SYSTEM_RATE_LIMIT_MAX} per {}s — \
+             try again in ~{wait_secs}s",
+            SYSTEM_RATE_LIMIT_WINDOW.as_secs()
+        ))
+    } else {
+        timestamps.push_back(now);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatcher @system allowlist (therm-rrz3)
+// ---------------------------------------------------------------------------
+
+/// Tools that the dispatcher is allowed to invoke via @system.
+/// Only read-only / informational tools — no desktop interaction.
+/// Write tools (click, type_text, run_command, etc.) are blocked when
+/// the message originates from the dispatcher to prevent prompt-injection
+/// exploitation of the Ollama pipeline.
+const DISPATCHER_SYSTEM_ALLOWLIST: &[&str] = &[
+    "capture_pane",
+    "screenshot",
+    "list_windows",
+    "active_window",
+    "list_workspaces",
+    "claude_status",
+    "clipboard_get",
+    "system_metrics",
+];
+
+/// Check whether a dispatcher-originated @system command is allowed.
+fn is_dispatcher_allowed_tool(tool_name: &str) -> bool {
+    DISPATCHER_SYSTEM_ALLOWLIST.contains(&tool_name)
+}
+
 /// Resolve a binary name to its full path, checking common locations
 /// that may not be in the daemon's PATH (e.g. ~/.local/bin).
 fn resolve_binary(name: &str) -> String {
@@ -208,6 +284,37 @@ async fn dispatch_system(msg: &Message, trust_config: &TrustConfig) -> Result<Me
         bail!("@system message must specify a tool name");
     }
 
+    let from_dispatcher = msg.from.agent_type == "dispatcher";
+
+    // Dispatcher-originated @system commands are restricted to read-only tools
+    // to prevent prompt-injection attacks via the Ollama pipeline (therm-rrz3).
+    if from_dispatcher && !is_dispatcher_allowed_tool(&tool_name) {
+        warn!(
+            tool = %tool_name,
+            from = %msg.from,
+            "BLOCKED: dispatcher not allowed to invoke write tool via @system"
+        );
+        return Ok(make_response(
+            msg,
+            format!(
+                "BLOCKED: dispatcher is restricted to read-only tools via @system \
+                 (allowed: {}). Tool '{tool_name}' is not permitted.",
+                DISPATCHER_SYSTEM_ALLOWLIST.join(", ")
+            ),
+        ));
+    }
+
+    // Rate limit @system commands — max 3 per 60s (therm-rrz3).
+    // Applies to all senders but primarily guards against runaway dispatcher loops.
+    if let Err(reason) = check_system_rate_limit() {
+        warn!(
+            tool = %tool_name,
+            from = %msg.from,
+            "{reason}"
+        );
+        return Ok(make_response(msg, reason));
+    }
+
     // Check trust tier
     let tier = trust_config.tier_for(&tool_name);
     match tier {
@@ -218,8 +325,18 @@ async fn dispatch_system(msg: &Message, trust_config: &TrustConfig) -> Result<Me
             ));
         }
         TrustTier::Confirm => {
-            // For now, log a warning and proceed. Full confirmation flow
-            // requires HUD integration (future work).
+            // SECURITY NOTE (therm-rrz3, therm-wgss):
+            // Trust tiers were intentionally simplified — CONFIRM-tier tools
+            // auto-proceed without HUD confirmation. This is a known gap:
+            // a prompt-injected Ollama response could trigger CONFIRM-tier
+            // tools (click, type_text, etc.) without user approval.
+            //
+            // Mitigations in place:
+            //   1. Rate limiter: max 3 @system commands per 60s
+            //   2. Dispatcher allowlist: dispatcher can only invoke read-only tools
+            //
+            // Planned: Wire HUD confirmation flow so CONFIRM-tier tools
+            // actually pause and wait for user approval before executing.
             warn!(tool = %tool_name, "tool requires confirmation — auto-proceeding (HUD confirmation not yet wired)");
         }
         TrustTier::Auto => {}
@@ -459,9 +576,6 @@ enum DaemonRequest {
 enum DaemonResponse {
     Ok,
     Error { message: String },
-    // Catch-all so deserialization doesn't fail on other variants.
-    #[serde(other)]
-    Other,
 }
 
 /// Return the conductor daemon socket path.
@@ -518,7 +632,6 @@ async fn daemon_send_text(session_id: &str, text: &str) -> Result<String> {
     match response {
         DaemonResponse::Ok => Ok("ok".to_string()),
         DaemonResponse::Error { message } => bail!("conductor error: {message}"),
-        DaemonResponse::Other => bail!("unexpected response from conductor"),
     }
 }
 

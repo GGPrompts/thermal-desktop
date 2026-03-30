@@ -32,10 +32,10 @@ use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
 /// Terminal background — must match the clear color in window.rs.
-/// Pure black to match the shell's truecolor black (\e[48;2;0;0;0m).
+/// Terminal background — matches kitty's `background #0a0010` (palette BG).
 /// Spec(0,0,0) and palette BG are suppressed in ansi_to_glyphon_bg
 /// so they don't draw redundant bg rects over this clear color.
-const TERM_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // #0a0010
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
@@ -3621,25 +3621,26 @@ fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
 /// yellow → orange → red → white-hot.  Avoids clustering everything in the
 /// purple/indigo range.
 fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
+    // Aligned with kitty.conf in thermal-os-dotfiles/config/kitty/kitty.conf
     match named {
-        NamedColor::Black => PaletteColor::BG_SURFACE.to_f32_array(),
-        NamedColor::Red => PaletteColor::SEARING.to_f32_array(),
-        NamedColor::Green => PaletteColor::WARM.to_f32_array(),
-        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
-        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
-        NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(),
+        NamedColor::Black => PaletteColor::BG.to_f32_array(),           // color0  #0a0010
+        NamedColor::Red => PaletteColor::SEARING.to_f32_array(),        // color1  #ef4444
+        NamedColor::Green => PaletteColor::WARM.to_f32_array(),         // color2  #22c55e
+        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),         // color3  #eab308
+        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),   // color4  #3b82f6
+        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(),   // color5  #1a0030
+        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),// color6  #14b8a6
+        NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(), // color7 #e9e0ff
 
-        NamedColor::BrightBlack => [0.40, 0.38, 0.45, 1.0], // neutral gray with slight warmth
-        NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(),
-        NamedColor::BrightGreen => PaletteColor::WARM.to_f32_array(),
-        NamedColor::BrightYellow => PaletteColor::WHITE_HOT.to_f32_array(),
-        NamedColor::BrightBlue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::BrightMagenta => PaletteColor::ACCENT_WARM.to_f32_array(),
-        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),
+        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(),   // color8  #4a3a8a
+        NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(), // color9  #dc2626
+        NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(),   // color10 #0d9488
+        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),// color11 #f97316
+        NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(), // color12 #818cf8
+        NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(), // color13 #c4b5fd
+        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),    // color14 #0d9488
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
-            PaletteColor::WHITE_HOT.to_f32_array()
+            PaletteColor::WHITE_HOT.to_f32_array()                      // color15 #fef3c7
         }
 
         NamedColor::DimBlack => TERM_BG,
@@ -3663,32 +3664,33 @@ fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
 /// in `ansi_to_glyphon_bg` (both return `None` → transparent), so those arms
 /// are retained here only as a safety fallback.
 fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
+    // Aligned with kitty.conf — backgrounds use the same base colors as fg,
+    // but muted for bright/dim variants so backgrounds don't overpower text.
     match named {
-        // Standard backgrounds
         NamedColor::Black => TERM_BG,
         NamedColor::Red => PaletteColor::SEARING.to_f32_array(),
         NamedColor::Green => PaletteColor::WARM.to_f32_array(),
         NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
-        NamedColor::Blue => PaletteColor::COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::Cyan => [0.05, 0.36, 0.33, 1.0], // dark teal
+        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
+        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(),   // #1a0030 (was HOTTER)
+        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
         NamedColor::White => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Foreground => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Background => TERM_BG,
         NamedColor::Cursor => PaletteColor::BG_SURFACE.to_f32_array(),
 
-        // Bright backgrounds — use muted/dark variants, never vivid foreground colors
-        NamedColor::BrightBlack => PaletteColor::BG_LIGHT.to_f32_array(),
+        // Bright backgrounds — muted variants
+        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(),   // #4a3a8a (was BG_LIGHT)
         NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(),
         NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(),
-        NamedColor::BrightYellow => PaletteColor::HOT.to_f32_array(),
+        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),
         NamedColor::BrightBlue => PaletteColor::COOL.to_f32_array(),
         NamedColor::BrightMagenta => PaletteColor::FREEZING.to_f32_array(),
-        NamedColor::BrightCyan => [0.04, 0.28, 0.26, 1.0], // muted dark teal
+        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),
         NamedColor::BrightWhite => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::BrightForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
 
-        // Dim backgrounds — use deep dark palette entries
+        // Dim backgrounds — deep dark palette entries
         NamedColor::DimBlack => TERM_BG,
         NamedColor::DimRed => PaletteColor::FREEZING.to_f32_array(),
         NamedColor::DimGreen => PaletteColor::BG_SURFACE.to_f32_array(),

@@ -187,6 +187,14 @@ impl Terminal {
         };
     }
 
+    /// Clear all scrollback history. Used after the first window configure
+    /// to discard spurious scrollback from initial resize.
+    pub fn clear_history(&self) {
+        let mut term = self.term.lock();
+        term.grid_mut().clear_history();
+        debug!("Scrollback history cleared");
+    }
+
     /// Spawn an async task that reads byte chunks from the PTY output channel
     /// and feeds them into the `Term` via the VTE parser.
     ///
@@ -283,6 +291,13 @@ impl Terminal {
             }
 
             info!("Terminal byte processor exiting (PTY channel closed)");
+
+            // Wake the render loop one final time so it checks
+            // session_has_exited() and closes the window promptly.
+            let _ = nix::unistd::write(
+                unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_raw) },
+                &[1u8],
+            );
         });
     }
 

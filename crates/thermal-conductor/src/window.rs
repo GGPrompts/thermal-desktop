@@ -260,6 +260,20 @@ pub fn run() -> anyhow::Result<()> {
     let (session_mode, term_event_rx, pty_child_pid) = tokio_rt.block_on(async {
         match DaemonClient::connect().await {
             Ok(Some(mut client)) => {
+                // Verify the daemon is actually alive (stale sockets can
+                // linger after a crash or restart).
+                if !client.is_healthy().await {
+                    tracing::warn!("Daemon socket exists but is not responding — standalone mode");
+                    let _ = std::fs::remove_file(crate::protocol::socket_path());
+                    return setup_standalone_session(
+                        &mut terminal,
+                        init_cols,
+                        init_rows,
+                        Arc::clone(&pty_dirty),
+                        wakeup_write,
+                    );
+                }
+
                 tracing::info!("Session daemon available — entering client mode");
 
                 // List existing sessions.
@@ -2267,6 +2281,14 @@ impl WindowHandler for ConductorWindow {
             self.resize_session(cols as u16, rows as u16);
 
             tracing::debug!("Window configured: {}x{} (grid: {}x{})", w, h, cols, rows);
+
+            // On the first configure, clear any scrollback created by the
+            // initial resize (terminal was created at DEFAULT_WIDTH x DEFAULT_HEIGHT
+            // but the compositor may force a different size). Mirrors kitty's
+            // approach of deferring the authoritative size until after configure.
+            if !self.configured {
+                self.terminal.clear_history();
+            }
         }
 
         self.configured = true;

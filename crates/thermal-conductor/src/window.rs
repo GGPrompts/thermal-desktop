@@ -88,7 +88,7 @@ use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
 use crate::font_config::FontConfig;
-use crate::grid_renderer::{ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell};
+use crate::grid_renderer::{self, ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell};
 use crate::inject::{self, InjectWatcher};
 use crate::input;
 use crate::protocol::Response;
@@ -178,11 +178,14 @@ pub fn run() -> anyhow::Result<()> {
             .expect("Failed to create wgpu device");
 
     let caps = wgpu_surface.get_capabilities(&adapter);
+    // Use non-sRGB format so color values pass through without gamma conversion.
+    // This matches how traditional terminals work — sRGB values are written directly.
     let surface_format = caps
         .formats
         .iter()
         .copied()
-        .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
+        .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
+        .or_else(|| caps.formats.iter().copied().find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb))
         .unwrap_or(caps.formats[0]);
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -1245,11 +1248,9 @@ impl ConductorWindow {
                 });
 
         // ── Clear pass ───────────────────────────────────────────────────
-        // Pure black — the shell sends truecolor black (\e[48;2;0;0;0m) for
-        // cell backgrounds. Spec(0,0,0) is suppressed in ansi_to_glyphon_bg
-        // so the clear color shows through uniformly without seams.
-        // Must match TERM_BG in grid_renderer.rs.
-        let bg: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        // Palette BG (#0a0010) in linear space for the sRGB surface.
+        // Must match TERM_BG in grid_renderer.rs (after sRGB→linear conversion).
+        let bg: [f32; 4] = grid_renderer::clear_color();
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("conductor clear pass"),

@@ -21,6 +21,7 @@ use glyphon::{
 };
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatus};
 use thermal_core::palette::{Color as PaletteColor, thermal_gradient};
+
 use wgpu::util::DeviceExt;
 
 use tracing::debug;
@@ -31,11 +32,15 @@ use crate::font_config::FontConfig;
 use crate::kitty_graphics::ImageStore;
 use crate::osc633::{CommandBlock, CommandState};
 
-/// Terminal background — must match the clear color in window.rs.
 /// Terminal background — matches kitty's `background #0a0010` (palette BG).
 /// Spec(0,0,0) and palette BG are suppressed in ansi_to_glyphon_bg
 /// so they don't draw redundant bg rects over this clear color.
 const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // #0a0010
+
+/// Return TERM_BG for use as the wgpu clear color.
+pub fn clear_color() -> [f32; 4] {
+    TERM_BG
+}
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
@@ -3582,16 +3587,10 @@ fn ansi_to_glyphon_fg(color: &AnsiColor) -> [f32; 4] {
 
 fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
     match color {
-        // Default/Background and Black (index 0) both mean "no background rect" —
-        // let the clear-pass BG (ThermalPalette::BG / 0x0a0010) show through.
         AnsiColor::Named(NamedColor::Background) => None,
         AnsiColor::Named(NamedColor::Black) => None,
         AnsiColor::Named(named) => Some(named_to_thermal_bg(*named)),
         AnsiColor::Spec(rgb) => {
-            // Treat pure black and palette BG (#0a0010) as transparent —
-            // shells often send \e[48;2;0;0;0m (truecolor black) which should
-            // be equivalent to Named(Black). Drawing redundant rects at these
-            // colors wastes GPU and creates visible seams against the clear color.
             if (rgb.r == 0 && rgb.g == 0 && rgb.b == 0)
                 || (rgb.r == 10 && rgb.g == 0 && rgb.b == 16)
             {

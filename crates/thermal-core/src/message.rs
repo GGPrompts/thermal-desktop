@@ -3,88 +3,17 @@
 //! Shared by all message bus components: daemon, TUI chat, `td` CLI,
 //! and the dispatcher bridge.  Follows the same serde patterns used by
 //! `thermal-conductor`'s `protocol.rs`.
+//!
+//! `AgentId` and `TaskState` are generated from `schemas/thermal-protocol.ggl`
+//! via ggl codegen. See `ggl_types.rs` for aliases and extra trait impls.
 
 use std::collections::HashMap;
-use std::fmt;
-use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ── AgentId ────────────────────────────────────────────────────────────────────
-
-/// Identifies a participant on the message bus.
-///
-/// Display format: `"type/key"` (e.g. `"claude/proj-abc"`, `"user/alice"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AgentId {
-    /// Agent kind — e.g. `"claude"`, `"codex"`, `"copilot"`, `"user"`, `"dispatcher"`.
-    pub agent_type: String,
-    /// Instance key — e.g. a session id or username.
-    pub key: String,
-}
-
-impl AgentId {
-    /// Convenience constructor.
-    pub fn new(agent_type: impl Into<String>, key: impl Into<String>) -> Self {
-        Self {
-            agent_type: agent_type.into(),
-            key: key.into(),
-        }
-    }
-}
-
-impl fmt::Display for AgentId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.agent_type, self.key)
-    }
-}
-
-/// Error returned when parsing an `AgentId` from a string that does not
-/// contain exactly one `/` separator.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseAgentIdError(pub String);
-
-impl fmt::Display for ParseAgentIdError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "invalid AgentId '{}': expected format 'type/key'",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for ParseAgentIdError {}
-
-impl FromStr for AgentId {
-    type Err = ParseAgentIdError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (agent_type, key) = s
-            .split_once('/')
-            .ok_or_else(|| ParseAgentIdError(s.to_string()))?;
-        if agent_type.is_empty() || key.is_empty() {
-            return Err(ParseAgentIdError(s.to_string()));
-        }
-        Ok(Self {
-            agent_type: agent_type.to_string(),
-            key: key.to_string(),
-        })
-    }
-}
-
-// ── TaskState ──────────────────────────────────────────────────────────────────
-
-/// Lifecycle state for a tracked task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TaskState {
-    Submitted,
-    Working,
-    Completed,
-    Failed,
-    InputRequired,
-}
+// Re-export ggl-generated types used in this module.
+pub use crate::ggl_types::{AgentId, ParseAgentIdError, TaskState};
 
 // ── MessageType ────────────────────────────────────────────────────────────────
 

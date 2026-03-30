@@ -3,6 +3,9 @@ name = "thermal-core"
 version.workspace = true
 edition.workspace = true
 
+[build-dependencies]
+ggl-build = { path = "../../../ggl/proto/ggl-build" }
+
 [dependencies]
 wgpu = { workspace = true }
 glyphon = { workspace = true }

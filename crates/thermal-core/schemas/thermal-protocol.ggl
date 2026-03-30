@@ -1,0 +1,44 @@
+-- thermal-protocol.ggl
+-- Core wire protocol types for the thermal message bus.
+-- Generated Rust types are included via build.rs + include!().
+
+-- AgentId: identifies a participant on the message bus.
+type AgentId {
+    @v1 {
+        agent_type: String,
+        key: String,
+    }
+}
+
+-- TaskState: lifecycle state for a tracked task.
+type TaskState {
+    @v1 enum {
+        Submitted,
+        Working,
+        Completed,
+        Failed,
+        InputRequired,
+    }
+}
+
+-- ClaudeStatus is kept hand-written (needs #[serde(rename_all = "snake_case")]).
+-- TODO: add per-type serde config to ggl codegen, then migrate ClaudeStatus here.
+
+-- ToolArgs: argument details from a tool invocation.
+type ToolArgs {
+    @v1 {
+        file_path: Option<String>,
+        command: Option<String>,
+        pattern: Option<String>,
+        description: Option<String>,
+    }
+}
+
+-- ToolDetails: tool event metadata from the Claude state file.
+type ToolDetails {
+    @v1 {
+        event: Option<String>,
+        tool: Option<String>,
+        args: Option<ToolArgs@v1>,
+    }
+}

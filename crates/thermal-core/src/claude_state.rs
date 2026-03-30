@@ -31,8 +31,17 @@ const SESSION_MAX_AGE: Duration = Duration::hours(2);
 /// How often to run the PID liveness + staleness sweep (avoid syscall spam).
 const PRUNE_INTERVAL: Duration = Duration::seconds(30);
 
+// ToolArgs and ToolDetails are now ggl-generated.
+// See ggl_types.rs for type aliases and Default impls.
+// Re-export so downstream `use thermal_core::claude_state::{...}` still works.
+pub use crate::ggl_types::{ToolArgs, ToolDetails};
+
 /// Status of a Claude session.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+///
+/// Kept hand-written because the JSON state files use snake_case values
+/// ("tool_use", "awaiting_input") which requires `#[serde(rename_all)]`.
+/// ggl codegen doesn't support per-type serde attributes yet.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaudeStatus {
     #[default]
@@ -40,25 +49,6 @@ pub enum ClaudeStatus {
     Processing,
     ToolUse,
     AwaitingInput,
-}
-
-/// Tool argument details from the Claude state file.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ToolArgs {
-    pub file_path: Option<String>,
-    pub command: Option<String>,
-    pub pattern: Option<String>,
-    pub description: Option<String>,
-}
-
-/// Tool event details from the Claude state file.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ToolDetails {
-    pub event: Option<String>,
-    pub tool: Option<String>,
-    pub args: Option<ToolArgs>,
 }
 
 /// State of a single Claude session, deserialized from a JSON state file.

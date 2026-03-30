@@ -8,6 +8,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::palette::Color;
+
 // Pull in the generated code from build.rs.
 include!(concat!(env!("OUT_DIR"), "/thermal-protocol.rs"));
 
@@ -27,6 +29,17 @@ pub type ToolArgs = ToolArgsV1;
 
 /// Current version of `ToolDetails` used throughout the codebase.
 pub type ToolDetails = ToolDetailsV1;
+
+/// Current version of `Layout` used throughout the codebase.
+pub type Layout = LayoutV1;
+
+/// Current version of `AgentState` used throughout the codebase.
+pub type AgentState = AgentStateV1;
+
+// ── Copy impls (codegen doesn't emit these; safe for unit-variant enums) ────
+
+impl Copy for LayoutV1 {}
+impl Copy for AgentStateV1 {}
 
 // ── Default impls (codegen doesn't emit these) ──────────────────────────────
 
@@ -85,6 +98,46 @@ impl fmt::Display for ParseAgentIdError {
 }
 
 impl std::error::Error for ParseAgentIdError {}
+
+// ── AgentState extras ────────────────────────────────────────────────────────
+
+impl AgentState {
+    /// Returns the thermal-palette `Color` that represents this state.
+    pub fn color(self) -> Color {
+        match self {
+            AgentState::Idle => Color::ACCENT_COOL,
+            AgentState::Running => Color::WARM,
+            AgentState::Thinking => Color::HOT,
+            AgentState::Warning => Color::HOTTER,
+            AgentState::Error => Color::SEARING,
+            AgentState::Complete => Color::WHITE_HOT,
+        }
+    }
+
+    /// Short uppercase label suitable for HUD readouts.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentState::Idle => "IDLE",
+            AgentState::Running => "RUNNING",
+            AgentState::Thinking => "THINKING",
+            AgentState::Warning => "WARNING",
+            AgentState::Error => "ERROR",
+            AgentState::Complete => "COMPLETE",
+        }
+    }
+
+    /// Single-character icon for compact status indicators.
+    pub fn icon(self) -> &'static str {
+        match self {
+            AgentState::Idle => "○",
+            AgentState::Running => "◉",
+            AgentState::Thinking => "◎",
+            AgentState::Warning => "▲",
+            AgentState::Error => "✗",
+            AgentState::Complete => "✓",
+        }
+    }
+}
 
 impl FromStr for AgentId {
     type Err = ParseAgentIdError;

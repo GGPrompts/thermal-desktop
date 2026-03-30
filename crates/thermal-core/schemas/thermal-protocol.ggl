@@ -42,3 +42,24 @@ type ToolDetails {
         args: Option<ToolArgs@v1>,
     }
 }
+
+-- Layout: pane layout strategy for the thermal-conductor dashboard.
+type Layout {
+    @v1 enum {
+        Grid,
+        Sidebar,
+        Stack,
+    }
+}
+
+-- AgentState: operational state of a single agent pane.
+type AgentState {
+    @v1 enum {
+        Idle,
+        Running,
+        Thinking,
+        Warning,
+        Error,
+        Complete,
+    }
+}

@@ -1,15 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-/// Pane layout strategy for the thermal-conductor dashboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Layout {
-    /// All panes share equal screen area in a grid.
-    Grid,
-    /// One pane is focused full-width; others appear as a thumbnail sidebar.
-    Sidebar,
-    /// Tabbed view — only one pane is visible at a time.
-    Stack,
-}
+// Layout is now ggl-generated. See ggl_types.rs for the type alias and Copy impl.
+pub use crate::ggl_types::Layout;
 
 /// Top-level configuration for the thermal-conductor component.
 #[derive(Debug, Clone, Serialize, Deserialize)]

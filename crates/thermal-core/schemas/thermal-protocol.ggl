@@ -63,3 +63,16 @@ type AgentState {
         Complete,
     }
 }
+
+-- ConductorConfig: top-level configuration for the thermal-conductor component.
+-- Note: max_panes and capture_fps are Int (i64) in codegen; callers use as usize/u32.
+type ConductorConfig {
+    @v1 {
+        tmux_session: String,
+        max_panes: Int,
+        capture_fps: Int,
+        layout: Layout@v1,
+        audio_enabled: Bool,
+        dbus_enabled: Bool,
+    }
+}

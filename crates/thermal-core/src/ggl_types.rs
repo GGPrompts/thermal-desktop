@@ -36,12 +36,28 @@ pub type Layout = LayoutV1;
 /// Current version of `AgentState` used throughout the codebase.
 pub type AgentState = AgentStateV1;
 
+/// Current version of `ConductorConfig` used throughout the codebase.
+pub type ConductorConfig = ConductorConfigV1;
+
 // ── Copy impls (codegen doesn't emit these; safe for unit-variant enums) ────
 
 impl Copy for LayoutV1 {}
 impl Copy for AgentStateV1 {}
 
 // ── Default impls (codegen doesn't emit these) ──────────────────────────────
+
+impl Default for ConductorConfig {
+    fn default() -> Self {
+        Self {
+            tmux_session: "thermal-conductor".to_string(),
+            max_panes: 16,
+            capture_fps: 30,
+            layout: LayoutV1::Grid,
+            audio_enabled: true,
+            dbus_enabled: true,
+        }
+    }
+}
 
 impl Default for ToolArgs {
     fn default() -> Self {

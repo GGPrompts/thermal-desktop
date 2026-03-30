@@ -64,6 +64,21 @@ type AgentState {
     }
 }
 
+-- PaneInfo: snapshot of a single tmux/PTY pane's state and metadata.
+-- output_lines/created_at/updated_at are Int (i64) in codegen; callers use as usize/u64.
+type PaneInfo {
+    @v1 {
+        id: String,
+        title: String,
+        state: AgentState@v1,
+        command: String,
+        last_output_line: String,
+        output_lines: Int,
+        created_at: Int,
+        updated_at: Int,
+    }
+}
+
 -- ConductorConfig: top-level configuration for the thermal-conductor component.
 -- Note: max_panes and capture_fps are Int (i64) in codegen; callers use as usize/u32.
 type ConductorConfig {

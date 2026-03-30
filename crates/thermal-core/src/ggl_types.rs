@@ -39,6 +39,9 @@ pub type AgentState = AgentStateV1;
 /// Current version of `ConductorConfig` used throughout the codebase.
 pub type ConductorConfig = ConductorConfigV1;
 
+/// Current version of `PaneInfo` used throughout the codebase.
+pub type PaneInfo = PaneInfoV1;
+
 // ── Copy impls (codegen doesn't emit these; safe for unit-variant enums) ────
 
 impl Copy for LayoutV1 {}

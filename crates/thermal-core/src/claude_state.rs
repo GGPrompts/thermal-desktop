@@ -25,8 +25,11 @@ const CODEX_STATE_DIR: &str = "/tmp/codex-state";
 /// The directory where Copilot state JSON files are written (via hook script).
 const COPILOT_STATE_DIR: &str = "/tmp/copilot-state";
 
-/// Codex archive sessions should disappear after the adapter's stale window.
-const CODEX_MAX_AGE: Duration = Duration::hours(1);
+/// Sessions older than this without a live PID are considered dead.
+const SESSION_MAX_AGE: Duration = Duration::hours(2);
+
+/// How often to run the PID liveness + staleness sweep (avoid syscall spam).
+const PRUNE_INTERVAL: Duration = Duration::seconds(30);
 
 /// Status of a Claude session.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
@@ -276,20 +279,35 @@ fn collapse_sessions_by_id(
     collapsed
 }
 
-fn codex_state_is_stale(state: &ClaudeSessionState) -> bool {
-    if state.agent_type.as_deref() != Some("codex") {
+/// Check if a process with the given PID is still alive.
+fn pid_is_alive(pid: u32) -> bool {
+    use nix::sys::signal;
+    use nix::unistd::Pid;
+    // kill(pid, 0) checks existence without sending a signal.
+    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// A session is considered dead if:
+/// 1. It has a PID and that process is no longer running, OR
+/// 2. It has no PID and `last_updated` is older than SESSION_MAX_AGE.
+fn session_is_dead(state: &ClaudeSessionState) -> bool {
+    // PID-based liveness check (most reliable).
+    if let Some(pid) = state.pid {
+        if pid > 0 && !pid_is_alive(pid) {
+            return true;
+        }
+        // PID is alive — session is live regardless of age.
         return false;
     }
 
+    // No PID — fall back to age-based staleness.
     let Some(last_updated) = state.last_updated.as_deref() else {
         return false;
     };
     let Ok(updated_at) = OffsetDateTime::parse(last_updated, &Rfc3339) else {
         return false;
     };
-    let age = OffsetDateTime::now_utc() - updated_at;
-
-    age > CODEX_MAX_AGE
+    (OffsetDateTime::now_utc() - updated_at) > SESSION_MAX_AGE
 }
 
 /// Watches `/tmp/claude-code-state/` and `/tmp/codex-state/` for agent session
@@ -304,6 +322,8 @@ pub struct ClaudeStatePoller {
     state_dirs: Vec<PathBuf>,
     /// Cached session states keyed by file path.
     sessions: HashMap<PathBuf, ClaudeSessionState>,
+    /// Last time we ran the dead-session prune sweep.
+    last_prune: std::time::Instant,
 }
 
 impl ClaudeStatePoller {
@@ -344,6 +364,7 @@ impl ClaudeStatePoller {
             rx,
             state_dirs: dirs,
             sessions,
+            last_prune: std::time::Instant::now(),
         })
     }
 
@@ -390,6 +411,14 @@ impl ClaudeStatePoller {
             }
         }
 
+        // Periodically prune dead sessions (PID gone or stale timestamp).
+        let prune_interval = std::time::Duration::try_from(PRUNE_INTERVAL)
+            .unwrap_or(std::time::Duration::from_secs(30));
+        if self.last_prune.elapsed() >= prune_interval {
+            self.prune_dead_sessions();
+            self.last_prune = std::time::Instant::now();
+        }
+
         collapse_sessions_by_id(self.sessions.values().cloned())
     }
 
@@ -428,7 +457,7 @@ impl ClaudeStatePoller {
         if state.agent_type.is_none() {
             state.agent_type = agent_type_for_path(path);
         }
-        if codex_state_is_stale(&state) {
+        if session_is_dead(&state) {
             return None;
         }
         Some(state)
@@ -437,6 +466,23 @@ impl ClaudeStatePoller {
     /// Check if a path has a `.json` extension.
     fn is_json(path: &Path) -> bool {
         path.extension().is_some_and(|ext| ext == "json")
+    }
+
+    /// Remove cached sessions whose PID is dead or whose timestamp is stale,
+    /// and delete the corresponding state files from disk.
+    fn prune_dead_sessions(&mut self) {
+        let dead_paths: Vec<PathBuf> = self
+            .sessions
+            .iter()
+            .filter(|(_, state)| session_is_dead(state))
+            .map(|(path, _)| path.clone())
+            .collect();
+
+        for path in dead_paths {
+            self.sessions.remove(&path);
+            // Best-effort cleanup of the orphaned state file.
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -734,25 +780,67 @@ mod tests {
     }
 
     #[test]
-    fn stale_codex_state_is_filtered() {
+    fn stale_session_without_pid_is_dead() {
+        // No PID, old timestamp — should be detected as dead.
         let state = ClaudeSessionState {
             session_id: "old-codex".into(),
             agent_type: Some("codex".into()),
-            last_updated: Some("2026-03-16T01:44:17.354Z".into()),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
             ..ClaudeSessionState::default()
         };
-        assert!(codex_state_is_stale(&state));
+        assert!(session_is_dead(&state));
     }
 
     #[test]
-    fn non_codex_state_is_not_filtered_by_age() {
+    fn stale_copilot_without_pid_is_dead() {
+        // Copilot sessions without a live PID and old timestamp should be pruned.
         let state = ClaudeSessionState {
-            session_id: "old-claude".into(),
-            agent_type: Some("claude".into()),
-            last_updated: Some("2026-03-16T01:44:17.354Z".into()),
+            session_id: "old-copilot".into(),
+            agent_type: Some("copilot".into()),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
             ..ClaudeSessionState::default()
         };
-        assert!(!codex_state_is_stale(&state));
+        assert!(session_is_dead(&state));
+    }
+
+    #[test]
+    fn session_with_dead_pid_is_dead() {
+        // PID 999999999 should not exist.
+        let state = ClaudeSessionState {
+            session_id: "dead-pid".into(),
+            agent_type: Some("claude".into()),
+            pid: Some(999_999_999),
+            last_updated: Some("2026-03-30T12:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(session_is_dead(&state));
+    }
+
+    #[test]
+    fn session_with_live_pid_is_not_dead() {
+        // Use our own PID — guaranteed to be alive.
+        let state = ClaudeSessionState {
+            session_id: "live".into(),
+            agent_type: Some("claude".into()),
+            pid: Some(std::process::id()),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(!session_is_dead(&state));
+    }
+
+    #[test]
+    fn fresh_session_without_pid_is_not_dead() {
+        use time::OffsetDateTime;
+        use time::format_description::well_known::Rfc3339;
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let state = ClaudeSessionState {
+            session_id: "fresh".into(),
+            agent_type: Some("copilot".into()),
+            last_updated: Some(now),
+            ..ClaudeSessionState::default()
+        };
+        assert!(!session_is_dead(&state));
     }
 
     // --- model_display_name ---

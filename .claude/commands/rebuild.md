@@ -35,7 +35,40 @@ Note: thermal-core and thermal-terminal are libraries (no binary).
 
 1. If argument is a specific crate name: rebuild just that crate
 2. If argument is "all": rebuild every binary crate
-3. If no argument: detect which crates have changes since the last install and rebuild only those
+3. If argument is "nuke": full reset — kill ALL thermal processes (including phantoms from debug builds and cargo run), rebuild everything, clean start all daemons
+4. If no argument: detect which crates have changes since the last install and rebuild only those
+
+### Step 0: Nuke mode (only if argument is "nuke")
+
+If the argument is "nuke", perform a full scorched-earth reset:
+
+1. **Kill ALL thermal processes** — not just daemons, everything:
+   ```bash
+   # Kill all installed thermal binaries
+   pkill -f 'thermal-' || true
+   # Kill phantom debug builds
+   pgrep -af 'target/debug/thermal-' | while read pid rest; do kill "$pid" 2>/dev/null; done
+   # Kill cargo run processes building thermal crates
+   pgrep -af 'cargo.*thermal-' | while read pid rest; do kill "$pid" 2>/dev/null; done
+   ```
+
+2. **Wait for processes to die** (2 seconds)
+
+3. **Clean up ALL pidfiles and sockets**:
+   ```bash
+   rm -f /run/user/$UID/thermal/*.pid
+   rm -f /run/user/$UID/thermal/conductor.sock
+   ```
+
+4. **Rebuild ALL binary crates** (same as "all" mode)
+
+5. **Restart all standard daemons** in dependency order (don't wait for "was it running?" — start everything):
+   - thermal-messages, thermal-audio, thermal-voice listen, thermal-dispatcher
+   - thermal-bar, thermal-hud, thermal-notify, thermal-wallpaper, thermal-screensaver
+
+6. **Skip** interactive components (TUI, monitor, conductor window, lock, launch)
+
+Then skip to Step 6 (verify).
 
 ### Step 1: Detect what needs rebuilding
 
@@ -52,13 +85,21 @@ Run `pgrep -a 'thermal-'` to see which thermal processes are active. Save this l
 
 Run `cargo install --path crates/<crate>` for each affected crate. Run up to 4 installs in parallel to avoid thrashing.
 
-### Step 4: Kill stale processes
+### Step 4: Kill stale and phantom processes
 
 For each rebuilt daemon that was running (from Step 2):
 
 ```bash
 # Kill by process name
 pkill -f 'thermal-<name>'
+```
+
+**IMPORTANT: Also kill phantom debug-build processes.** These are leftover processes from `cargo run` or old `target/debug/` binaries that linger and waste CPU/memory:
+
+```bash
+# Find and kill any thermal processes running from target/debug/ or via cargo run
+pgrep -af 'target/debug/thermal-' | while read pid rest; do kill "$pid"; done
+pgrep -af 'cargo.*thermal-' | while read pid rest; do kill "$pid"; done
 ```
 
 Also clean up stale pidfiles and sockets for killed daemons:

@@ -23,7 +23,7 @@ pub const DEFAULT_WAKE_WORD: &str = "alfred";
 const WAKEWORD_DIR: &str = "wakewords";
 
 /// Default detection threshold (0.0 - 1.0). Higher = more strict.
-const DEFAULT_THRESHOLD: f32 = 0.5;
+const DEFAULT_THRESHOLD: f32 = 0.4;
 
 /// Wrapper around rustpotter for wake word detection.
 pub struct WakeWordDetector {
@@ -109,9 +109,15 @@ impl WakeWordDetector {
         if !self.loaded {
             return None;
         }
-        // rustpotter::process_samples takes Vec<T> where T: Sample
-        // f32 implements Sample
-        match self.detector.process_samples(samples.to_vec()) {
+        let result = self.detector.process_samples(samples.to_vec());
+        // Log partial detection scores for tuning
+        if let Some(partial) = self.detector.get_partial_detection() {
+            tracing::debug!(
+                "wake word partial: score={:.3}, avg={:.3}, counter={}",
+                partial.score, partial.avg_score, partial.counter
+            );
+        }
+        match result {
             Some(detection) => {
                 info!(
                     "wake word detected: '{}' (score={:.3}, avg_score={:.3})",

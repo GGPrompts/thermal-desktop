@@ -150,10 +150,10 @@ impl VoiceModule {
 
         let (icon, label, color) = match state.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::ACCENT_COOL),
+            VoiceState::Monitoring => (MIC_MONITORING, "listening", ThermalPalette::WARM),
             VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::ACCENT_COOL),
-            VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
-            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
+            VoiceState::Listening => (MIC_LISTENING, "recording", ThermalPalette::ACCENT_WARM),
+            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::HOT),
         };
 
         // Use the daemon's label if provided, otherwise the default.
@@ -252,10 +252,10 @@ mod tests {
     fn render_from_state(state_file: VoiceStateFile) -> ModuleOutput {
         let (icon, label, color) = match state_file.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::ACCENT_COOL),
+            VoiceState::Monitoring => (MIC_MONITORING, "listening", ThermalPalette::WARM),
             VoiceState::WakeWord => (MIC_WAKE_WORD, "wake word", ThermalPalette::ACCENT_COOL),
-            VoiceState::Listening => (MIC_LISTENING, "listening", ThermalPalette::WARM),
-            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::ACCENT_WARM),
+            VoiceState::Listening => (MIC_LISTENING, "recording", ThermalPalette::ACCENT_WARM),
+            VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::HOT),
         };
         let display_label = state_file.label.as_deref().unwrap_or(label);
         let meter = level_meter(state_file.level.unwrap_or(0.0));
@@ -279,14 +279,14 @@ mod tests {
     }
 
     #[test]
-    fn listening_output_contains_listening_label() {
+    fn listening_output_contains_recording_label() {
         let f = VoiceStateFile {
             state: VoiceState::Listening,
             label: None,
             level: None,
         };
         let m = render_from_state(f);
-        assert!(m.text.contains("listening"), "text='{}'", m.text);
+        assert!(m.text.contains("recording"), "text='{}'", m.text);
     }
 
     #[test]
@@ -334,14 +334,14 @@ mod tests {
     }
 
     #[test]
-    fn monitoring_output_contains_monitoring_label() {
+    fn monitoring_output_contains_listening_label() {
         let f = VoiceStateFile {
             state: VoiceState::Monitoring,
             label: None,
             level: None,
         };
         let m = render_from_state(f);
-        assert!(m.text.contains("monitoring"), "text='{}'", m.text);
+        assert!(m.text.contains("listening"), "text='{}'", m.text);
     }
 
     #[test]
@@ -434,8 +434,8 @@ mod tests {
         };
         let m = render_from_state(f);
         // Should contain block chars between icon and label
-        assert!(m.text.contains("monitoring"));
-        assert!(m.text.len() > "🔎 monitoring".len());
+        assert!(m.text.contains("listening"));
+        assert!(m.text.len() > "🔎 listening".len());
     }
 
     #[test]

@@ -728,13 +728,13 @@ async fn main() -> Result<()> {
 
     // State poller (synchronous) — we run it on a timer.
     let mut poller = ClaudeStatePoller::new().context("creating state poller")?;
-    let mut prev_states: HashMap<String, ClaudeStatus> = HashMap::new();
+    let mut prev_states: HashMap<String, (ClaudeStatus, Option<String>)> = HashMap::new();
     let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
 
     // Seed initial states without announcing.
     for session in poller.poll() {
         if !session.session_id.is_empty() {
-            prev_states.insert(session.session_id.clone(), session.status.clone());
+            prev_states.insert(session.session_id.clone(), (session.status.clone(), session.current_tool.clone()));
             if let Some(pct) = session.context_percent {
                 let threshold = context_threshold(pct as u32);
                 prev_context_alert.insert(session.session_id.clone(), threshold);
@@ -779,10 +779,14 @@ async fn main() -> Result<()> {
                     let prev = prev_states
                         .get(&session.session_id)
                         .cloned()
-                        .unwrap_or(ClaudeStatus::Idle);
+                        .unwrap_or((ClaudeStatus::Idle, None));
 
-                    if prev != session.status {
-                        if let Some(text) = transition_text(&label, &prev, &session.status, session) {
+                    let curr_tool = session.current_tool.clone();
+                    let changed = prev.0 != session.status
+                        || (session.status == ClaudeStatus::ToolUse && prev.1 != curr_tool);
+
+                    if changed {
+                        if let Some(text) = transition_text(&label, &prev.0, &session.status, session) {
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
                             let is_muted = audio_state.lock().unwrap().muted;
                             let voice_active = is_voice_active();
@@ -795,7 +799,7 @@ async fn main() -> Result<()> {
                                 info!("suppressed announcement (voice active): {text}");
                             }
                         }
-                        prev_states.insert(session.session_id.clone(), session.status.clone());
+                        prev_states.insert(session.session_id.clone(), (session.status.clone(), curr_tool.clone()));
                     }
 
                     // Context % alerts at 50%, 75%, 90%

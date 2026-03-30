@@ -1423,6 +1423,7 @@ async fn run_listen_daemon(
 
                 // Wake word gate: in WakeWord state, feed audio to rustpotter
                 // instead of VAD. Only transition to VAD on detection.
+                static WW_FRAMES_FED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 if current_voice_state == VoiceState::WakeWord {
                     if let Some(ref mut ww_det) = wake_word_detector {
                         // Resample chunk from native rate to 16kHz for rustpotter
@@ -1435,6 +1436,10 @@ async fn run_listen_daemon(
                         while ww_buffer.len() >= ww_frame_size && ww_frame_size > 0 {
                             let frame: Vec<f32> =
                                 ww_buffer.drain(..ww_frame_size).collect();
+                            let count = WW_FRAMES_FED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if count % 100 == 0 {
+                                info!("wake word: fed {count} frames (frame_size={ww_frame_size}, rms={:.4})", vad::rms_energy(&frame));
+                            }
                             if ww_det.process_samples(&frame).is_some() {
                                 info!("wake word detected! transitioning to VAD listening");
                                 current_voice_state = VoiceState::Monitoring;
@@ -1593,9 +1598,17 @@ async fn run_listen_daemon(
                                 // Apply transcript filter to reject noise/hallucinations
                                 match filter_transcript(&text) {
                                     FilterResult::Accept(cleaned) => {
-                                        // VAD mode: send to thermal-dispatcher for command execution
-                                        // (PTT mode uses type_at_cursor for dictation instead)
-                                        tokio::spawn(dispatch_to_dispatcher(cleaned));
+                                        // Check for abort keyword — discard without dispatching
+                                        let lower = cleaned.to_lowercase();
+                                        if lower.trim() == "abort"
+                                            || lower.trim().ends_with("abort")
+                                        {
+                                            info!("abort keyword detected — discarding transcript");
+                                        } else {
+                                            // VAD mode: send to thermal-dispatcher for command execution
+                                            // (PTT mode uses type_at_cursor for dictation instead)
+                                            tokio::spawn(dispatch_to_dispatcher(cleaned));
+                                        }
                                     }
                                     FilterResult::Reject(reason) => {
                                         info!("transcript filtered out: {reason}");

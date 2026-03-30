@@ -104,6 +104,7 @@ pgrep -af 'cargo.*thermal-' | while read pid rest; do kill "$pid"; done
 
 Also clean up stale pidfiles and sockets for killed daemons:
 - Pidfiles: `/run/user/$UID/thermal/{audio,messages,voice}.pid`
+- Sockets: `/run/user/$UID/thermal/conductor.sock` (if no conductor process is running)
 - Only remove pidfiles for processes you just killed
 
 Wait 1-2 seconds after killing to let sockets close.

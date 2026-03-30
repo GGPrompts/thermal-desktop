@@ -291,7 +291,20 @@ fn pid_is_alive(pid: u32) -> bool {
 /// 1. It has a PID and that process is no longer running, OR
 /// 2. It has no PID and `last_updated` is older than SESSION_MAX_AGE.
 fn session_is_dead(state: &ClaudeSessionState) -> bool {
-    // PID-based liveness check (most reliable).
+    // Grace period: if the state was updated recently, trust it regardless of PID.
+    // Hook PIDs may be ephemeral (short-lived subprocesses), so a live session can
+    // have a dead PID between hook invocations.
+    const RECENT_UPDATE_GRACE: Duration = Duration::seconds(120);
+    if let Some(last_updated) = state.last_updated.as_deref() {
+        if let Ok(updated_at) = OffsetDateTime::parse(last_updated, &Rfc3339) {
+            let now = OffsetDateTime::now_utc();
+            if (now - updated_at) < RECENT_UPDATE_GRACE {
+                return false;
+            }
+        }
+    }
+
+    // PID-based liveness check.
     if let Some(pid) = state.pid {
         if pid > 0 && !pid_is_alive(pid) {
             return true;

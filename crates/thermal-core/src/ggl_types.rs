@@ -42,12 +42,9 @@ pub type ConductorConfig = ConductorConfigV1;
 /// Current version of `PaneInfo` used throughout the codebase.
 pub type PaneInfo = PaneInfoV1;
 
-// ── Copy impls (codegen doesn't emit these; safe for unit-variant enums) ────
-
-impl Copy for LayoutV1 {}
-impl Copy for AgentStateV1 {}
-
-// ── Default impls (codegen doesn't emit these) ──────────────────────────────
+// ── Copy: codegen now auto-derives for unit-variant enums ───────────────────
+// ── Default: codegen now auto-derives for all-Option structs ────────────────
+// ConductorConfig still needs a manual Default (non-Option fields with values).
 
 impl Default for ConductorConfig {
     fn default() -> Self {
@@ -58,27 +55,6 @@ impl Default for ConductorConfig {
             layout: LayoutV1::Grid,
             audio_enabled: true,
             dbus_enabled: true,
-        }
-    }
-}
-
-impl Default for ToolArgs {
-    fn default() -> Self {
-        Self {
-            file_path: None,
-            command: None,
-            pattern: None,
-            description: None,
-        }
-    }
-}
-
-impl Default for ToolDetails {
-    fn default() -> Self {
-        Self {
-            event: None,
-            tool: None,
-            args: None,
         }
     }
 }

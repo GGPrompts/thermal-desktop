@@ -32,7 +32,6 @@ const MIN_DIST: f32 = 30.0;
 
 /// A node in the agent communication graph.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AgentNode {
     /// Session ID from the Claude state file.
     pub session_id: String,
@@ -50,7 +49,8 @@ pub struct AgentNode {
     pub pos: [f32; 2],
     /// Layout velocity for force-directed simulation.
     pub vel: [f32; 2],
-    /// When this node was first seen.
+    /// When this node was first seen (reserved for Phase 4 age-based rendering).
+    #[allow(dead_code)]
     pub first_seen: Instant,
     /// When this node was last updated.
     pub last_updated: Instant,
@@ -58,7 +58,6 @@ pub struct AgentNode {
 
 /// A message arc between two agents.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MessageArc {
     /// Session ID of the sending agent.
     pub from_session: String,
@@ -67,8 +66,12 @@ pub struct MessageArc {
     /// When this message was detected.
     pub timestamp: Instant,
     /// The tool that triggered this arc (e.g. Agent, Bash, etc.).
+    /// Reserved for arc label rendering.
+    #[allow(dead_code)]
     pub tool_name: String,
     /// Approximate data size (context percent delta, used for line thickness).
+    /// Reserved for arc thickness rendering.
+    #[allow(dead_code)]
     pub data_size: f32,
     /// Alpha fade-out value (1.0 = fully visible, 0.0 = gone).
     pub alpha: f32,

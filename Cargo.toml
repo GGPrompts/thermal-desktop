@@ -16,7 +16,6 @@ members = [
     "crates/thermal-wallpaper",
     "crates/thermal-voice",
     "crates/thermal-terminal",
-    "crates/thermal-face",
     "crates/thermal-messages",
     "crates/thermal-dispatch-cli",
 ]

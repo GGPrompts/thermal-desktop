@@ -21,4 +21,4 @@ rmp-serde = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }

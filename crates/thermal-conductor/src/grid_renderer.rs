@@ -2338,7 +2338,10 @@ impl GridRenderer {
                 let col_idx = cursor.point.column.0;
                 let cx = self.padding_x + col_idx as f32 * self.cell_width;
                 let cy = self.padding_y + cursor_row as f32 * self.cell_height;
-                let cursor_color = PaletteColor::TEXT_BRIGHT.to_f32_array();
+                // Match kitty.conf cursor color (#fef3c7) at reduced opacity
+                // so it blends with the thermal palette instead of glaring.
+                let wh = PaletteColor::WHITE_HOT.to_f32_array();
+                let cursor_color = [wh[0], wh[1], wh[2], 0.85];
 
                 match cursor.shape {
                     CursorShape::Block => {

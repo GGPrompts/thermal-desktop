@@ -42,8 +42,8 @@ enum Command {
     /// Audio stream runs continuously; VAD detects speech start/stop
     /// and automatically triggers transcription.
     Listen {
-        /// RMS energy threshold for speech detection (0.0–1.0, default 0.015).
-        #[arg(long, default_value = "0.015")]
+        /// Silero VAD speech probability threshold (0.0–1.0, default 0.5).
+        #[arg(long, default_value = "0.5")]
         threshold: f32,
         /// Use WebSocket streaming STT instead of batch transcription.
         /// Requires a WhisperLiveKit server running at --streaming-url.
@@ -1222,8 +1222,8 @@ async fn run_listen_daemon(
     use_wake_word: bool,
 ) -> Result<()> {
     let threshold = if threshold <= 0.0 || threshold > 1.0 {
-        warn!("VAD threshold {threshold} out of range, clamping to 0.015");
-        0.015
+        warn!("VAD threshold {threshold} out of range, using Silero default 0.5");
+        0.5
     } else {
         threshold
     };
@@ -1387,7 +1387,8 @@ async fn run_listen_daemon(
 
     // Main loop — VAD processing + push-to-talk override
     const MAX_SPEECH_SECS: u32 = 30;
-    let mut vad = VadDetector::new(threshold);
+    let mut vad = VadDetector::new(threshold, native_rate)
+        .ok_or_else(|| anyhow::anyhow!("failed to initialize Silero VAD model"))?;
     let mut speech_buffer: Vec<f32> = Vec::new();
     let mut ptt_recorder = Recorder::new(); // For push-to-talk override
     let mut ptt_active = false; // True when push-to-talk is overriding VAD

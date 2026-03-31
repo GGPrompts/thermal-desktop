@@ -24,7 +24,7 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config as TermConfig, RenderableContent};
+use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi;
 
 use parking_lot::Mutex;
@@ -35,8 +35,9 @@ use crate::kitty_graphics::{ImageStore, KittyGraphicsParser};
 use crate::osc633::{CommandTracker, Osc633Parser};
 use thermal_terminal::state_inference::{AgentStateInference, InferenceConfig};
 
-// Re-use shared terminal size and default constants from thermal-terminal.
+// Re-use shared terminal size from thermal-terminal.
 use thermal_terminal::terminal::TerminalSize;
+#[cfg(test)]
 use thermal_terminal::terminal::{DEFAULT_COLS, DEFAULT_ROWS};
 
 // ── Newtype wrapper for Dimensions impl ─────────────────────────────────────
@@ -106,7 +107,6 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<ThermalEventListener>>>,
 
     /// Receiver for terminal events (title changes, wakeup, bell, etc.).
-    #[allow(dead_code)]
     event_rx: mpsc::UnboundedReceiver<Event>,
 
     /// Tracks command blocks extracted from OSC 633 shell-integration marks.
@@ -130,9 +130,9 @@ pub struct Terminal {
     state_inference: Option<Arc<Mutex<AgentStateInference>>>,
 }
 
-#[allow(dead_code)]
 impl Terminal {
     /// Create a new terminal emulator with default dimensions (120x36).
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_size(DEFAULT_COLS, DEFAULT_ROWS)
     }
@@ -378,18 +378,6 @@ impl Terminal {
         Arc::clone(&self.image_store)
     }
 
-    /// Access the terminal's renderable content while holding the lock.
-    ///
-    /// The callback `f` receives a `RenderableContent` reference that provides
-    /// the display iterator, cursor, selection, colors, and terminal mode.
-    /// The lock is held for the duration of the callback — keep it short.
-    pub fn with_renderable_content<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(RenderableContent<'_>) -> R,
-    {
-        let term = self.term.lock();
-        f(term.renderable_content())
-    }
 }
 
 #[cfg(test)]

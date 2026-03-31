@@ -1297,6 +1297,11 @@ mod tests {
             model: Some("claude-sonnet-4-20250514".to_string()),
             context_percent: Some(42.0),
             source: Some("terminal_inference".to_string()),
+            last_command: None,
+            last_exit_code: None,
+            last_command_started_at: None,
+            last_command_duration_ms: None,
+            consecutive_failures: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -1320,6 +1325,11 @@ mod tests {
             model: None,
             context_percent: None,
             source: Some("terminal_inference".to_string()),
+            last_command: None,
+            last_exit_code: None,
+            last_command_started_at: None,
+            last_command_duration_ms: None,
+            consecutive_failures: None,
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();

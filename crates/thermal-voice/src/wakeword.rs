@@ -162,11 +162,18 @@ mod tests {
 
     #[test]
     fn detector_creation() {
-        // Should succeed even without a model file (loaded=false)
+        // Should succeed regardless of whether a model file is present.
+        // is_loaded() reflects reality: true when the .rpw file exists and
+        // loaded successfully, false otherwise.
         let det = WakeWordDetector::new(16000);
         assert!(det.is_ok());
         let det = det.unwrap();
-        assert!(!det.is_loaded()); // No model file in test env
+        let model_exists = wakeword_model_path(DEFAULT_WAKE_WORD).exists();
+        assert_eq!(
+            det.is_loaded(),
+            model_exists,
+            "is_loaded() should match whether the model file exists on disk"
+        );
     }
 
     #[test]

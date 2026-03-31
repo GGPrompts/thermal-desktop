@@ -391,14 +391,14 @@ impl ImageStore {
         });
     }
 
-    /// Return the number of stored images (for debug/status).
-    #[allow(dead_code)]
+    /// Return the number of stored images (for debug/status/tests).
+    #[cfg(test)]
     pub fn image_count(&self) -> usize {
         self.images.len()
     }
 
-    /// Return the number of active placements.
-    #[allow(dead_code)]
+    /// Return the number of active placements (for debug/status/tests).
+    #[cfg(test)]
     pub fn placement_count(&self) -> usize {
         self.placements.len()
     }

@@ -75,8 +75,10 @@ pub(crate) struct ImageRenderPipeline {
 
 /// A cached GPU texture for a single image.
 struct CachedImageTexture {
+    // Retained for GPU resource ownership — dropping Texture deallocates the GPU memory.
     #[allow(dead_code)]
     texture: wgpu::Texture,
+    // Retained for GPU resource ownership — dropping TextureView invalidates the bind group.
     #[allow(dead_code)]
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,

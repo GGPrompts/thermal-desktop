@@ -14,7 +14,9 @@ pub mod state;
 pub mod text;
 pub mod wgpu_ctx;
 
-pub use claude_state::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, is_known_model, model_display_name};
+pub use claude_state::{
+    ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, is_known_model, model_display_name,
+};
 pub use ggl_types::{ToolArgs, ToolDetails};
 pub use message::{AgentId, Message, MessageType, ParseAgentIdError, TaskState};
 // Generalized aliases — prefer these in new code.

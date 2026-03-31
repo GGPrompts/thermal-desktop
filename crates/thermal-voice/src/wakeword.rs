@@ -11,9 +11,7 @@
 
 use std::path::PathBuf;
 
-use rustpotter::{
-    AudioFmt, Endianness, Rustpotter, RustpotterConfig, SampleFormat,
-};
+use rustpotter::{AudioFmt, Endianness, Rustpotter, RustpotterConfig, SampleFormat};
 use tracing::{error, info, warn};
 
 /// Default wake word name.
@@ -55,15 +53,11 @@ impl WakeWordDetector {
         // Try to load the wake word model
         let model_path = wakeword_model_path(DEFAULT_WAKE_WORD);
         let loaded = if model_path.exists() {
-            match detector.add_wakeword_from_file(
-                DEFAULT_WAKE_WORD,
-                model_path.to_str().unwrap_or_default(),
-            ) {
+            match detector
+                .add_wakeword_from_file(DEFAULT_WAKE_WORD, model_path.to_str().unwrap_or_default())
+            {
                 Ok(()) => {
-                    info!(
-                        "loaded wake word model: {}",
-                        model_path.display()
-                    );
+                    info!("loaded wake word model: {}", model_path.display());
                     true
                 }
                 Err(e) => {
@@ -75,16 +69,9 @@ impl WakeWordDetector {
                 }
             }
         } else {
-            warn!(
-                "wake word model not found at {}",
-                model_path.display()
-            );
-            warn!(
-                "to create one, install rustpotter-cli and record samples:"
-            );
-            warn!(
-                "  cargo install rustpotter-cli"
-            );
+            warn!("wake word model not found at {}", model_path.display());
+            warn!("to create one, install rustpotter-cli and record samples:");
+            warn!("  cargo install rustpotter-cli");
             warn!(
                 "  rustpotter-cli record -n alfred -p {}/",
                 wakeword_dir().display()
@@ -114,7 +101,9 @@ impl WakeWordDetector {
         if let Some(partial) = self.detector.get_partial_detection() {
             tracing::debug!(
                 "wake word partial: score={:.3}, avg={:.3}, counter={}",
-                partial.score, partial.avg_score, partial.counter
+                partial.score,
+                partial.avg_score,
+                partial.counter
             );
         }
         match result {

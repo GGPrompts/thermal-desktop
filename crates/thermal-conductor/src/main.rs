@@ -32,9 +32,9 @@ mod window;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{info, warn};
 
 use backend::{Backend, BackendPreference, detect_backend};
@@ -161,14 +161,16 @@ fn main() -> Result<()> {
     // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
     // alternate screen. Other modes log to stderr as normal.
     if matches!(command, Commands::Tui) {
-        let log_dir = std::env::var("XDG_RUNTIME_DIR")
-            .unwrap_or_else(|_| "/tmp".to_string());
+        let log_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let log_path = std::path::PathBuf::from(log_dir)
             .join("thermal")
             .join("conductor-tui.log");
         if let Some(parent) = log_path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("warning: could not create log directory {}: {e}", parent.display());
+                eprintln!(
+                    "warning: could not create log directory {}: {e}",
+                    parent.display()
+                );
             }
         }
         eprintln!("TUI logs → {}", log_path.display());
@@ -185,17 +187,16 @@ fn main() -> Result<()> {
                     .init();
             }
             Err(e) => {
-                eprintln!("warning: failed to open TUI log file {}: {e}", log_path.display());
+                eprintln!(
+                    "warning: failed to open TUI log file {}: {e}",
+                    log_path.display()
+                );
                 eprintln!("TUI logs will go to stderr (may corrupt TUI display)");
-                tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .init();
+                tracing_subscriber::fmt().with_env_filter(env_filter).init();
             }
         }
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
     let backend_pref = cli.backend;
@@ -635,7 +636,9 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
-        .with_context(|| format!("cannot connect to audio daemon at {sock_path} — is thermal-audio running?"))?;
+        .with_context(|| {
+            format!("cannot connect to audio daemon at {sock_path} — is thermal-audio running?")
+        })?;
 
     let mut request = serde_json::json!({
         "action": "tts",
@@ -660,7 +663,10 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
     if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
         // Silent success
     } else {
-        let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error");
+        let err = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
         bail!("TTS failed: {err}");
     }
 

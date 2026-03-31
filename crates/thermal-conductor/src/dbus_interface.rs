@@ -71,7 +71,10 @@ impl ConductorInterface {
             Some(name.to_string())
         };
 
-        match self.daemon.spawn_session(shell_opt, cwd_opt, false, name_opt) {
+        match self
+            .daemon
+            .spawn_session(shell_opt, cwd_opt, false, name_opt)
+        {
             Ok((session_id, display_name)) => {
                 // Emit SessionSpawned signal (best-effort).
                 let _ = Self::session_spawned(&ctx, &session_id, &display_name).await;

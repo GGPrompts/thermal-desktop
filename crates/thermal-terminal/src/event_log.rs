@@ -21,12 +21,29 @@ pub const DEFAULT_MAX_ENTRIES: usize = 5000;
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SessionEvent {
-    Spawn { command: String, cwd: String },
-    StatusChange { old: String, new: String },
-    CommandStart { command: String },
-    CommandFinish { command: String, exit_code: Option<i32>, duration_ms: u64 },
-    Resize { cols: u16, rows: u16 },
-    PtyEof { reason: String },
+    Spawn {
+        command: String,
+        cwd: String,
+    },
+    StatusChange {
+        old: String,
+        new: String,
+    },
+    CommandStart {
+        command: String,
+    },
+    CommandFinish {
+        command: String,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+    },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    PtyEof {
+        reason: String,
+    },
     Bell,
 }
 
@@ -56,17 +73,17 @@ impl EventLog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         // Estimate existing entry count from file size (avoid full parse).
         // Each JSONL line is roughly 100-300 bytes; we use a conservative
         // estimate to avoid premature rotation on restart.
-        let existing = file.metadata().map(|m| {
-            let size = m.len();
-            if size == 0 { 0 } else { (size / 150) as usize }
-        }).unwrap_or(0);
+        let existing = file
+            .metadata()
+            .map(|m| {
+                let size = m.len();
+                if size == 0 { 0 } else { (size / 150) as usize }
+            })
+            .unwrap_or(0);
         debug!(path = %path.display(), existing_estimate = existing, "Opened event log");
         Ok(Self {
             writer: BufWriter::new(file),
@@ -219,7 +236,10 @@ mod tests {
         log.log(&SessionEvent::Bell);
 
         let mut contents = String::new();
-        File::open(&path).unwrap().read_to_string(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
         let lines: Vec<&str> = contents.trim().lines().collect();
         assert_eq!(lines.len(), 3);
 
@@ -246,7 +266,10 @@ mod tests {
         }
 
         let mut contents = String::new();
-        File::open(&path).unwrap().read_to_string(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
         let lines: Vec<&str> = contents.trim().lines().collect();
         // After 3 entries, rotation truncates. Then 2 more are written.
         assert_eq!(lines.len(), 2);

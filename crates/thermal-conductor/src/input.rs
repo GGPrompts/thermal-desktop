@@ -5,7 +5,7 @@
 //! and delegates to the shared encoding logic.
 
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, Keysym, Modifiers};
-pub use thermal_terminal::input::{KittyFlags, KeyEventType};
+pub use thermal_terminal::input::{KeyEventType, KittyFlags};
 
 /// Encode an SCTK key-press event into the bytes that should be written to
 /// the PTY.
@@ -51,40 +51,37 @@ pub fn encode_key_kitty(
 ///
 /// Returns `None` for keys that have no KeyCode representation (bare modifiers,
 /// unknown keysyms with no utf8 text).
-fn keysym_to_keycode(
-    sym: Keysym,
-    utf8: Option<&str>,
-) -> Option<thermal_terminal::input::KeyCode> {
+fn keysym_to_keycode(sym: Keysym, utf8: Option<&str>) -> Option<thermal_terminal::input::KeyCode> {
     use thermal_terminal::input::KeyCode;
 
     // Check named keys first.
     let named = match sym {
-        Keysym::Return    => Some(KeyCode::Enter),
+        Keysym::Return => Some(KeyCode::Enter),
         Keysym::BackSpace => Some(KeyCode::Backspace),
-        Keysym::Tab       => Some(KeyCode::Tab),
-        Keysym::Escape    => Some(KeyCode::Escape),
-        Keysym::Up        => Some(KeyCode::ArrowUp),
-        Keysym::Down      => Some(KeyCode::ArrowDown),
-        Keysym::Right     => Some(KeyCode::ArrowRight),
-        Keysym::Left      => Some(KeyCode::ArrowLeft),
-        Keysym::Home      => Some(KeyCode::Home),
-        Keysym::End       => Some(KeyCode::End),
-        Keysym::Insert    => Some(KeyCode::Insert),
-        Keysym::Delete    => Some(KeyCode::Delete),
-        Keysym::Page_Up   => Some(KeyCode::PageUp),
+        Keysym::Tab => Some(KeyCode::Tab),
+        Keysym::Escape => Some(KeyCode::Escape),
+        Keysym::Up => Some(KeyCode::ArrowUp),
+        Keysym::Down => Some(KeyCode::ArrowDown),
+        Keysym::Right => Some(KeyCode::ArrowRight),
+        Keysym::Left => Some(KeyCode::ArrowLeft),
+        Keysym::Home => Some(KeyCode::Home),
+        Keysym::End => Some(KeyCode::End),
+        Keysym::Insert => Some(KeyCode::Insert),
+        Keysym::Delete => Some(KeyCode::Delete),
+        Keysym::Page_Up => Some(KeyCode::PageUp),
         Keysym::Page_Down => Some(KeyCode::PageDown),
-        Keysym::F1        => Some(KeyCode::F1),
-        Keysym::F2        => Some(KeyCode::F2),
-        Keysym::F3        => Some(KeyCode::F3),
-        Keysym::F4        => Some(KeyCode::F4),
-        Keysym::F5        => Some(KeyCode::F5),
-        Keysym::F6        => Some(KeyCode::F6),
-        Keysym::F7        => Some(KeyCode::F7),
-        Keysym::F8        => Some(KeyCode::F8),
-        Keysym::F9        => Some(KeyCode::F9),
-        Keysym::F10       => Some(KeyCode::F10),
-        Keysym::F11       => Some(KeyCode::F11),
-        Keysym::F12       => Some(KeyCode::F12),
+        Keysym::F1 => Some(KeyCode::F1),
+        Keysym::F2 => Some(KeyCode::F2),
+        Keysym::F3 => Some(KeyCode::F3),
+        Keysym::F4 => Some(KeyCode::F4),
+        Keysym::F5 => Some(KeyCode::F5),
+        Keysym::F6 => Some(KeyCode::F6),
+        Keysym::F7 => Some(KeyCode::F7),
+        Keysym::F8 => Some(KeyCode::F8),
+        Keysym::F9 => Some(KeyCode::F9),
+        Keysym::F10 => Some(KeyCode::F10),
+        Keysym::F11 => Some(KeyCode::F11),
+        Keysym::F12 => Some(KeyCode::F12),
         _ => None,
     };
 

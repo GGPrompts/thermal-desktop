@@ -176,7 +176,7 @@ pub fn encode_key_kitty(
     // Build the event-type suffix for the modifier parameter.
     let event_suffix = if flags.contains(KittyFlags::REPORT_EVENTS) {
         match event_type {
-            KeyEventType::Press => None,          // 1 is default, omitted
+            KeyEventType::Press => None, // 1 is default, omitted
             KeyEventType::Repeat => Some(2u8),
             KeyEventType::Release => Some(3u8),
         }
@@ -208,9 +208,15 @@ pub fn encode_key_kitty(
 /// The wire format is `bits + 1`, but we encode that in the formatting step.
 fn kitty_modifier_bits(mods: &Modifiers) -> u8 {
     let mut bits: u8 = 0;
-    if mods.shift { bits |= 1; }
-    if mods.alt   { bits |= 2; }
-    if mods.ctrl  { bits |= 4; }
+    if mods.shift {
+        bits |= 1;
+    }
+    if mods.alt {
+        bits |= 2;
+    }
+    if mods.ctrl {
+        bits |= 4;
+    }
     // super/logo is bit 8 — not tracked in our Modifiers struct yet.
     bits
 }
@@ -247,12 +253,12 @@ fn format_csi_u(codepoint: u32, mod_bits: u8, event_suffix: Option<u8>) -> Vec<u
 fn encode_kitty_special(key: &KeyCode, mod_bits: u8, event_suffix: Option<u8>) -> Option<Vec<u8>> {
     // Cursor keys use letter suffixes directly.
     let suffix = match key {
-        KeyCode::ArrowUp    => 'A',
-        KeyCode::ArrowDown  => 'B',
+        KeyCode::ArrowUp => 'A',
+        KeyCode::ArrowDown => 'B',
         KeyCode::ArrowRight => 'C',
-        KeyCode::ArrowLeft  => 'D',
-        KeyCode::Home       => 'H',
-        KeyCode::End        => 'F',
+        KeyCode::ArrowLeft => 'D',
+        KeyCode::Home => 'H',
+        KeyCode::End => 'F',
         _ => return None,
     };
 
@@ -280,24 +286,28 @@ fn encode_kitty_special(key: &KeyCode, mod_bits: u8, event_suffix: Option<u8>) -
 /// Encode functional keys that use the `~` suffix with a key number.
 ///
 /// Format: `CSI number [; modifier[:event]] ~`
-fn encode_kitty_functional(key: &KeyCode, mod_bits: u8, event_suffix: Option<u8>) -> Option<Vec<u8>> {
+fn encode_kitty_functional(
+    key: &KeyCode,
+    mod_bits: u8,
+    event_suffix: Option<u8>,
+) -> Option<Vec<u8>> {
     let number = match key {
-        KeyCode::Insert   => 2,
-        KeyCode::Delete   => 3,
-        KeyCode::PageUp   => 5,
+        KeyCode::Insert => 2,
+        KeyCode::Delete => 3,
+        KeyCode::PageUp => 5,
         KeyCode::PageDown => 6,
-        KeyCode::F1       => 11,
-        KeyCode::F2       => 12,
-        KeyCode::F3       => 13,
-        KeyCode::F4       => 14,
-        KeyCode::F5       => 15,
-        KeyCode::F6       => 17,
-        KeyCode::F7       => 18,
-        KeyCode::F8       => 19,
-        KeyCode::F9       => 20,
-        KeyCode::F10      => 21,
-        KeyCode::F11      => 23,
-        KeyCode::F12      => 24,
+        KeyCode::F1 => 11,
+        KeyCode::F2 => 12,
+        KeyCode::F3 => 13,
+        KeyCode::F4 => 14,
+        KeyCode::F5 => 15,
+        KeyCode::F6 => 17,
+        KeyCode::F7 => 18,
+        KeyCode::F8 => 19,
+        KeyCode::F9 => 20,
+        KeyCode::F10 => 21,
+        KeyCode::F11 => 23,
+        KeyCode::F12 => 24,
         _ => return None,
     };
 
@@ -325,11 +335,11 @@ fn encode_kitty_functional(key: &KeyCode, mod_bits: u8, event_suffix: Option<u8>
 /// here; printable characters map to their Unicode value.
 fn key_to_unicode(key: &KeyCode) -> Option<u32> {
     match key {
-        KeyCode::Escape    => Some(27),
-        KeyCode::Enter     => Some(13),
-        KeyCode::Tab       => Some(9),
+        KeyCode::Escape => Some(27),
+        KeyCode::Enter => Some(13),
+        KeyCode::Tab => Some(9),
         KeyCode::Backspace => Some(127),
-        KeyCode::Char(ch)  => Some(*ch as u32),
+        KeyCode::Char(ch) => Some(*ch as u32),
         // Cursor/functional keys are handled by their own encoders.
         _ => None,
     }
@@ -366,23 +376,23 @@ fn ctrl_char_byte(ch: char) -> Option<u8> {
 
 fn encode_special(key: &KeyCode) -> Option<Vec<u8>> {
     let bytes: &[u8] = match key {
-        KeyCode::Enter     => b"\r",
+        KeyCode::Enter => b"\r",
         KeyCode::Backspace => b"\x7f",
-        KeyCode::Tab       => b"\t",
-        KeyCode::Escape    => b"\x1b",
+        KeyCode::Tab => b"\t",
+        KeyCode::Escape => b"\x1b",
 
         // Cursor movement
-        KeyCode::ArrowUp    => b"\x1b[A",
-        KeyCode::ArrowDown  => b"\x1b[B",
+        KeyCode::ArrowUp => b"\x1b[A",
+        KeyCode::ArrowDown => b"\x1b[B",
         KeyCode::ArrowRight => b"\x1b[C",
-        KeyCode::ArrowLeft  => b"\x1b[D",
+        KeyCode::ArrowLeft => b"\x1b[D",
 
         // Editing keys
-        KeyCode::Home     => b"\x1b[H",
-        KeyCode::End      => b"\x1b[F",
-        KeyCode::Insert   => b"\x1b[2~",
-        KeyCode::Delete   => b"\x1b[3~",
-        KeyCode::PageUp   => b"\x1b[5~",
+        KeyCode::Home => b"\x1b[H",
+        KeyCode::End => b"\x1b[F",
+        KeyCode::Insert => b"\x1b[2~",
+        KeyCode::Delete => b"\x1b[3~",
+        KeyCode::PageUp => b"\x1b[5~",
         KeyCode::PageDown => b"\x1b[6~",
 
         _ => return None,
@@ -394,15 +404,15 @@ fn encode_special(key: &KeyCode) -> Option<Vec<u8>> {
 
 fn encode_fkey(key: &KeyCode) -> Option<Vec<u8>> {
     let seq: &[u8] = match key {
-        KeyCode::F1  => b"\x1bOP",
-        KeyCode::F2  => b"\x1bOQ",
-        KeyCode::F3  => b"\x1bOR",
-        KeyCode::F4  => b"\x1bOS",
-        KeyCode::F5  => b"\x1b[15~",
-        KeyCode::F6  => b"\x1b[17~",
-        KeyCode::F7  => b"\x1b[18~",
-        KeyCode::F8  => b"\x1b[19~",
-        KeyCode::F9  => b"\x1b[20~",
+        KeyCode::F1 => b"\x1bOP",
+        KeyCode::F2 => b"\x1bOQ",
+        KeyCode::F3 => b"\x1bOR",
+        KeyCode::F4 => b"\x1bOS",
+        KeyCode::F5 => b"\x1b[15~",
+        KeyCode::F6 => b"\x1b[17~",
+        KeyCode::F7 => b"\x1b[18~",
+        KeyCode::F8 => b"\x1b[19~",
+        KeyCode::F9 => b"\x1b[20~",
         KeyCode::F10 => b"\x1b[21~",
         KeyCode::F11 => b"\x1b[23~",
         KeyCode::F12 => b"\x1b[24~",
@@ -418,31 +428,51 @@ mod tests {
     use super::*;
 
     fn no_mods() -> Modifiers {
-        Modifiers { ctrl: false, alt: false, shift: false }
+        Modifiers {
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
     }
 
     fn ctrl() -> Modifiers {
-        Modifiers { ctrl: true, ..no_mods() }
+        Modifiers {
+            ctrl: true,
+            ..no_mods()
+        }
     }
 
     fn alt() -> Modifiers {
-        Modifiers { alt: true, ..no_mods() }
+        Modifiers {
+            alt: true,
+            ..no_mods()
+        }
     }
 
     fn ctrl_alt() -> Modifiers {
-        Modifiers { ctrl: true, alt: true, ..no_mods() }
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            ..no_mods()
+        }
     }
 
     // ── Printable text ──────────────────────────────────────────────────
 
     #[test]
     fn printable_ascii() {
-        assert_eq!(encode_key(&KeyCode::Char('a'), &no_mods()), Some(b"a".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Char('a'), &no_mods()),
+            Some(b"a".to_vec())
+        );
     }
 
     #[test]
     fn printable_shifted() {
-        let mods = Modifiers { shift: true, ..no_mods() };
+        let mods = Modifiers {
+            shift: true,
+            ..no_mods()
+        };
         assert_eq!(encode_key(&KeyCode::Char('A'), &mods), Some(b"A".to_vec()));
     }
 
@@ -458,12 +488,18 @@ mod tests {
 
     #[test]
     fn enter_key() {
-        assert_eq!(encode_key(&KeyCode::Enter, &no_mods()), Some(b"\r".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Enter, &no_mods()),
+            Some(b"\r".to_vec())
+        );
     }
 
     #[test]
     fn backspace_key() {
-        assert_eq!(encode_key(&KeyCode::Backspace, &no_mods()), Some(b"\x7f".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Backspace, &no_mods()),
+            Some(b"\x7f".to_vec())
+        );
     }
 
     #[test]
@@ -473,61 +509,94 @@ mod tests {
 
     #[test]
     fn escape_key() {
-        assert_eq!(encode_key(&KeyCode::Escape, &no_mods()), Some(b"\x1b".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Escape, &no_mods()),
+            Some(b"\x1b".to_vec())
+        );
     }
 
     // ── Arrow keys ──────────────────────────────────────────────────────
 
     #[test]
     fn arrow_up() {
-        assert_eq!(encode_key(&KeyCode::ArrowUp, &no_mods()), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::ArrowUp, &no_mods()),
+            Some(b"\x1b[A".to_vec())
+        );
     }
 
     #[test]
     fn arrow_down() {
-        assert_eq!(encode_key(&KeyCode::ArrowDown, &no_mods()), Some(b"\x1b[B".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::ArrowDown, &no_mods()),
+            Some(b"\x1b[B".to_vec())
+        );
     }
 
     #[test]
     fn arrow_right() {
-        assert_eq!(encode_key(&KeyCode::ArrowRight, &no_mods()), Some(b"\x1b[C".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::ArrowRight, &no_mods()),
+            Some(b"\x1b[C".to_vec())
+        );
     }
 
     #[test]
     fn arrow_left() {
-        assert_eq!(encode_key(&KeyCode::ArrowLeft, &no_mods()), Some(b"\x1b[D".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::ArrowLeft, &no_mods()),
+            Some(b"\x1b[D".to_vec())
+        );
     }
 
     // ── Editing keys ────────────────────────────────────────────────────
 
     #[test]
     fn home_key() {
-        assert_eq!(encode_key(&KeyCode::Home, &no_mods()), Some(b"\x1b[H".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Home, &no_mods()),
+            Some(b"\x1b[H".to_vec())
+        );
     }
 
     #[test]
     fn end_key() {
-        assert_eq!(encode_key(&KeyCode::End, &no_mods()), Some(b"\x1b[F".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::End, &no_mods()),
+            Some(b"\x1b[F".to_vec())
+        );
     }
 
     #[test]
     fn delete_key() {
-        assert_eq!(encode_key(&KeyCode::Delete, &no_mods()), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Delete, &no_mods()),
+            Some(b"\x1b[3~".to_vec())
+        );
     }
 
     #[test]
     fn insert_key() {
-        assert_eq!(encode_key(&KeyCode::Insert, &no_mods()), Some(b"\x1b[2~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::Insert, &no_mods()),
+            Some(b"\x1b[2~".to_vec())
+        );
     }
 
     #[test]
     fn page_up() {
-        assert_eq!(encode_key(&KeyCode::PageUp, &no_mods()), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::PageUp, &no_mods()),
+            Some(b"\x1b[5~".to_vec())
+        );
     }
 
     #[test]
     fn page_down() {
-        assert_eq!(encode_key(&KeyCode::PageDown, &no_mods()), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::PageDown, &no_mods()),
+            Some(b"\x1b[6~".to_vec())
+        );
     }
 
     // ── Ctrl + letter ───────────────────────────────────────────────────
@@ -561,17 +630,26 @@ mod tests {
 
     #[test]
     fn f1() {
-        assert_eq!(encode_key(&KeyCode::F1, &no_mods()), Some(b"\x1bOP".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::F1, &no_mods()),
+            Some(b"\x1bOP".to_vec())
+        );
     }
 
     #[test]
     fn f5() {
-        assert_eq!(encode_key(&KeyCode::F5, &no_mods()), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::F5, &no_mods()),
+            Some(b"\x1b[15~".to_vec())
+        );
     }
 
     #[test]
     fn f12() {
-        assert_eq!(encode_key(&KeyCode::F12, &no_mods()), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(
+            encode_key(&KeyCode::F12, &no_mods()),
+            Some(b"\x1b[24~".to_vec())
+        );
     }
 
     // ── Ignored keys ────────────────────────────────────────────────────
@@ -587,34 +665,56 @@ mod tests {
 
     #[test]
     fn alt_b_word_back() {
-        assert_eq!(encode_key(&KeyCode::Char('b'), &alt()), Some(vec![0x1b, b'b']));
+        assert_eq!(
+            encode_key(&KeyCode::Char('b'), &alt()),
+            Some(vec![0x1b, b'b'])
+        );
     }
 
     #[test]
     fn alt_f_word_forward() {
-        assert_eq!(encode_key(&KeyCode::Char('f'), &alt()), Some(vec![0x1b, b'f']));
+        assert_eq!(
+            encode_key(&KeyCode::Char('f'), &alt()),
+            Some(vec![0x1b, b'f'])
+        );
     }
 
     #[test]
     fn alt_d_kill_word() {
-        assert_eq!(encode_key(&KeyCode::Char('d'), &alt()), Some(vec![0x1b, b'd']));
+        assert_eq!(
+            encode_key(&KeyCode::Char('d'), &alt()),
+            Some(vec![0x1b, b'd'])
+        );
     }
 
     #[test]
     fn alt_dot_last_arg() {
-        assert_eq!(encode_key(&KeyCode::Char('.'), &alt()), Some(vec![0x1b, b'.']));
+        assert_eq!(
+            encode_key(&KeyCode::Char('.'), &alt()),
+            Some(vec![0x1b, b'.'])
+        );
     }
 
     #[test]
     fn alt_uppercase_b() {
-        let mods = Modifiers { alt: true, shift: true, ..no_mods() };
-        assert_eq!(encode_key(&KeyCode::Char('B'), &mods), Some(vec![0x1b, b'B']));
+        let mods = Modifiers {
+            alt: true,
+            shift: true,
+            ..no_mods()
+        };
+        assert_eq!(
+            encode_key(&KeyCode::Char('B'), &mods),
+            Some(vec![0x1b, b'B'])
+        );
     }
 
     #[test]
     fn ctrl_alt_does_not_add_esc_prefix() {
         // Ctrl+Alt+C -> Ctrl+C (0x03), not ESC+'c'
-        assert_eq!(encode_key(&KeyCode::Char('c'), &ctrl_alt()), Some(vec![0x03]));
+        assert_eq!(
+            encode_key(&KeyCode::Char('c'), &ctrl_alt()),
+            Some(vec![0x03])
+        );
     }
 
     #[test]
@@ -641,7 +741,12 @@ mod tests {
     fn kitty_plain_a() {
         // 'a' = U+0061 = 97 -> CSI 97 u
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('a'), &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('a'),
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[97u".to_vec()),
         );
     }
@@ -649,9 +754,17 @@ mod tests {
     #[test]
     fn kitty_shifted_a() {
         // Shift+A = U+0041 = 65, shift=bit1 -> modifier param = 2
-        let mods = Modifiers { shift: true, ..Modifiers::default() };
+        let mods = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('A'), &mods, kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('A'),
+                &mods,
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[65;2u".to_vec()),
         );
     }
@@ -660,7 +773,12 @@ mod tests {
     fn kitty_ctrl_c() {
         // Ctrl+c: codepoint 99, ctrl=bit4 -> modifier param = 5
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('c'), &ctrl(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('c'),
+                &ctrl(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[99;5u".to_vec()),
         );
     }
@@ -668,9 +786,18 @@ mod tests {
     #[test]
     fn kitty_ctrl_shift_a() {
         // Ctrl+Shift+a: codepoint 97, shift=1 + ctrl=4 = 5 -> param = 6
-        let mods = Modifiers { ctrl: true, shift: true, ..Modifiers::default() };
+        let mods = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        };
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('a'), &mods, kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('a'),
+                &mods,
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[97;6u".to_vec()),
         );
     }
@@ -679,7 +806,12 @@ mod tests {
     fn kitty_alt_b() {
         // Alt+b: codepoint 98, alt=bit2 -> modifier param = 3
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('b'), &alt(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('b'),
+                &alt(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[98;3u".to_vec()),
         );
     }
@@ -690,7 +822,12 @@ mod tests {
     fn kitty_enter() {
         // Enter = codepoint 13
         assert_eq!(
-            encode_key_kitty(&KeyCode::Enter, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Enter,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[13u".to_vec()),
         );
     }
@@ -699,7 +836,12 @@ mod tests {
     fn kitty_tab() {
         // Tab = codepoint 9
         assert_eq!(
-            encode_key_kitty(&KeyCode::Tab, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Tab,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[9u".to_vec()),
         );
     }
@@ -708,7 +850,12 @@ mod tests {
     fn kitty_escape() {
         // Escape = codepoint 27
         assert_eq!(
-            encode_key_kitty(&KeyCode::Escape, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Escape,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[27u".to_vec()),
         );
     }
@@ -717,7 +864,12 @@ mod tests {
     fn kitty_backspace() {
         // Backspace = codepoint 127
         assert_eq!(
-            encode_key_kitty(&KeyCode::Backspace, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Backspace,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[127u".to_vec()),
         );
     }
@@ -728,7 +880,12 @@ mod tests {
     fn kitty_arrow_up_no_mods() {
         // ArrowUp with no modifiers -> CSI 1 A
         assert_eq!(
-            encode_key_kitty(&KeyCode::ArrowUp, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::ArrowUp,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[1A".to_vec()),
         );
     }
@@ -737,7 +894,12 @@ mod tests {
     fn kitty_arrow_down_ctrl() {
         // Ctrl+Down: ctrl=4 -> param=5  -> CSI 1;5 B
         assert_eq!(
-            encode_key_kitty(&KeyCode::ArrowDown, &ctrl(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::ArrowDown,
+                &ctrl(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[1;5B".to_vec()),
         );
     }
@@ -745,9 +907,17 @@ mod tests {
     #[test]
     fn kitty_home_shift() {
         // Shift+Home: shift=1 -> param=2  -> CSI 1;2 H
-        let mods = Modifiers { shift: true, ..Modifiers::default() };
+        let mods = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         assert_eq!(
-            encode_key_kitty(&KeyCode::Home, &mods, kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Home,
+                &mods,
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[1;2H".to_vec()),
         );
     }
@@ -755,7 +925,12 @@ mod tests {
     #[test]
     fn kitty_end_no_mods() {
         assert_eq!(
-            encode_key_kitty(&KeyCode::End, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::End,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[1F".to_vec()),
         );
     }
@@ -766,7 +941,12 @@ mod tests {
     fn kitty_delete_no_mods() {
         // Delete = number 3 -> CSI 3 ~
         assert_eq!(
-            encode_key_kitty(&KeyCode::Delete, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Delete,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[3~".to_vec()),
         );
     }
@@ -775,7 +955,12 @@ mod tests {
     fn kitty_insert_ctrl() {
         // Ctrl+Insert: number 2, ctrl param=5 -> CSI 2;5 ~
         assert_eq!(
-            encode_key_kitty(&KeyCode::Insert, &ctrl(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Insert,
+                &ctrl(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[2;5~".to_vec()),
         );
     }
@@ -784,7 +969,12 @@ mod tests {
     fn kitty_f1_no_mods() {
         // F1 = number 11 -> CSI 11 ~
         assert_eq!(
-            encode_key_kitty(&KeyCode::F1, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::F1,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[11~".to_vec()),
         );
     }
@@ -792,9 +982,17 @@ mod tests {
     #[test]
     fn kitty_f5_shift() {
         // Shift+F5: number 15, shift param=2 -> CSI 15;2 ~
-        let mods = Modifiers { shift: true, ..Modifiers::default() };
+        let mods = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
         assert_eq!(
-            encode_key_kitty(&KeyCode::F5, &mods, kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::F5,
+                &mods,
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[15;2~".to_vec()),
         );
     }
@@ -802,7 +1000,12 @@ mod tests {
     #[test]
     fn kitty_f12_no_mods() {
         assert_eq!(
-            encode_key_kitty(&KeyCode::F12, &no_mods(), kitty_disambiguate(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::F12,
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[24~".to_vec()),
         );
     }
@@ -813,7 +1016,12 @@ mod tests {
     fn kitty_key_release_a() {
         // Release event for 'a' with report-events flag -> CSI 97;1:3 u
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('a'), &no_mods(), kitty_disambiguate_events(), KeyEventType::Release),
+            encode_key_kitty(
+                &KeyCode::Char('a'),
+                &no_mods(),
+                kitty_disambiguate_events(),
+                KeyEventType::Release
+            ),
             Some(b"\x1b[97;1:3u".to_vec()),
         );
     }
@@ -822,7 +1030,12 @@ mod tests {
     fn kitty_key_repeat_ctrl_c() {
         // Repeat event for Ctrl+c -> CSI 99;5:2 u
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('c'), &ctrl(), kitty_disambiguate_events(), KeyEventType::Repeat),
+            encode_key_kitty(
+                &KeyCode::Char('c'),
+                &ctrl(),
+                kitty_disambiguate_events(),
+                KeyEventType::Repeat
+            ),
             Some(b"\x1b[99;5:2u".to_vec()),
         );
     }
@@ -831,7 +1044,12 @@ mod tests {
     fn kitty_release_arrow_up() {
         // Release ArrowUp with report-events -> CSI 1;1:3 A
         assert_eq!(
-            encode_key_kitty(&KeyCode::ArrowUp, &no_mods(), kitty_disambiguate_events(), KeyEventType::Release),
+            encode_key_kitty(
+                &KeyCode::ArrowUp,
+                &no_mods(),
+                kitty_disambiguate_events(),
+                KeyEventType::Release
+            ),
             Some(b"\x1b[1;1:3A".to_vec()),
         );
     }
@@ -840,7 +1058,12 @@ mod tests {
     fn kitty_release_f1() {
         // Release F1 with report-events -> CSI 11;1:3 ~
         assert_eq!(
-            encode_key_kitty(&KeyCode::F1, &no_mods(), kitty_disambiguate_events(), KeyEventType::Release),
+            encode_key_kitty(
+                &KeyCode::F1,
+                &no_mods(),
+                kitty_disambiguate_events(),
+                KeyEventType::Release
+            ),
             Some(b"\x1b[11;1:3~".to_vec()),
         );
     }
@@ -849,7 +1072,12 @@ mod tests {
     fn kitty_press_no_event_suffix() {
         // Press event (default) should NOT include :1 even with report-events flag.
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('a'), &no_mods(), kitty_disambiguate_events(), KeyEventType::Press),
+            encode_key_kitty(
+                &KeyCode::Char('a'),
+                &no_mods(),
+                kitty_disambiguate_events(),
+                KeyEventType::Press
+            ),
             Some(b"\x1b[97u".to_vec()),
         );
     }
@@ -860,7 +1088,12 @@ mod tests {
     fn kitty_release_ignored_without_flag() {
         // Without REPORT_EVENTS, release should still encode as a press (no :3 suffix).
         assert_eq!(
-            encode_key_kitty(&KeyCode::Char('a'), &no_mods(), kitty_disambiguate(), KeyEventType::Release),
+            encode_key_kitty(
+                &KeyCode::Char('a'),
+                &no_mods(),
+                kitty_disambiguate(),
+                KeyEventType::Release
+            ),
             Some(b"\x1b[97u".to_vec()),
         );
     }

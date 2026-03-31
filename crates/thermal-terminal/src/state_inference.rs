@@ -262,9 +262,9 @@ const MIN_WRITE_INTERVAL: Duration = Duration::from_millis(500);
 impl AgentStateInference {
     /// Create a new inference engine with the given configuration.
     pub fn new(config: InferenceConfig) -> Self {
-        let state_file_path = config.agent_type.map(|at| {
-            PathBuf::from(at.state_dir()).join(format!("{}.json", config.session_id))
-        });
+        let state_file_path = config
+            .agent_type
+            .map(|at| PathBuf::from(at.state_dir()).join(format!("{}.json", config.session_id)));
 
         Self {
             config,
@@ -494,9 +494,7 @@ impl AgentStateInference {
             }
 
             // Stop early if we found everything we need.
-            if (!need_agent || new_agent_type.is_some())
-                && (!need_model || new_model.is_some())
-            {
+            if (!need_agent || new_agent_type.is_some()) && (!need_model || new_model.is_some()) {
                 break;
             }
         }
@@ -1025,9 +1023,7 @@ fn now_rfc3339() -> String {
     // Simplified: use a basic algorithm for dates from 1970 onward.
     let (year, month, day) = days_to_ymd(days);
 
-    format!(
-        "{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z"
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -1387,10 +1383,7 @@ mod tests {
         assert_eq!(engine.recent_lines.len(), MAX_RECENT_LINES);
         // Oldest lines should be evicted.
         assert_eq!(engine.recent_lines[0], "line 10");
-        assert_eq!(
-            engine.recent_lines[MAX_RECENT_LINES - 1],
-            "line 59"
-        );
+        assert_eq!(engine.recent_lines[MAX_RECENT_LINES - 1], "line 59");
     }
 
     // ── Stateful ANSI stripper (split sequences) ─────────────────────────
@@ -1513,7 +1506,10 @@ mod tests {
 
         // Feed output containing a model identifier.
         engine.feed_bytes(b"using: claude-sonnet-4-20250514\n");
-        assert_eq!(engine.detected_model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(
+            engine.detected_model.as_deref(),
+            Some("claude-sonnet-4-20250514")
+        );
 
         // Status is still Idle (unchanged), but dirty should have been set
         // and then cleared by the write inside feed_bytes.
@@ -1561,15 +1557,24 @@ mod tests {
         // Status changed to Processing, dirty was set, but throttle blocked the write.
         assert_eq!(engine.last_status, InferredStatus::Processing);
         assert!(engine.dirty, "dirty flag should persist when throttled");
-        assert_eq!(engine.last_write, initial_write_time, "last_write unchanged — write was throttled");
+        assert_eq!(
+            engine.last_write, initial_write_time,
+            "last_write unchanged — write was throttled"
+        );
 
         // Fast-forward past the throttle window.
         engine.last_write = Instant::now() - MIN_WRITE_INTERVAL - Duration::from_millis(1);
 
         // Next infer_and_write call should flush the pending dirty state.
         engine.infer_and_write();
-        assert!(!engine.dirty, "dirty should be cleared after deferred flush");
-        assert!(engine.last_write > initial_write_time, "last_write should be updated after flush");
+        assert!(
+            !engine.dirty,
+            "dirty should be cleared after deferred flush"
+        );
+        assert!(
+            engine.last_write > initial_write_time,
+            "last_write should be updated after flush"
+        );
     }
 
     #[test]

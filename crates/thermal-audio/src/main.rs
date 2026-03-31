@@ -319,7 +319,9 @@ impl AudioManager {
             return Ok(path);
         }
 
-        let bin = self.edge_tts_bin.as_ref()
+        let bin = self
+            .edge_tts_bin
+            .as_ref()
             .context("edge-tts not available")?;
 
         // Use tokio::process::Command so edge-tts runs without blocking
@@ -734,7 +736,10 @@ async fn main() -> Result<()> {
     // Seed initial states without announcing.
     for session in poller.poll() {
         if !session.session_id.is_empty() {
-            prev_states.insert(session.session_id.clone(), (session.status.clone(), session.current_tool.clone()));
+            prev_states.insert(
+                session.session_id.clone(),
+                (session.status.clone(), session.current_tool.clone()),
+            );
             if let Some(pct) = session.context_percent {
                 let threshold = context_threshold(pct as u32);
                 prev_context_alert.insert(session.session_id.clone(), threshold);
@@ -975,7 +980,10 @@ async fn handle_socket_connection(
             writer.write_all(b"\n").await?;
         }
         SocketMessage::GetStatus => {
-            let state = audio_state.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let state = audio_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
             let resp = serde_json::to_string(&ControlResponse {
                 ok: true,
                 muted: state.muted,

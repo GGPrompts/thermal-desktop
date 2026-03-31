@@ -242,9 +242,9 @@ impl AgentGraph {
             .nodes
             .values()
             .filter_map(|n| {
-                n.parent_session_id.as_ref().map(|parent_id| {
-                    (parent_id.clone(), n.session_id.clone())
-                })
+                n.parent_session_id
+                    .as_ref()
+                    .map(|parent_id| (parent_id.clone(), n.session_id.clone()))
             })
             .filter(|(parent_id, _)| self.nodes.contains_key(parent_id))
             .collect();
@@ -293,8 +293,14 @@ impl AgentGraph {
         // Edge attraction (Hooke's law).
         for (parent_id, child_id) in &edges {
             if let (Some(p_pos), Some(c_pos)) = (
-                positions.iter().find(|(id, _)| id == parent_id).map(|(_, p)| *p),
-                positions.iter().find(|(id, _)| id == child_id).map(|(_, p)| *p),
+                positions
+                    .iter()
+                    .find(|(id, _)| id == parent_id)
+                    .map(|(_, p)| *p),
+                positions
+                    .iter()
+                    .find(|(id, _)| id == child_id)
+                    .map(|(_, p)| *p),
             ) {
                 let dx = c_pos[0] - p_pos[0];
                 let dy = c_pos[1] - p_pos[1];

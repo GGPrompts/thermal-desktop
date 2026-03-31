@@ -212,7 +212,10 @@ impl DaemonClient {
     ///
     /// Returns `true` if the daemon responded within the timeout, `false` otherwise.
     pub async fn is_healthy(&mut self) -> bool {
-        matches!(self.request_with_timeout(Request::Ping).await, Ok(Response::Pong))
+        matches!(
+            self.request_with_timeout(Request::Ping).await,
+            Ok(Response::Pong)
+        )
     }
 
     /// Send a request to the daemon.
@@ -442,10 +445,7 @@ mod tests {
         let result = DaemonClient::connect_to(path)
             .await
             .expect("connect_to should not error for missing socket");
-        assert!(
-            result.is_none(),
-            "Missing socket should return Ok(None)"
-        );
+        assert!(result.is_none(), "Missing socket should return Ok(None)");
     }
 
     #[tokio::test]
@@ -481,13 +481,10 @@ mod tests {
         client.send(Request::Ping).await.expect("send");
 
         // The response should arrive on the taken receiver.
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            rx.recv(),
-        )
-        .await
-        .expect("timeout")
-        .expect("channel closed");
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
 
         assert!(matches!(resp, Response::Pong));
 
@@ -621,11 +618,11 @@ mod tests {
         // Remove the socket file to simulate daemon fully gone.
         let _ = std::fs::remove_file(&sock_path);
 
-        let result = client.reconnect().await.expect("reconnect should not error");
-        assert!(
-            !result,
-            "reconnect should return false when socket is gone"
-        );
+        let result = client
+            .reconnect()
+            .await
+            .expect("reconnect should not error");
+        assert!(!result, "reconnect should return false when socket is gone");
     }
 
     #[tokio::test]

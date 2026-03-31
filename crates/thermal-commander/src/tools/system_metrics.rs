@@ -84,8 +84,14 @@ async fn read_gpu() -> Option<(f64, f64, f64)> {
 ///
 /// No input parameters required.
 pub async fn system_metrics(_args: Value) -> Result<ToolResult> {
-    let cpu_pct = read_cpu_usage().unwrap_or_else(|e| { tracing::warn!("CPU read failed: {e}"); 0.0 });
-    let (mem_used_gb, mem_total_gb) = read_memory().unwrap_or_else(|e| { tracing::warn!("memory read failed: {e}"); (0.0, 0.0) });
+    let cpu_pct = read_cpu_usage().unwrap_or_else(|e| {
+        tracing::warn!("CPU read failed: {e}");
+        0.0
+    });
+    let (mem_used_gb, mem_total_gb) = read_memory().unwrap_or_else(|e| {
+        tracing::warn!("memory read failed: {e}");
+        (0.0, 0.0)
+    });
 
     let gpu = read_gpu().await;
 

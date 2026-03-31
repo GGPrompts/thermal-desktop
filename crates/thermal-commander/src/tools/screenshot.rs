@@ -21,10 +21,9 @@ pub async fn capture_pane(args: Value) -> Result<ToolResult> {
         cmd.arg("--match").arg(format!("id:{window_id}"));
     }
 
-    let output = cmd
-        .output()
-        .await
-        .context("failed to run kitty @ get-text — is kitty running with remote control enabled?")?;
+    let output = cmd.output().await.context(
+        "failed to run kitty @ get-text — is kitty running with remote control enabled?",
+    )?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

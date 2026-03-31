@@ -134,9 +134,7 @@ pub async fn detect_backend(http: &reqwest::Client) -> Result<LlmBackend> {
         return Ok(LlmBackend::Ollama);
     }
 
-    anyhow::bail!(
-        "no LLM backend available — install claude CLI, gh copilot, or start Ollama"
-    );
+    anyhow::bail!("no LLM backend available — install claude CLI, gh copilot, or start Ollama");
 }
 
 /// Check if `claude` CLI is installed and authenticated.
@@ -191,10 +189,7 @@ pub async fn check_ollama_health(http: &reqwest::Client, model: &str) -> Result<
         .context("cannot reach Ollama at localhost:11434 — is it running?")?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "Ollama health check returned HTTP {}",
-            response.status()
-        );
+        anyhow::bail!("Ollama health check returned HTTP {}", response.status());
     }
 
     let body: Value = response
@@ -332,11 +327,7 @@ fn build_ollama_messages(messages: &[Value]) -> Vec<Value> {
 /// Uses `--json-schema` to force structured `tool_calls` output. The transcript
 /// is passed as the prompt; conversation history is included in the system prompt
 /// as context. Returns the same normalised format as `call_ollama()`.
-pub async fn call_cli_llm(
-    backend: &LlmBackend,
-    model: &str,
-    messages: &[Value],
-) -> Result<Value> {
+pub async fn call_cli_llm(backend: &LlmBackend, model: &str, messages: &[Value]) -> Result<Value> {
     // Build the full prompt: system prompt + conversation history + current message
     let prompt = build_cli_prompt(messages);
 
@@ -362,10 +353,7 @@ pub async fn call_cli_llm(
     let has_tool_calls = !tool_calls.is_empty();
 
     for (i, tc) in tool_calls.iter().enumerate() {
-        let name = tc
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
         let input = tc.get("input").cloned().unwrap_or(serde_json::json!({}));
 
         content_blocks.push(serde_json::json!({
@@ -376,7 +364,11 @@ pub async fn call_cli_llm(
         }));
     }
 
-    let stop_reason = if has_tool_calls { "tool_use" } else { "end_turn" };
+    let stop_reason = if has_tool_calls {
+        "tool_use"
+    } else {
+        "end_turn"
+    };
 
     info!(
         backend = %backend,
@@ -433,11 +425,15 @@ async fn call_claude_cli(model: &str, prompt: &str) -> Result<Value> {
     let output = tokio::process::Command::new("claude")
         .args([
             "-p",
-            "--output-format", "json",
+            "--output-format",
+            "json",
             "--no-session-persistence",
-            "--model", model,
-            "--system-prompt", SYSTEM_PROMPT,
-            "--json-schema", TOOL_CALL_JSON_SCHEMA,
+            "--model",
+            model,
+            "--system-prompt",
+            SYSTEM_PROMPT,
+            "--json-schema",
+            TOOL_CALL_JSON_SCHEMA,
             prompt,
         ])
         .stdout(std::process::Stdio::piped())
@@ -469,8 +465,7 @@ async fn call_claude_cli(model: &str, prompt: &str) -> Result<Value> {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Parse the JSON result — claude outputs a single JSON object
-    let parsed: Value =
-        serde_json::from_str(&stdout).context("parsing claude CLI JSON output")?;
+    let parsed: Value = serde_json::from_str(&stdout).context("parsing claude CLI JSON output")?;
 
     // Extract structured_output which contains our tool_calls
     if let Some(structured) = parsed.get("structured_output") {
@@ -493,7 +488,10 @@ async fn call_claude_cli(model: &str, prompt: &str) -> Result<Value> {
         }));
     }
 
-    anyhow::bail!("unexpected claude CLI output format: {}", truncate(&stdout, 500));
+    anyhow::bail!(
+        "unexpected claude CLI output format: {}",
+        truncate(&stdout, 500)
+    );
 }
 
 /// Invoke `gh copilot -p` with JSON output.
@@ -514,8 +512,10 @@ async fn call_copilot_cli(model: &str, prompt: &str) -> Result<Value> {
             "copilot",
             "-p",
             &full_prompt,
-            "--model", model,
-            "--output-format", "json",
+            "--model",
+            model,
+            "--output-format",
+            "json",
             "--no-custom-instructions",
             "--allow-all-tools",
         ])
@@ -689,9 +689,15 @@ pub async fn call_ollama(
         serde_json::from_str(&response_text).context("parsing Ollama API response JSON")?;
 
     // Log timing info from Ollama
-    let total_duration_ns = parsed.get("total_duration").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total_duration_ns = parsed
+        .get("total_duration")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let total_duration_ms = total_duration_ns / 1_000_000;
-    let eval_count = parsed.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let eval_count = parsed
+        .get("eval_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     // Extract the message object
     let message = parsed
@@ -733,7 +739,10 @@ pub async fn call_ollama(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         // Ollama returns arguments as an object (already parsed JSON)
-        let arguments = function.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+        let arguments = function
+            .get("arguments")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
 
         content_blocks.push(serde_json::json!({
             "type": "tool_use",
@@ -743,7 +752,11 @@ pub async fn call_ollama(
         }));
     }
 
-    let stop_reason = if has_tool_calls { "tool_use" } else { "end_turn" };
+    let stop_reason = if has_tool_calls {
+        "tool_use"
+    } else {
+        "end_turn"
+    };
 
     info!(
         %model,
@@ -778,9 +791,7 @@ pub fn convert_tool_results_for_ollama(user_msg: &Value) -> Vec<Value> {
 
     content
         .iter()
-        .filter(|block| {
-            block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
-        })
+        .filter(|block| block.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
         .map(|block| {
             let result_content = block
                 .get("content")
@@ -939,7 +950,12 @@ mod tests {
         let result = build_ollama_messages(&msgs);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0]["role"], "system");
-        assert!(result[0]["content"].as_str().unwrap().contains("voice transcripts"));
+        assert!(
+            result[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("voice transcripts")
+        );
         assert_eq!(result[1]["role"], "user");
         assert_eq!(result[1]["content"], "hello");
     }
@@ -963,7 +979,9 @@ mod tests {
         // Content should be a plain string, not an array
         assert_eq!(assistant["content"], "Opening Firefox.");
         // tool_calls should be present
-        let tool_calls = assistant["tool_calls"].as_array().expect("should have tool_calls");
+        let tool_calls = assistant["tool_calls"]
+            .as_array()
+            .expect("should have tool_calls");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["function"]["name"], "open_browser");
     }

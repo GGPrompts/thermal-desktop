@@ -264,8 +264,7 @@ impl PointerHandler for HudState {
     ) {
         for event in events {
             match event.kind {
-                PointerEventKind::Enter { .. }
-                | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.pointer_position = event.position;
                 }
                 PointerEventKind::Leave { .. } => {
@@ -419,7 +418,11 @@ pub async fn run() -> anyhow::Result<()> {
                 }
                 ClickAction::SessionFocus(idx, ws) => {
                     active_tab = *idx;
-                    tracing::info!(tab = idx, workspace = ws, "click: focusing session workspace");
+                    tracing::info!(
+                        tab = idx,
+                        workspace = ws,
+                        "click: focusing session workspace"
+                    );
                     let _ = std::process::Command::new("hyprctl")
                         .args(["dispatch", "workspace", &ws.to_string()])
                         .spawn();
@@ -457,7 +460,8 @@ pub async fn run() -> anyhow::Result<()> {
 
                 // Sort by workspace (same order as renderer) so click
                 // regions line up with rendered tabs.
-                sessions.sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
+                sessions
+                    .sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
 
                 // Clamp active tab index.
                 if !sessions.is_empty() && active_tab >= sessions.len() {
@@ -465,11 +469,7 @@ pub async fn run() -> anyhow::Result<()> {
                 }
 
                 // Rebuild click regions from session tab layout.
-                build_tab_click_regions(
-                    &sessions,
-                    hud.width as f32,
-                    &mut hud.click_regions,
-                );
+                build_tab_click_regions(&sessions, hud.width as f32, &mut hud.click_regions);
 
                 renderer.render_tabs(&sessions, active_tab)
             }

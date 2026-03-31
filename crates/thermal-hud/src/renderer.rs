@@ -362,7 +362,10 @@ impl Renderer {
                 let tab_text = if !tool_label.is_empty() {
                     format!("{ws_prefix}{session_label}  {tool_label}")
                 } else {
-                    format!("{ws_prefix}{session_label}  {}", status_label(&session.status))
+                    format!(
+                        "{ws_prefix}{session_label}  {}",
+                        status_label(&session.status)
+                    )
                 };
 
                 let text_x = dot_x + STATUS_DOT_SIZE + 6.0;
@@ -401,8 +404,7 @@ impl Renderer {
                     .unwrap_or_default();
                 let ctx_pct = session.context_percent.unwrap_or(0.0) as f32;
                 if !cwd_label.is_empty() {
-                    let mut cwd_buf =
-                        Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                    let mut cwd_buf = Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
                     cwd_buf.set_size(
                         &mut self.font_system,
                         Some((tab_width - TAB_PADDING * 2.0 - STATUS_DOT_SIZE - 6.0).max(50.0)),
@@ -1083,4 +1085,3 @@ fn context_bar_color(pct: f32) -> [f32; 4] {
         ThermalPalette::COOL
     }
 }
-

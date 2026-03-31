@@ -353,10 +353,17 @@ mod tests {
             VoiceState::Listening,
             VoiceState::Processing,
         ] {
-            let f = VoiceStateFile { state, label: None, level: None };
+            let f = VoiceStateFile {
+                state,
+                label: None,
+                level: None,
+            };
             let m = render_from_state(f);
             for &ch in &m.color {
-                assert!((0.0..=1.0).contains(&ch), "color channel out of range: {ch}");
+                assert!(
+                    (0.0..=1.0).contains(&ch),
+                    "color channel out of range: {ch}"
+                );
             }
         }
     }

@@ -11,8 +11,8 @@ use notify::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use time::OffsetDateTime;
 use time::Duration;
+use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tracing::{debug, trace, warn};
 
@@ -51,20 +51,12 @@ impl ClaudeSessionState {
     pub fn model_display_name(&self) -> String {
         let Some(raw) = self.model.as_deref() else {
             // No model field — fall back to agent_type
-            return self
-                .agent_type
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string();
+            return self.agent_type.as_deref().unwrap_or("unknown").to_string();
         };
 
         let m = raw.trim();
         if m.is_empty() {
-            return self
-                .agent_type
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string();
+            return self.agent_type.as_deref().unwrap_or("unknown").to_string();
         }
 
         model_display_name(m)
@@ -115,17 +107,49 @@ struct ModelEntry {
 /// (`crates/thermal-terminal/src/state_inference.rs`) should both stay in sync.
 const MODEL_REGISTRY: &[ModelEntry] = &[
     // --- Anthropic Claude (substring match, order doesn't matter) ---
-    ModelEntry { pattern: "opus",   display_prefix: "opus",   transform: ModelTransform::Substring },
-    ModelEntry { pattern: "sonnet", display_prefix: "sonnet", transform: ModelTransform::Substring },
-    ModelEntry { pattern: "haiku",  display_prefix: "haiku",  transform: ModelTransform::Substring },
+    ModelEntry {
+        pattern: "opus",
+        display_prefix: "opus",
+        transform: ModelTransform::Substring,
+    },
+    ModelEntry {
+        pattern: "sonnet",
+        display_prefix: "sonnet",
+        transform: ModelTransform::Substring,
+    },
+    ModelEntry {
+        pattern: "haiku",
+        display_prefix: "haiku",
+        transform: ModelTransform::Substring,
+    },
     // --- OpenAI o-series reasoning (must come before GPT to avoid false prefix match) ---
-    ModelEntry { pattern: "o1", display_prefix: "", transform: ModelTransform::RemoveDashes },
-    ModelEntry { pattern: "o3", display_prefix: "", transform: ModelTransform::RemoveDashes },
-    ModelEntry { pattern: "o4", display_prefix: "", transform: ModelTransform::RemoveDashes },
+    ModelEntry {
+        pattern: "o1",
+        display_prefix: "",
+        transform: ModelTransform::RemoveDashes,
+    },
+    ModelEntry {
+        pattern: "o3",
+        display_prefix: "",
+        transform: ModelTransform::RemoveDashes,
+    },
+    ModelEntry {
+        pattern: "o4",
+        display_prefix: "",
+        transform: ModelTransform::RemoveDashes,
+    },
     // --- OpenAI GPT ---
-    ModelEntry { pattern: "gpt", display_prefix: "gpt", transform: ModelTransform::StripPrefix },
+    ModelEntry {
+        pattern: "gpt",
+        display_prefix: "gpt",
+        transform: ModelTransform::StripPrefix,
+    },
     // --- Google Gemini ---
-    ModelEntry { pattern: "gemini", display_prefix: "gemini", transform: ModelTransform::StripPrefixAndPreview },
+    ModelEntry {
+        pattern: "gemini",
+        display_prefix: "gemini",
+        transform: ModelTransform::StripPrefixAndPreview,
+    },
 ];
 
 /// Map a raw model ID string to a short, human-friendly display name.
@@ -563,7 +587,9 @@ impl ClaudeStatePoller {
             .collect();
 
         for path in dead_paths {
-            let session_id = self.sessions.get(&path)
+            let session_id = self
+                .sessions
+                .get(&path)
                 .map(|s| s.session_id.as_str())
                 .unwrap_or("?")
                 .to_string();
@@ -947,79 +973,178 @@ mod tests {
 
     #[test]
     fn display_name_opus_variants() {
-        assert_eq!(session_with_model(Some("claude-opus-4-6"), None).model_display_name(), "opus");
-        assert_eq!(session_with_model(Some("claude-opus-4-20250115"), None).model_display_name(), "opus");
-        assert_eq!(session_with_model(Some("opus-4-6"), None).model_display_name(), "opus");
+        assert_eq!(
+            session_with_model(Some("claude-opus-4-6"), None).model_display_name(),
+            "opus"
+        );
+        assert_eq!(
+            session_with_model(Some("claude-opus-4-20250115"), None).model_display_name(),
+            "opus"
+        );
+        assert_eq!(
+            session_with_model(Some("opus-4-6"), None).model_display_name(),
+            "opus"
+        );
     }
 
     #[test]
     fn display_name_sonnet_variants() {
-        assert_eq!(session_with_model(Some("claude-sonnet-4-6"), None).model_display_name(), "sonnet");
-        assert_eq!(session_with_model(Some("claude-sonnet-4-20250514"), None).model_display_name(), "sonnet");
-        assert_eq!(session_with_model(Some("sonnet-4-6"), None).model_display_name(), "sonnet");
+        assert_eq!(
+            session_with_model(Some("claude-sonnet-4-6"), None).model_display_name(),
+            "sonnet"
+        );
+        assert_eq!(
+            session_with_model(Some("claude-sonnet-4-20250514"), None).model_display_name(),
+            "sonnet"
+        );
+        assert_eq!(
+            session_with_model(Some("sonnet-4-6"), None).model_display_name(),
+            "sonnet"
+        );
     }
 
     #[test]
     fn display_name_haiku_variants() {
-        assert_eq!(session_with_model(Some("claude-haiku-4-5"), None).model_display_name(), "haiku");
-        assert_eq!(session_with_model(Some("claude-haiku-4-20250514"), None).model_display_name(), "haiku");
-        assert_eq!(session_with_model(Some("haiku-3-5"), None).model_display_name(), "haiku");
+        assert_eq!(
+            session_with_model(Some("claude-haiku-4-5"), None).model_display_name(),
+            "haiku"
+        );
+        assert_eq!(
+            session_with_model(Some("claude-haiku-4-20250514"), None).model_display_name(),
+            "haiku"
+        );
+        assert_eq!(
+            session_with_model(Some("haiku-3-5"), None).model_display_name(),
+            "haiku"
+        );
     }
 
     #[test]
     fn display_name_gpt_variants() {
-        assert_eq!(session_with_model(Some("gpt-5.4"), None).model_display_name(), "gpt5.4");
-        assert_eq!(session_with_model(Some("gpt-5.4-mini"), None).model_display_name(), "gpt5.4mini");
-        assert_eq!(session_with_model(Some("gpt-4o"), None).model_display_name(), "gpt4o");
-        assert_eq!(session_with_model(Some("gpt-4o-mini"), None).model_display_name(), "gpt4omini");
-        assert_eq!(session_with_model(Some("gpt-4-turbo"), None).model_display_name(), "gpt4turbo");
+        assert_eq!(
+            session_with_model(Some("gpt-5.4"), None).model_display_name(),
+            "gpt5.4"
+        );
+        assert_eq!(
+            session_with_model(Some("gpt-5.4-mini"), None).model_display_name(),
+            "gpt5.4mini"
+        );
+        assert_eq!(
+            session_with_model(Some("gpt-4o"), None).model_display_name(),
+            "gpt4o"
+        );
+        assert_eq!(
+            session_with_model(Some("gpt-4o-mini"), None).model_display_name(),
+            "gpt4omini"
+        );
+        assert_eq!(
+            session_with_model(Some("gpt-4-turbo"), None).model_display_name(),
+            "gpt4turbo"
+        );
     }
 
     #[test]
     fn display_name_o_series() {
-        assert_eq!(session_with_model(Some("o3-pro"), None).model_display_name(), "o3pro");
-        assert_eq!(session_with_model(Some("o4-mini"), None).model_display_name(), "o4mini");
-        assert_eq!(session_with_model(Some("o3"), None).model_display_name(), "o3");
-        assert_eq!(session_with_model(Some("o1-preview"), None).model_display_name(), "o1preview");
+        assert_eq!(
+            session_with_model(Some("o3-pro"), None).model_display_name(),
+            "o3pro"
+        );
+        assert_eq!(
+            session_with_model(Some("o4-mini"), None).model_display_name(),
+            "o4mini"
+        );
+        assert_eq!(
+            session_with_model(Some("o3"), None).model_display_name(),
+            "o3"
+        );
+        assert_eq!(
+            session_with_model(Some("o1-preview"), None).model_display_name(),
+            "o1preview"
+        );
     }
 
     #[test]
     fn display_name_gemini_variants() {
-        assert_eq!(session_with_model(Some("gemini-3-pro-preview"), None).model_display_name(), "gemini3pro");
-        assert_eq!(session_with_model(Some("gemini-2.5-flash"), None).model_display_name(), "gemini2.5flash");
-        assert_eq!(session_with_model(Some("gemini-2.5-pro-preview"), None).model_display_name(), "gemini2.5pro");
+        assert_eq!(
+            session_with_model(Some("gemini-3-pro-preview"), None).model_display_name(),
+            "gemini3pro"
+        );
+        assert_eq!(
+            session_with_model(Some("gemini-2.5-flash"), None).model_display_name(),
+            "gemini2.5flash"
+        );
+        assert_eq!(
+            session_with_model(Some("gemini-2.5-pro-preview"), None).model_display_name(),
+            "gemini2.5pro"
+        );
     }
 
     #[test]
     fn display_name_unknown_model() {
-        assert_eq!(session_with_model(Some("llama-3-70b"), None).model_display_name(), "llama-3-70b");
-        assert_eq!(session_with_model(Some("qwen3:8b"), None).model_display_name(), "qwen3:8b");
-        assert_eq!(session_with_model(Some("mistral-large"), None).model_display_name(), "mistral-large");
+        assert_eq!(
+            session_with_model(Some("llama-3-70b"), None).model_display_name(),
+            "llama-3-70b"
+        );
+        assert_eq!(
+            session_with_model(Some("qwen3:8b"), None).model_display_name(),
+            "qwen3:8b"
+        );
+        assert_eq!(
+            session_with_model(Some("mistral-large"), None).model_display_name(),
+            "mistral-large"
+        );
     }
 
     #[test]
     fn display_name_none_falls_back_to_agent_type() {
-        assert_eq!(session_with_model(None, Some("claude")).model_display_name(), "claude");
-        assert_eq!(session_with_model(None, Some("codex")).model_display_name(), "codex");
-        assert_eq!(session_with_model(None, Some("copilot")).model_display_name(), "copilot");
+        assert_eq!(
+            session_with_model(None, Some("claude")).model_display_name(),
+            "claude"
+        );
+        assert_eq!(
+            session_with_model(None, Some("codex")).model_display_name(),
+            "codex"
+        );
+        assert_eq!(
+            session_with_model(None, Some("copilot")).model_display_name(),
+            "copilot"
+        );
     }
 
     #[test]
     fn display_name_none_model_none_agent_type() {
-        assert_eq!(session_with_model(None, None).model_display_name(), "unknown");
+        assert_eq!(
+            session_with_model(None, None).model_display_name(),
+            "unknown"
+        );
     }
 
     #[test]
     fn display_name_empty_string_falls_back() {
-        assert_eq!(session_with_model(Some(""), Some("claude")).model_display_name(), "claude");
-        assert_eq!(session_with_model(Some("  "), Some("codex")).model_display_name(), "codex");
-        assert_eq!(session_with_model(Some(""), None).model_display_name(), "unknown");
+        assert_eq!(
+            session_with_model(Some(""), Some("claude")).model_display_name(),
+            "claude"
+        );
+        assert_eq!(
+            session_with_model(Some("  "), Some("codex")).model_display_name(),
+            "codex"
+        );
+        assert_eq!(
+            session_with_model(Some(""), None).model_display_name(),
+            "unknown"
+        );
     }
 
     #[test]
     fn display_name_whitespace_trimmed() {
-        assert_eq!(session_with_model(Some("  claude-opus-4-6  "), None).model_display_name(), "opus");
-        assert_eq!(session_with_model(Some(" gpt-5.4 "), None).model_display_name(), "gpt5.4");
+        assert_eq!(
+            session_with_model(Some("  claude-opus-4-6  "), None).model_display_name(),
+            "opus"
+        );
+        assert_eq!(
+            session_with_model(Some(" gpt-5.4 "), None).model_display_name(),
+            "gpt5.4"
+        );
     }
 
     // --- session_is_dead edge cases ---
@@ -1037,7 +1162,10 @@ mod tests {
             last_updated: Some(now),
             ..ClaudeSessionState::default()
         };
-        assert!(!session_is_dead(&state), "session within 120s grace should not be dead even with dead PID");
+        assert!(
+            !session_is_dead(&state),
+            "session within 120s grace should not be dead even with dead PID"
+        );
     }
 
     #[test]
@@ -1093,7 +1221,10 @@ mod tests {
         std::fs::write(&bad_file, "this is not json {{{").unwrap();
 
         let result = ClaudeStatePoller::read_file(&bad_file);
-        assert!(result.is_none(), "malformed JSON should be skipped, not panic");
+        assert!(
+            result.is_none(),
+            "malformed JSON should be skipped, not panic"
+        );
     }
 
     #[test]
@@ -1196,7 +1327,10 @@ mod tests {
             last_updated: Some("2024-01-01T00:00:00Z".into()),
             ..ClaudeSessionState::default()
         };
-        assert!(session_is_dead(&state), "dead PID past grace period should be dead");
+        assert!(
+            session_is_dead(&state),
+            "dead PID past grace period should be dead"
+        );
     }
 
     #[test]

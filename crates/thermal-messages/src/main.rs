@@ -11,8 +11,8 @@ mod routing;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -22,15 +22,18 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, broadcast};
 use tracing::{error, info, warn};
 
-use thermal_core::message::{Message, MessageType};
 use routing::RouteTable;
+use thermal_core::message::{Message, MessageType};
 
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "thermal-messages", about = "Message bus daemon for inter-agent communication")]
+#[command(
+    name = "thermal-messages",
+    about = "Message bus daemon for inter-agent communication"
+)]
 struct Cli {
     /// Enable JSONL append-log persistence (~/.local/share/thermal/messages.jsonl).
     /// On startup, the log is loaded to populate the ring buffer.
@@ -513,9 +516,8 @@ async fn send_error(
 
 fn write_pidfile(path: &Path) -> Result<()> {
     let pid = std::process::id();
-    std::fs::write(path, pid.to_string()).with_context(|| {
-        format!("writing pidfile to {}", path.display())
-    })?;
+    std::fs::write(path, pid.to_string())
+        .with_context(|| format!("writing pidfile to {}", path.display()))?;
     info!(pid, path = %path.display(), "wrote pidfile");
     Ok(())
 }
@@ -621,8 +623,8 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thermal_core::message::{AgentId, MessageType};
     use std::collections::HashMap;
+    use thermal_core::message::{AgentId, MessageType};
 
     fn make_agent_msg(content: &str) -> Message {
         Message {
@@ -808,7 +810,9 @@ mod tests {
         let decoded: Message = serde_json::from_str(&json).unwrap();
         assert!(matches!(
             decoded.msg_type,
-            MessageType::Subscribe { since_seq: Some(42) }
+            MessageType::Subscribe {
+                since_seq: Some(42)
+            }
         ));
     }
 }

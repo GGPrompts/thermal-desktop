@@ -7,8 +7,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -271,10 +271,7 @@ async fn dispatch_system(msg: &Message, trust_config: &TrustConfig) -> Result<Me
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let input = parsed
-            .get("input")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let input = parsed.get("input").cloned().unwrap_or_else(|| json!({}));
         (tool, input)
     } else {
         (msg.content.trim().to_string(), json!({}))
@@ -434,8 +431,8 @@ async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String
 
 /// Parse MCP JSON-RPC response into a result string.
 fn parse_mcp_response(response_line: &str) -> Result<String> {
-    let resp: Value = serde_json::from_str(response_line.trim())
-        .context("parsing thermal-commander response")?;
+    let resp: Value =
+        serde_json::from_str(response_line.trim()).context("parsing thermal-commander response")?;
 
     if let Some(error) = resp.get("error") {
         let msg = error
@@ -536,13 +533,7 @@ async fn kitty_send_text(window_match: &str, text: &str) -> Result<String> {
     let payload = format!("{text}\r");
 
     let output = Command::new("kitty")
-        .args([
-            "@",
-            "send-text",
-            "--match",
-            window_match,
-            "--",
-        ])
+        .args(["@", "send-text", "--match", window_match, "--"])
         .arg(&payload)
         .output()
         .await
@@ -591,7 +582,10 @@ fn conductor_socket_path() -> PathBuf {
 async fn daemon_send_text(session_id: &str, text: &str) -> Result<String> {
     let sock_path = conductor_socket_path();
     if !sock_path.exists() {
-        bail!("conductor daemon socket not found at {}", sock_path.display());
+        bail!(
+            "conductor daemon socket not found at {}",
+            sock_path.display()
+        );
     }
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
@@ -605,8 +599,7 @@ async fn daemon_send_text(session_id: &str, text: &str) -> Result<String> {
         id: session_id.to_string(),
         text: text.to_string(),
     };
-    let payload = rmp_serde::to_vec(&request)
-        .context("failed to encode SendText request")?;
+    let payload = rmp_serde::to_vec(&request).context("failed to encode SendText request")?;
     let len = payload.len() as u32;
     writer.write_all(&len.to_le_bytes()).await?;
     writer.write_all(&payload).await?;
@@ -614,7 +607,9 @@ async fn daemon_send_text(session_id: &str, text: &str) -> Result<String> {
 
     // Read the response frame.
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf).await
+    reader
+        .read_exact(&mut len_buf)
+        .await
         .context("reading response length from conductor")?;
     let resp_len = u32::from_le_bytes(len_buf) as usize;
 
@@ -623,11 +618,13 @@ async fn daemon_send_text(session_id: &str, text: &str) -> Result<String> {
     }
 
     let mut resp_buf = vec![0u8; resp_len];
-    reader.read_exact(&mut resp_buf).await
+    reader
+        .read_exact(&mut resp_buf)
+        .await
         .context("reading response payload from conductor")?;
 
-    let response: DaemonResponse = rmp_serde::from_slice(&resp_buf)
-        .context("decoding conductor response")?;
+    let response: DaemonResponse =
+        rmp_serde::from_slice(&resp_buf).context("decoding conductor response")?;
 
     match response {
         DaemonResponse::Ok => Ok("ok".to_string()),
@@ -691,14 +688,19 @@ fn find_live_session(hints: &[&str]) -> Option<LiveSession> {
 /// Send text to a live session, dispatching via the appropriate transport.
 async fn send_to_live_session(session: &LiveSession, text: &str) -> Result<String> {
     match session.source {
-        SessionSource::Daemon => {
-            daemon_send_text(&session.session_id, text).await
-        }
+        SessionSource::Daemon => daemon_send_text(&session.session_id, text).await,
         SessionSource::Kitty => {
             // Validate session_id before interpolating into a regex match
             // string to prevent regex injection via crafted sidecar entries.
-            if !session.session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
-                bail!("session_id contains invalid characters: {:?}", session.session_id);
+            if !session
+                .session_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+            {
+                bail!(
+                    "session_id contains invalid characters: {:?}",
+                    session.session_id
+                );
             }
             let window_match = format!("title:^thermal-{}$", session.session_id);
             kitty_send_text(&window_match, text).await
@@ -1185,8 +1187,7 @@ kill_claude = "BLOCK"
 
     #[test]
     fn trust_config_load_real_file() {
-        let path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/trust-tiers.toml");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/trust-tiers.toml");
         if path.exists() {
             let content = std::fs::read_to_string(&path).unwrap();
             let cfg = TrustConfig::parse(&content).unwrap();
@@ -1335,8 +1336,7 @@ kill_claude = "BLOCK"
     async fn route_async_returns_submitted() {
         let table = RouteTable::new();
         let mut msg = sample_msg("user", "hello");
-        msg.metadata
-            .insert("async".to_string(), Value::Bool(true));
+        msg.metadata.insert("async".to_string(), Value::Bool(true));
         let resp = route_message(&msg, &table).await.unwrap();
         assert!(matches!(
             resp.msg_type,
@@ -1423,10 +1423,7 @@ kill_claude = "BLOCK"
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let input = parsed
-                .get("input")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let input = parsed.get("input").cloned().unwrap_or_else(|| json!({}));
             (tool, input)
         } else {
             (content.trim().to_string(), json!({}))
@@ -1452,8 +1449,7 @@ kill_claude = "BLOCK"
         let table = RouteTable::new();
         let mut msg = sample_msg("user", "hello");
         msg.seq = 42;
-        msg.metadata
-            .insert("async".to_string(), Value::Bool(true));
+        msg.metadata.insert("async".to_string(), Value::Bool(true));
         let resp = route_message(&msg, &table).await.unwrap();
         if let MessageType::TaskStatus { task_id, .. } = &resp.msg_type {
             assert_eq!(task_id, "task-42");

@@ -226,7 +226,10 @@ mod tests {
     #[test]
     fn default_settings_parses_as_valid_toml() {
         let result: Result<toml::Table, _> = DEFAULT_SETTINGS.parse();
-        assert!(result.is_ok(), "DEFAULT_SETTINGS is not valid TOML: {result:?}");
+        assert!(
+            result.is_ok(),
+            "DEFAULT_SETTINGS is not valid TOML: {result:?}"
+        );
     }
 
     #[test]

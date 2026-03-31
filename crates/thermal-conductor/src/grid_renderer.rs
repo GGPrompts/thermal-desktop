@@ -72,10 +72,10 @@ struct CachedRow {
 }
 
 // Extracted GPU pipelines — re-exported for window.rs
-pub use crate::heatmap_pipeline::ContextHeatmapPipeline;
-pub use crate::environment_pipeline::EnvironmentEffectPipeline;
-use crate::image_pipeline::ImageRenderPipeline;
 use crate::color_mapping::*;
+pub use crate::environment_pipeline::EnvironmentEffectPipeline;
+pub use crate::heatmap_pipeline::ContextHeatmapPipeline;
+use crate::image_pipeline::ImageRenderPipeline;
 
 // ── Rect rendering (for cursor and cell backgrounds) ───────────────────────
 
@@ -1587,7 +1587,10 @@ impl GridRenderer {
 
         // ── Draw tool name labels ─────────────────────────────────────────
         if !label_entries.is_empty() {
-            let metrics = Metrics::new(self.font_config.font_size * 0.75, self.font_config.line_height * 0.75);
+            let metrics = Metrics::new(
+                self.font_config.font_size * 0.75,
+                self.font_config.line_height * 0.75,
+            );
 
             let mut label_buffers: Vec<Buffer> = Vec::with_capacity(label_entries.len());
             for (_, max_w, _, text, color) in &label_entries {
@@ -1879,9 +1882,18 @@ impl GridRenderer {
                 // rect pipeline, but for a triangle fan from center we use 3).
                 // Since the rect pipeline expects full quads (6 verts = 2 triangles),
                 // we emit two degenerate triangles forming a pie slice.
-                all_verts.push(ColorVertex { position: [ndc_cx, ndc_cy], color: node_color });
-                all_verts.push(ColorVertex { position: [ndc_x0, ndc_y0], color: node_color });
-                all_verts.push(ColorVertex { position: [ndc_x1, ndc_y1], color: node_color });
+                all_verts.push(ColorVertex {
+                    position: [ndc_cx, ndc_cy],
+                    color: node_color,
+                });
+                all_verts.push(ColorVertex {
+                    position: [ndc_x0, ndc_y0],
+                    color: node_color,
+                });
+                all_verts.push(ColorVertex {
+                    position: [ndc_x1, ndc_y1],
+                    color: node_color,
+                });
             }
 
             // ── Context percent gauge ring ──────────────────────────────────
@@ -1892,7 +1904,12 @@ impl GridRenderer {
                 let gauge_segments = ((segments as f32 * ctx_pct).ceil() as usize).max(1);
                 let heat = ctx_pct.clamp(0.0, 1.0);
                 let gauge_color_base = thermal_gradient(heat).to_f32_array();
-                let gauge_color = [gauge_color_base[0], gauge_color_base[1], gauge_color_base[2], 0.9];
+                let gauge_color = [
+                    gauge_color_base[0],
+                    gauge_color_base[1],
+                    gauge_color_base[2],
+                    0.9,
+                ];
 
                 for i in 0..gauge_segments {
                     let total_angle = std::f32::consts::TAU * ctx_pct;
@@ -1968,7 +1985,8 @@ impl GridRenderer {
                     }
                 };
                 let fill_color_alpha = [fill_color[0], fill_color[1], fill_color[2], 0.8];
-                let fill_verts = pixel_rect_to_ndc(bar_x, bar_y_pos, fill_w, bar_h, sw, sh, fill_color_alpha);
+                let fill_verts =
+                    pixel_rect_to_ndc(bar_x, bar_y_pos, fill_w, bar_h, sw, sh, fill_color_alpha);
                 all_verts.extend_from_slice(&fill_verts);
             }
 
@@ -1984,7 +2002,12 @@ impl GridRenderer {
             // Status/tool sub-label.
             if let Some(ref tool) = node.current_tool {
                 let sub_label = tool.clone();
-                label_entries.push((cx, cy + node_radius + 22.0, sub_label, PaletteColor::TEXT_MUTED));
+                label_entries.push((
+                    cx,
+                    cy + node_radius + 22.0,
+                    sub_label,
+                    PaletteColor::TEXT_MUTED,
+                ));
             }
         }
 
@@ -2021,15 +2044,25 @@ impl GridRenderer {
         // ── Draw title text ─────────────────────────────────────────────────
         // Title + node labels via glyphon.
         if !label_entries.is_empty() || !nodes.is_empty() {
-            let metrics = Metrics::new(self.font_config.font_size * 0.7, self.font_config.line_height * 0.7);
-            let small_metrics = Metrics::new(self.font_config.font_size * 0.6, self.font_config.line_height * 0.6);
+            let metrics = Metrics::new(
+                self.font_config.font_size * 0.7,
+                self.font_config.line_height * 0.7,
+            );
+            let small_metrics = Metrics::new(
+                self.font_config.font_size * 0.6,
+                self.font_config.line_height * 0.6,
+            );
 
             let mut text_buffers: Vec<(Buffer, f32, f32)> = Vec::new();
 
             // Title: "AGENT GRAPH" in top-left of the overlay area.
             {
                 let mut buf = Buffer::new(&mut self.font_system, metrics);
-                buf.set_size(&mut self.font_system, Some(200.0), Some(self.font_config.line_height));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(200.0),
+                    Some(self.font_config.line_height),
+                );
                 buf.set_text(
                     &mut self.font_system,
                     "AGENT GRAPH",
@@ -2054,7 +2087,11 @@ impl GridRenderer {
 
                 let mut buf = Buffer::new(&mut self.font_system, m);
                 let max_w = 120.0;
-                buf.set_size(&mut self.font_system, Some(max_w), Some(self.font_config.line_height));
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(max_w),
+                    Some(self.font_config.line_height),
+                );
                 buf.set_text(
                     &mut self.font_system,
                     text,
@@ -2369,13 +2406,11 @@ impl GridRenderer {
             for row in self.row_cache.iter().flatten() {
                 for cell in &row.cells {
                     if let Some(ref url) = cell.hyperlink {
-                        self.hyperlink_map
-                            .insert((cell.row, cell.col), url.clone());
+                        self.hyperlink_map.insert((cell.row, cell.col), url.clone());
                         let x = self.padding_x + cell.col as f32 * self.cell_width;
-                        let y = self.padding_y
-                            + cell.row as f32 * self.cell_height
-                            + self.cell_height
-                            - underline_h;
+                        let y =
+                            self.padding_y + cell.row as f32 * self.cell_height + self.cell_height
+                                - underline_h;
                         let w = if cell.flags.contains(Flags::WIDE_CHAR) {
                             self.cell_width * 2.0
                         } else {
@@ -2421,7 +2456,11 @@ impl GridRenderer {
         let metrics = Metrics::new(self.font_config.font_size, self.font_config.line_height);
 
         let cursor_line = cursor.point.line.0;
-        let cursor_row = if cursor_line >= 0 { cursor_line as usize } else { usize::MAX };
+        let cursor_row = if cursor_line >= 0 {
+            cursor_line as usize
+        } else {
+            usize::MAX
+        };
         let cursor_col = cursor.point.column.0;
 
         // Ensure cell_buffers has enough rows.
@@ -2529,7 +2568,11 @@ impl GridRenderer {
                 let attrs = Attrs::new()
                     .family(Family::Name(&self.font_config.family))
                     .color(f32_to_glyph_color(fg));
-                let shaping = if ch.is_ascii() { Shaping::Basic } else { Shaping::Advanced };
+                let shaping = if ch.is_ascii() {
+                    Shaping::Basic
+                } else {
+                    Shaping::Advanced
+                };
                 buf.set_text(&mut self.font_system, &s, attrs, shaping);
                 buf.shape_until_scroll(&mut self.font_system, false);
             }

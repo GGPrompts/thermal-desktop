@@ -32,10 +32,7 @@ pub async fn execute_tool(tool_name: &str, input: &Value) -> Result<String> {
 
 /// Handle the `speak` tool — send text to thermal-audio for TTS playback.
 async fn execute_speak(input: &Value) -> Result<String> {
-    let text = input
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
 
     if text.is_empty() {
         return Ok("Nothing to speak.".to_string());
@@ -54,7 +51,9 @@ async fn execute_speak(input: &Value) -> Result<String> {
             let (_, mut writer) = stream.into_split();
             let mut payload = serde_json::to_string(&request)?;
             payload.push('\n');
-            writer.write_all(payload.as_bytes()).await
+            writer
+                .write_all(payload.as_bytes())
+                .await
                 .context("writing to audio.sock")?;
             writer.flush().await?;
             info!("sent TTS request to thermal-audio");
@@ -81,10 +80,7 @@ async fn execute_route(input: &Value) -> Result<String> {
         .get("to")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
-    let message = input
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
 
     info!(to = %to, message = %message, "route tool invoked");
 
@@ -295,7 +291,9 @@ mod tests {
     fn unknown_tool_returns_message() {
         // Synchronously verify the match arm returns an error string
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(execute_tool("nonexistent", &json!({}))).unwrap();
+        let result = rt
+            .block_on(execute_tool("nonexistent", &json!({})))
+            .unwrap();
         assert!(result.contains("Unknown tool"), "got: {result}");
     }
 
@@ -420,14 +418,20 @@ mod tests {
     async fn route_invalid_target_returns_error() {
         let input = json!({"to": "@invalid", "message": "test"});
         let result = execute_route(&input).await.unwrap();
-        assert!(result.contains("Unknown target"), "should reject invalid target, got: {result}");
+        assert!(
+            result.contains("Unknown target"),
+            "should reject invalid target, got: {result}"
+        );
     }
 
     #[tokio::test]
     async fn route_missing_fields_uses_defaults() {
         let input = json!({});
         let result = execute_route(&input).await.unwrap();
-        assert!(result.contains("Unknown target"), "missing 'to' should fail");
+        assert!(
+            result.contains("Unknown target"),
+            "missing 'to' should fail"
+        );
     }
 
     // -----------------------------------------------------------------------

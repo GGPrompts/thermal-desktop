@@ -14,7 +14,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 
 use thermal_core::message::{AgentId, Message, MessageType};
@@ -24,8 +26,8 @@ use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette:
 use crate::agent_timeline::{AgentTimeline, ToolCategory};
 use crate::backend::BackendPreference;
 use crate::client::DaemonClient;
-use crate::protocol::{CellData, Response};
 use crate::profiles_config::{Profile, load_profiles, save_profiles};
+use crate::protocol::{CellData, Response};
 
 use super::TuiPage;
 
@@ -395,11 +397,11 @@ fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
 // ---------------------------------------------------------------------------
 
 /// Alacritty terminal cell flag bits (from alacritty_terminal::term::cell::Flags).
-const FLAG_INVERSE: u16   = 0b0000_0000_0000_0001;
-const FLAG_BOLD: u16      = 0b0000_0000_0000_0010;
-const FLAG_ITALIC: u16    = 0b0000_0000_0000_0100;
+const FLAG_INVERSE: u16 = 0b0000_0000_0000_0001;
+const FLAG_BOLD: u16 = 0b0000_0000_0000_0010;
+const FLAG_ITALIC: u16 = 0b0000_0000_0000_0100;
 const FLAG_UNDERLINE: u16 = 0b0000_0000_0000_1000;
-const FLAG_DIM: u16       = 0b0000_0000_1000_0000;
+const FLAG_DIM: u16 = 0b0000_0000_1000_0000;
 const FLAG_STRIKEOUT: u16 = 0b0000_0010_0000_0000;
 
 /// Convert a flat grid of `CellData` (row-major, length = cols * rows) into
@@ -423,10 +425,7 @@ fn cells_to_lines(cells: &[CellData], cols: usize) -> Vec<Line<'static>> {
                     run_text.push(cell.ch);
                 } else {
                     if let Some(prev_style) = run_style.take() {
-                        spans.push(Span::styled(
-                            std::mem::take(&mut run_text),
-                            prev_style,
-                        ));
+                        spans.push(Span::styled(std::mem::take(&mut run_text), prev_style));
                     }
                     run_text.push(cell.ch);
                     run_style = Some(style);
@@ -449,9 +448,13 @@ fn cell_style(cell: &CellData) -> Style {
 
     let (fg_r, fg_g, fg_b, bg_r, bg_g, bg_b) = if flags & FLAG_INVERSE != 0 {
         // Inverse: swap fg and bg.
-        (cell.bg.r, cell.bg.g, cell.bg.b, cell.fg.r, cell.fg.g, cell.fg.b)
+        (
+            cell.bg.r, cell.bg.g, cell.bg.b, cell.fg.r, cell.fg.g, cell.fg.b,
+        )
     } else {
-        (cell.fg.r, cell.fg.g, cell.fg.b, cell.bg.r, cell.bg.g, cell.bg.b)
+        (
+            cell.fg.r, cell.fg.g, cell.fg.b, cell.bg.r, cell.bg.g, cell.bg.b,
+        )
     };
 
     let mut style = Style::default()
@@ -567,9 +570,8 @@ impl BusConnection {
 // ---------------------------------------------------------------------------
 
 /// Valid target agent types for @-mentions.
-const VALID_MENTION_TARGETS: &[&str] = &[
-    "system", "claude", "codex", "planner", "user", "dispatcher",
-];
+const VALID_MENTION_TARGETS: &[&str] =
+    &["system", "claude", "codex", "planner", "user", "dispatcher"];
 
 /// Parse @-mention with live session display names for resolution.
 fn parse_at_mention_with_sessions(
@@ -664,8 +666,7 @@ fn scan_all_kitty_windows() -> HashMap<String, (String, i64)> {
                         for proc in procs {
                             if let Some(cwd) = proc["cwd"].as_str() {
                                 if !cwd.is_empty() {
-                                    map.entry(cwd.to_string())
-                                        .or_insert_with(|| entry.clone());
+                                    map.entry(cwd.to_string()).or_insert_with(|| entry.clone());
                                 }
                             }
                         }
@@ -980,11 +981,7 @@ impl SessionsPage {
         {
             Some(r) => r,
             None => {
-                self.chat_status = Some((
-                    "No session selected".into(),
-                    true,
-                    Instant::now(),
-                ));
+                self.chat_status = Some(("No session selected".into(), true, Instant::now()));
                 return;
             }
         };
@@ -1138,15 +1135,12 @@ impl SessionsPage {
             && let Some(row) = self.display_rows.get(i)
         {
             // Resolve workspace ID for the selected session.
-            let ws_id = row
-                .session
-                .workspace
-                .or_else(|| {
-                    row.session
-                        .working_dir
-                        .as_deref()
-                        .and_then(|wd| self.workspace_map.get(wd).copied())
-                });
+            let ws_id = row.session.workspace.or_else(|| {
+                row.session
+                    .working_dir
+                    .as_deref()
+                    .and_then(|wd| self.workspace_map.get(wd).copied())
+            });
 
             // Switch to the correct Hyprland workspace first.
             if let Some(ws) = ws_id {
@@ -1369,9 +1363,10 @@ impl SessionsPage {
             Some((id, cwd)) if !cwd.is_empty() => (id, cwd),
             Some((id, _)) => {
                 // Session selected but no working_dir — show diagnostic.
-                self.preview_content = Self::preview_diagnostic(
-                    &format!("(no working_dir for session {})", &id[..id.len().min(12)]),
-                );
+                self.preview_content = Self::preview_diagnostic(&format!(
+                    "(no working_dir for session {})",
+                    &id[..id.len().min(12)]
+                ));
                 self.preview_scroll = self.preview_content.len();
                 self.last_preview_session = Some(id);
                 return;
@@ -1436,7 +1431,15 @@ impl SessionsPage {
 
         let match_arg = format!("id:{window_id}");
         let result = Command::new("kitty")
-            .args(["@", "--to", &socket, "get-text", "--extent=screen", "--match", &match_arg])
+            .args([
+                "@",
+                "--to",
+                &socket,
+                "get-text",
+                "--extent=screen",
+                "--match",
+                &match_arg,
+            ])
             .output();
 
         match result {
@@ -1445,10 +1448,7 @@ impl SessionsPage {
                 self.preview_content = text
                     .lines()
                     .map(|l| {
-                        Line::from(Span::styled(
-                            l.to_string(),
-                            Style::default().fg(TEXT_MUTED),
-                        ))
+                        Line::from(Span::styled(l.to_string(), Style::default().fg(TEXT_MUTED)))
                     })
                     .collect();
                 if !self.preview_pinned {
@@ -1456,9 +1456,9 @@ impl SessionsPage {
                 }
             }
             _ => {
-                self.preview_content = Self::preview_diagnostic(
-                    &format!("(preview failed for kitty window {window_id})"),
-                );
+                self.preview_content = Self::preview_diagnostic(&format!(
+                    "(preview failed for kitty window {window_id})"
+                ));
                 self.preview_scroll = self.preview_content.len();
             }
         }
@@ -1483,9 +1483,8 @@ impl SessionsPage {
         let daemon_id = match self.daemon_session_map.get(cwd) {
             Some(id) => id.clone(),
             None => {
-                self.preview_content = Self::preview_diagnostic(
-                    &format!("(no daemon session for cwd: {cwd})"),
-                );
+                self.preview_content =
+                    Self::preview_diagnostic(&format!("(no daemon session for cwd: {cwd})"));
                 self.preview_scroll = self.preview_content.len();
                 return;
             }
@@ -1520,14 +1519,12 @@ impl SessionsPage {
                 }
             }
             Ok(_) => {
-                self.preview_content =
-                    Self::preview_diagnostic("(unexpected daemon response)");
+                self.preview_content = Self::preview_diagnostic("(unexpected daemon response)");
                 self.preview_scroll = self.preview_content.len();
             }
             Err(e) => {
-                self.preview_content = Self::preview_diagnostic(
-                    &format!("(daemon preview error: {})", e),
-                );
+                self.preview_content =
+                    Self::preview_diagnostic(&format!("(daemon preview error: {})", e));
                 self.preview_scroll = self.preview_content.len();
             }
         }
@@ -1554,9 +1551,7 @@ impl SessionsPage {
         self.daemon_session_map.clear();
         for info in sessions {
             if info.is_alive && !info.cwd.is_empty() {
-                self.daemon_session_map
-                    .entry(info.cwd)
-                    .or_insert(info.id);
+                self.daemon_session_map.entry(info.cwd).or_insert(info.id);
             }
         }
     }
@@ -1622,9 +1617,9 @@ impl SessionsPage {
                 self.autocomplete_active = false;
             } else {
                 self.autocomplete_items = filtered;
-                self.autocomplete_index = self.autocomplete_index.min(
-                    self.autocomplete_items.len().saturating_sub(1),
-                );
+                self.autocomplete_index = self
+                    .autocomplete_index
+                    .min(self.autocomplete_items.len().saturating_sub(1));
                 self.autocomplete_active = true;
             }
         } else {
@@ -1681,11 +1676,8 @@ impl SessionsPage {
             };
             self.chat_messages.push_back(entry);
             if !ok {
-                self.chat_status = Some((
-                    "Failed to send to message bus".into(),
-                    true,
-                    Instant::now(),
-                ));
+                self.chat_status =
+                    Some(("Failed to send to message bus".into(), true, Instant::now()));
             }
         } else {
             // No @-mention — route to selected/highlighted session(s), or bus as fallback.
@@ -1694,9 +1686,10 @@ impl SessionsPage {
                     .iter()
                     .filter_map(|&i| {
                         self.display_rows.get(i).and_then(|row| {
-                            row.session.working_dir.clone().map(|cwd| {
-                                (cwd, row.session.model_display_name())
-                            })
+                            row.session
+                                .working_dir
+                                .clone()
+                                .map(|cwd| (cwd, row.session.model_display_name()))
                         })
                     })
                     .collect()
@@ -1704,9 +1697,10 @@ impl SessionsPage {
                 self.display_rows
                     .get(i)
                     .and_then(|row| {
-                        row.session.working_dir.clone().map(|cwd| {
-                            vec![(cwd, row.session.model_display_name())]
-                        })
+                        row.session
+                            .working_dir
+                            .clone()
+                            .map(|cwd| vec![(cwd, row.session.model_display_name())])
                     })
                     .unwrap_or_default()
             } else {
@@ -1723,54 +1717,59 @@ impl SessionsPage {
                 };
                 self.chat_messages.push_back(entry);
                 if !ok {
+                    self.chat_status =
+                        Some(("Failed to send to message bus".into(), true, Instant::now()));
+                }
+            } else {
+                // Send to kitty terminal(s) via cross-instance window map.
+                let text_with_enter = format!("{}\r", text);
+                let mut success_count = 0;
+                let mut target_label = String::new();
+                for (cwd, label) in &selected_targets {
+                    if let Some((socket, wid)) = self.resolve_kitty_window(cwd) {
+                        let match_arg = format!("id:{wid}");
+                        let ok = Command::new("kitty")
+                            .args([
+                                "@",
+                                "--to",
+                                &socket,
+                                "send-text",
+                                "--match",
+                                &match_arg,
+                                "--",
+                            ])
+                            .arg(&text_with_enter)
+                            .output()
+                            .map(|o| o.status.success())
+                            .unwrap_or(false);
+                        if ok {
+                            success_count += 1;
+                        }
+                    }
+                    if target_label.is_empty() {
+                        target_label = label.clone();
+                    }
+                }
+                if selected_targets.len() > 1 {
+                    target_label = format!("{} sessions", selected_targets.len());
+                }
+                let entry = ChatEntry {
+                    from_label: format!("you \u{2192} {}", target_label),
+                    content: text.clone(),
+                    timestamp: Instant::now(),
+                };
+                self.chat_messages.push_back(entry);
+                if success_count < selected_targets.len() {
                     self.chat_status = Some((
-                        "Failed to send to message bus".into(),
+                        format!(
+                            "Sent to {}/{} sessions",
+                            success_count,
+                            selected_targets.len()
+                        ),
                         true,
                         Instant::now(),
                     ));
                 }
-            } else {
-                // Send to kitty terminal(s) via cross-instance window map.
-            let text_with_enter = format!("{}\r", text);
-            let mut success_count = 0;
-            let mut target_label = String::new();
-            for (cwd, label) in &selected_targets {
-                if let Some((socket, wid)) = self.resolve_kitty_window(cwd) {
-                    let match_arg = format!("id:{wid}");
-                    let ok = Command::new("kitty")
-                        .args(["@", "--to", &socket, "send-text", "--match", &match_arg, "--"])
-                        .arg(&text_with_enter)
-                        .output()
-                        .map(|o| o.status.success())
-                        .unwrap_or(false);
-                    if ok {
-                        success_count += 1;
-                    }
-                }
-                if target_label.is_empty() {
-                    target_label = label.clone();
-                }
-            }
-            if selected_targets.len() > 1 {
-                target_label = format!("{} sessions", selected_targets.len());
-            }
-            let entry = ChatEntry {
-                from_label: format!("you \u{2192} {}", target_label),
-                content: text.clone(),
-                timestamp: Instant::now(),
-            };
-            self.chat_messages.push_back(entry);
-            if success_count < selected_targets.len() {
-                self.chat_status = Some((
-                    format!(
-                        "Sent to {}/{} sessions",
-                        success_count,
-                        selected_targets.len()
-                    ),
-                    true,
-                    Instant::now(),
-                ));
-            }
             }
         }
 
@@ -1854,18 +1853,20 @@ impl TuiPage for SessionsPage {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let chat_msg_height = if self.chat_messages.is_empty() { 0 } else {
+        let chat_msg_height = if self.chat_messages.is_empty() {
+            0
+        } else {
             (self.chat_messages.len() as u16).min(5)
         };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(40),             // table
-                Constraint::Length(1),                   // timeline bar for selected session
-                Constraint::Percentage(35),             // preview pane
-                Constraint::Length(chat_msg_height),     // recent chat messages
-                Constraint::Length(3),                   // chat input bar
-                Constraint::Length(1),                   // footer
+                Constraint::Percentage(40),          // table
+                Constraint::Length(1),               // timeline bar for selected session
+                Constraint::Percentage(35),          // preview pane
+                Constraint::Length(chat_msg_height), // recent chat messages
+                Constraint::Length(3),               // chat input bar
+                Constraint::Length(1),               // footer
             ])
             .split(area);
 
@@ -1895,7 +1896,8 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells = [
-            "\u{2610}", "Name", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Age", "Cmd",
+            "\u{2610}", "Name", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Age",
+            "Cmd",
         ]
         .iter()
         .map(|h| {
@@ -1919,9 +1921,9 @@ impl TuiPage for SessionsPage {
                 let (agent_badge, agent_color) = agent_type_badge(s);
 
                 let checkbox = if self.selected_set.contains(&row_idx) {
-                    "\u{2611}"  // checked box
+                    "\u{2611}" // checked box
                 } else {
-                    "\u{2610}"  // unchecked box
+                    "\u{2610}" // unchecked box
                 };
                 let check_color = if self.selected_set.contains(&row_idx) {
                     pal(ThermalPalette::WARM)
@@ -2022,7 +2024,7 @@ impl TuiPage for SessionsPage {
                 Constraint::Length(10), // status
                 Constraint::Length(24), // activity
                 Constraint::Length(6),  // ctx%
-                Constraint::Min(14),   // project
+                Constraint::Min(14),    // project
                 Constraint::Length(4),  // WS
                 Constraint::Length(5),  // age
                 Constraint::Length(6),  // cmd duration
@@ -2033,11 +2035,13 @@ impl TuiPage for SessionsPage {
             Block::default()
                 .title(block_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(if self.focused_panel == FocusedPanel::AgentList {
-                    pal(ThermalPalette::ACCENT_WARM)
-                } else {
-                    COLD
-                }))
+                .border_style(Style::default().fg(
+                    if self.focused_panel == FocusedPanel::AgentList {
+                        pal(ThermalPalette::ACCENT_WARM)
+                    } else {
+                        COLD
+                    },
+                ))
                 .style(Style::default().bg(BG)),
         )
         .row_highlight_style(Style::default().bg(BG_SURFACE).add_modifier(Modifier::BOLD));
@@ -2105,11 +2109,7 @@ impl TuiPage for SessionsPage {
                 let visible_lines: Vec<Line> = self.preview_content[start..end].to_vec();
 
                 let scroll_indicator = if total > inner_height {
-                    let pct = if total == 0 {
-                        100
-                    } else {
-                        (end * 100) / total
-                    };
+                    let pct = if total == 0 { 100 } else { (end * 100) / total };
                     format!(" Preview [{}/{} {}%] ", end, total, pct)
                 } else {
                     " Preview ".to_string()
@@ -2145,20 +2145,14 @@ impl TuiPage for SessionsPage {
                         format!("{}m", ago / 60)
                     };
                     Line::from(vec![
-                        Span::styled(
-                            format!("[{rel}] "),
-                            Style::default().fg(TEXT_MUTED),
-                        ),
+                        Span::styled(format!("[{rel}] "), Style::default().fg(TEXT_MUTED)),
                         Span::styled(
                             format!("{}: ", e.from_label),
                             Style::default()
                                 .fg(pal(ThermalPalette::WARM))
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            e.content.clone(),
-                            Style::default().fg(TEXT_BRIGHT),
-                        ),
+                        Span::styled(e.content.clone(), Style::default().fg(TEXT_BRIGHT)),
                     ])
                 })
                 .collect();
@@ -2229,10 +2223,7 @@ impl TuiPage for SessionsPage {
                     Style::default().fg(TEXT_MUTED),
                 ))
             } else {
-                Line::from(Span::styled(
-                    &self.chat_input,
-                    Style::default().fg(TEXT),
-                ))
+                Line::from(Span::styled(&self.chat_input, Style::default().fg(TEXT)))
             };
 
             let input_widget = Paragraph::new(input_line).block(
@@ -2327,7 +2318,12 @@ impl TuiPage for SessionsPage {
             let chat_area = chunks[4];
             let item_count = self.autocomplete_items.len().min(8);
             let popup_h = item_count as u16 + 2; // +2 for border
-            let max_item_len = self.autocomplete_items.iter().map(|s| s.len()).max().unwrap_or(0);
+            let max_item_len = self
+                .autocomplete_items
+                .iter()
+                .map(|s| s.len())
+                .max()
+                .unwrap_or(0);
             let popup_w = (max_item_len as u16 + 4).min(chat_area.width); // +4 for border + padding
 
             // Position: above the chat input, aligned to the left of the input area.
@@ -2349,7 +2345,10 @@ impl TuiPage for SessionsPage {
                 .enumerate()
                 .map(|(i, item)| {
                     let style = if i == self.autocomplete_index {
-                        Style::default().fg(BG).bg(ACCENT_COLD).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(BG)
+                            .bg(ACCENT_COLD)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(TEXT_BRIGHT)
                     };
@@ -2517,7 +2516,8 @@ impl TuiPage for SessionsPage {
                     self.preview_pinned = true;
                 }
                 KeyCode::PageDown => {
-                    self.preview_scroll = (self.preview_scroll + 10).min(self.preview_content.len());
+                    self.preview_scroll =
+                        (self.preview_scroll + 10).min(self.preview_content.len());
                     self.preview_pinned = self.preview_scroll < self.preview_content.len();
                 }
                 KeyCode::Home => {
@@ -2655,7 +2655,6 @@ impl TuiPage for SessionsPage {
             _ => {}
         }
     }
-
 }
 
 impl SessionsPage {
@@ -3548,7 +3547,10 @@ mod tests {
     fn agent_badge_uses_emoji() {
         let claude = ClaudeSessionState::default();
         let (badge, _) = agent_type_badge(&claude);
-        assert!(badge.contains('\u{1F916}'), "badge should contain robot emoji: {badge}");
+        assert!(
+            badge.contains('\u{1F916}'),
+            "badge should contain robot emoji: {badge}"
+        );
     }
 
     #[test]

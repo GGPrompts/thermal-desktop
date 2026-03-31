@@ -57,24 +57,24 @@ pub(crate) fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
 pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
     // Aligned with kitty.conf in thermal-os-dotfiles/config/kitty/kitty.conf
     match named {
-        NamedColor::Black => PaletteColor::BG.to_f32_array(),           // color0  #0a0010
-        NamedColor::Red => PaletteColor::SEARING.to_f32_array(),        // color1  #ef4444
-        NamedColor::Green => PaletteColor::WARM.to_f32_array(),         // color2  #22c55e
-        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),         // color3  #eab308
-        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),   // color4  #3b82f6
-        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(),   // color5  #1a0030
-        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),// color6  #14b8a6
+        NamedColor::Black => PaletteColor::BG.to_f32_array(), // color0  #0a0010
+        NamedColor::Red => PaletteColor::SEARING.to_f32_array(), // color1  #ef4444
+        NamedColor::Green => PaletteColor::WARM.to_f32_array(), // color2  #22c55e
+        NamedColor::Yellow => PaletteColor::HOT.to_f32_array(), // color3  #eab308
+        NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(), // color4  #3b82f6
+        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(), // color5  #1a0030
+        NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(), // color6  #14b8a6
         NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(), // color7 #e9e0ff
 
-        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(),   // color8  #4a3a8a
+        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(), // color8  #4a3a8a
         NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(), // color9  #dc2626
-        NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(),   // color10 #0d9488
-        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),// color11 #f97316
+        NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(), // color10 #0d9488
+        NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(), // color11 #f97316
         NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(), // color12 #818cf8
         NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(), // color13 #c4b5fd
-        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),    // color14 #0d9488
+        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),  // color14 #0d9488
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
-            PaletteColor::WHITE_HOT.to_f32_array()                      // color15 #fef3c7
+            PaletteColor::WHITE_HOT.to_f32_array() // color15 #fef3c7
         }
 
         NamedColor::DimBlack => TERM_BG,
@@ -106,7 +106,7 @@ pub(crate) fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
         NamedColor::Green => PaletteColor::WARM.to_f32_array(),
         NamedColor::Yellow => PaletteColor::HOT.to_f32_array(),
         NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(),
-        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(),   // #1a0030 (was HOTTER)
+        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(), // #1a0030 (was HOTTER)
         NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(),
         NamedColor::White => PaletteColor::TEXT_MUTED.to_f32_array(),
         NamedColor::Foreground => PaletteColor::TEXT_MUTED.to_f32_array(),
@@ -114,7 +114,7 @@ pub(crate) fn named_to_thermal_bg(named: NamedColor) -> [f32; 4] {
         NamedColor::Cursor => PaletteColor::BG_SURFACE.to_f32_array(),
 
         // Bright backgrounds — muted variants
-        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(),   // #4a3a8a (was BG_LIGHT)
+        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(), // #4a3a8a (was BG_LIGHT)
         NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(),
         NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(),
         NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(),
@@ -180,7 +180,10 @@ pub(crate) fn indexed_color(idx: u8) -> [f32; 4] {
 
 /// Determine the background color for a cell (returns None for default BG).
 pub(crate) fn cell_bg_color(cell: &RenderCell) -> Option<[f32; 4]> {
-    if cell.flags.contains(alacritty_terminal::term::cell::Flags::INVERSE) {
+    if cell
+        .flags
+        .contains(alacritty_terminal::term::cell::Flags::INVERSE)
+    {
         Some(ansi_to_glyphon_fg(&cell.fg))
     } else {
         ansi_to_glyphon_bg(&cell.bg)
@@ -281,11 +284,29 @@ pub(crate) fn line_to_rect_verts(
     let p3 = to_ndc(corners[3].0, corners[3].1);
 
     [
-        ColorVertex { position: p0, color },
-        ColorVertex { position: p2, color },
-        ColorVertex { position: p1, color },
-        ColorVertex { position: p1, color },
-        ColorVertex { position: p2, color },
-        ColorVertex { position: p3, color },
+        ColorVertex {
+            position: p0,
+            color,
+        },
+        ColorVertex {
+            position: p2,
+            color,
+        },
+        ColorVertex {
+            position: p1,
+            color,
+        },
+        ColorVertex {
+            position: p1,
+            color,
+        },
+        ColorVertex {
+            position: p2,
+            color,
+        },
+        ColorVertex {
+            position: p3,
+            color,
+        },
     ]
 }

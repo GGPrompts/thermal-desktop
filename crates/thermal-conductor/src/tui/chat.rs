@@ -139,7 +139,6 @@ impl BusConnection {
         }
         msgs
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +226,14 @@ impl ChatEntry {
             }
         }
 
-        spans.push(Span::styled(String::from(" > "), Style::default().fg(TEXT_MUTED)));
-        spans.push(Span::styled(self.content.clone(), Style::default().fg(TEXT_BRIGHT)));
+        spans.push(Span::styled(
+            String::from(" > "),
+            Style::default().fg(TEXT_MUTED),
+        ));
+        spans.push(Span::styled(
+            self.content.clone(),
+            Style::default().fg(TEXT_BRIGHT),
+        ));
 
         Line::from(spans)
     }
@@ -293,11 +298,7 @@ impl ChatPage {
         match BusConnection::connect(self.last_seq) {
             Some(conn) => {
                 self.conn = Some(conn);
-                self.status_msg = Some((
-                    "Connected to message bus".into(),
-                    false,
-                    Instant::now(),
-                ));
+                self.status_msg = Some(("Connected to message bus".into(), false, Instant::now()));
             }
             None => {
                 // Not an error — daemon may not be running.
@@ -406,8 +407,8 @@ impl TuiPage for ChatPage {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),            // title + connection status
-                Constraint::Min(5),               // messages
+                Constraint::Length(2),             // title + connection status
+                Constraint::Min(5),                // messages
                 Constraint::Length(filter_height), // filter bar
                 Constraint::Length(1),             // status / hints
             ])
@@ -416,10 +417,7 @@ impl TuiPage for ChatPage {
 
         // -- Title row --
         let conn_indicator = if connected {
-            Span::styled(
-                " [connected]",
-                Style::default().fg(Color::Rgb(0, 200, 80)),
-            )
+            Span::styled(" [connected]", Style::default().fg(Color::Rgb(0, 200, 80)))
         } else {
             Span::styled(
                 " [disconnected]",
@@ -480,8 +478,7 @@ impl TuiPage for ChatPage {
 
         // Scrollbar.
         if total_lines > msg_area_height {
-            let mut scrollbar_state =
-                ScrollbarState::new(max_scroll).position(scroll_pos);
+            let mut scrollbar_state = ScrollbarState::new(max_scroll).position(scroll_pos);
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("\u{25b2}"))
                 .end_symbol(Some("\u{25bc}"));

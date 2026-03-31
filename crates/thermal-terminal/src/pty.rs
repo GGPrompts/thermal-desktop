@@ -241,8 +241,7 @@ impl PtySession {
                 let exited_clone = Arc::clone(&exited);
 
                 // Structured exit reason, populated by reader thread on EOF/EIO.
-                let exit_reason: Arc<Mutex<Option<ExitReason>>> =
-                    Arc::new(Mutex::new(None));
+                let exit_reason: Arc<Mutex<Option<ExitReason>>> = Arc::new(Mutex::new(None));
                 let exit_reason_clone = Arc::clone(&exit_reason);
                 let child_pid_for_reader = child;
 
@@ -303,8 +302,7 @@ impl PtySession {
                 }
                 Err(e) => {
                     // EIO is expected when the child exits (slave side closes).
-                    if e.kind() == std::io::ErrorKind::Other
-                        || e.raw_os_error() == Some(libc::EIO)
+                    if e.kind() == std::io::ErrorKind::Other || e.raw_os_error() == Some(libc::EIO)
                     {
                         info!("PTY reader: child exited (EIO)");
                     } else {

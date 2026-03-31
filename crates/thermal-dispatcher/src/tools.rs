@@ -925,7 +925,10 @@ mod tests {
     fn slim_speak_requires_text() {
         let t = find_slim_tool("speak");
         let req = required_fields(&t);
-        assert!(req.contains(&"text".to_string()), "speak should require 'text'");
+        assert!(
+            req.contains(&"text".to_string()),
+            "speak should require 'text'"
+        );
     }
 
     #[test]
@@ -940,7 +943,10 @@ mod tests {
         let t = find_slim_tool("route");
         let req = required_fields(&t);
         assert!(req.contains(&"to".to_string()), "route should require 'to'");
-        assert!(req.contains(&"message".to_string()), "route should require 'message'");
+        assert!(
+            req.contains(&"message".to_string()),
+            "route should require 'message'"
+        );
     }
 
     #[test]

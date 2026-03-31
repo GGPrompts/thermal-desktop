@@ -84,8 +84,7 @@ pub fn save_state(state: &PersistedState) -> Result<()> {
             .with_context(|| format!("Failed to create state directory: {}", parent.display()))?;
     }
 
-    let json =
-        serde_json::to_string_pretty(state).context("Failed to serialize daemon state")?;
+    let json = serde_json::to_string_pretty(state).context("Failed to serialize daemon state")?;
 
     // Write to temp file, then atomic rename.
     let tmp = path.with_extension("json.tmp");
@@ -335,19 +334,13 @@ mod tests {
 
     #[test]
     fn is_process_alive_rejects_negative_pid() {
-        assert!(
-            !is_process_alive(-1),
-            "Negative PID should not be alive"
-        );
+        assert!(!is_process_alive(-1), "Negative PID should not be alive");
     }
 
     #[test]
     fn is_process_alive_detects_init() {
         // PID 1 (init/systemd) is always alive on Linux.
-        assert!(
-            is_process_alive(1),
-            "PID 1 (init) should be alive"
-        );
+        assert!(is_process_alive(1), "PID 1 (init) should be alive");
     }
 
     // ── Atomic save/load round-trip via temp directory ────────────────────

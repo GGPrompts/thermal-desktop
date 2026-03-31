@@ -305,7 +305,8 @@ impl Terminal {
                             // lock was released, making the previous snapshot
                             // stale for any subsequent tracker updates in this
                             // batch.
-                            let refreshed_line = term_guard.grid().cursor.point.line.0.max(0) as usize;
+                            let refreshed_line =
+                                term_guard.grid().cursor.point.line.0.max(0) as usize;
                             if refreshed_line != cursor_line {
                                 let mut t = tracker.lock();
                                 t.set_current_line(refreshed_line);

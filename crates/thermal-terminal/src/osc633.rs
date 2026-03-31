@@ -349,9 +349,7 @@ mod tests {
         let marks = parser.feed(&osc("D;0"));
         assert_eq!(
             marks,
-            vec![Osc633Mark::CommandFinished {
-                exit_code: Some(0)
-            }]
+            vec![Osc633Mark::CommandFinished { exit_code: Some(0) }]
         );
     }
 
@@ -361,9 +359,7 @@ mod tests {
         let marks = parser.feed(&osc("D;1"));
         assert_eq!(
             marks,
-            vec![Osc633Mark::CommandFinished {
-                exit_code: Some(1)
-            }]
+            vec![Osc633Mark::CommandFinished { exit_code: Some(1) }]
         );
     }
 

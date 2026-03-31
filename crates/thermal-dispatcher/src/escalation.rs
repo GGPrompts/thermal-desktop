@@ -155,10 +155,7 @@ mod tests {
 
     #[test]
     fn single_tool_command_is_simple() {
-        assert_eq!(
-            classify_complexity("open firefox"),
-            ComplexityLevel::Simple
-        );
+        assert_eq!(classify_complexity("open firefox"), ComplexityLevel::Simple);
     }
 
     #[test]

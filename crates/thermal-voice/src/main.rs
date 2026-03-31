@@ -16,7 +16,7 @@ mod streaming;
 mod transcript_filter;
 mod vad;
 mod wakeword;
-use transcript_filter::{filter_transcript, FilterResult};
+use transcript_filter::{FilterResult, filter_transcript};
 use vad::{VadDetector, VadEvent};
 use wakeword::WakeWordDetector;
 
@@ -314,7 +314,8 @@ impl Recorder {
         // Use the device's default config instead of forcing 16kHz.
         // Many devices (e.g. Blue Yeti at 48kHz) don't support 16kHz natively,
         // and PipeWire may silently fail to deliver samples.
-        let default_config = device.default_input_config()
+        let default_config = device
+            .default_input_config()
             .context("failed to get default input config")?;
         let native_rate = default_config.sample_rate().0;
         let native_channels = default_config.channels();
@@ -377,7 +378,11 @@ impl Recorder {
                 let s1 = raw_samples[(idx + 1).min(raw_samples.len() - 1)] as f64;
                 resampled.push((s0 + frac * (s1 - s0)) as i16);
             }
-            info!("resampled {native_rate}Hz → {SAMPLE_RATE}Hz ({} → {} samples)", raw_samples.len(), resampled.len());
+            info!(
+                "resampled {native_rate}Hz → {SAMPLE_RATE}Hz ({} → {} samples)",
+                raw_samples.len(),
+                resampled.len()
+            );
             resampled
         } else {
             raw_samples
@@ -549,17 +554,24 @@ async fn dispatch_to_dispatcher(transcript: String) {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),
                 buf_reader.read_line(&mut response),
-            ).await {
+            )
+            .await
+            {
                 Ok(Ok(_)) => info!("dispatcher response: {}", response.trim()),
                 Ok(Err(e)) => warn!("failed to read dispatcher response: {e}"),
                 Err(_) => {
-                    warn!("dispatcher response timed out after 120s, falling back to claude -p (risk of double-execution)");
+                    warn!(
+                        "dispatcher response timed out after 120s, falling back to claude -p (risk of double-execution)"
+                    );
                     dispatch_to_claude(&transcript).await;
                 }
             }
         }
         Err(e) => {
-            warn!("cannot connect to dispatcher socket at {}: {e}", sock_path.display());
+            warn!(
+                "cannot connect to dispatcher socket at {}: {e}",
+                sock_path.display()
+            );
             warn!("is thermal-dispatcher running? falling back to claude -p");
             dispatch_to_claude(&transcript).await;
         }
@@ -761,7 +773,10 @@ fn parse_code_word(transcript: &str) -> (String, Option<CodeWord>) {
 
     // Single-word code words — also handle trailing "it" (e.g. "send it")
     let single_word_codes: &[(&[&str], CodeWord)] = &[
-        (&["send", "submit", "enter", "send it", "submit it"], CodeWord::Submit),
+        (
+            &["send", "submit", "enter", "send it", "submit it"],
+            CodeWord::Submit,
+        ),
         (&["undo", "undo that"], CodeWord::Undo),
         (&["tab"], CodeWord::Tab),
     ];
@@ -786,7 +801,11 @@ fn strip_trailing_phrase(text: &str, phrase: &str) -> String {
         // Only strip if the phrase is at the end (after trimming punctuation)
         if pos + phrase.len() == trimmed_lower.len() {
             let prefix = &text[..pos];
-            return prefix.trim_end().trim_end_matches([',', '.', '-']).trim_end().to_string();
+            return prefix
+                .trim_end()
+                .trim_end_matches([',', '.', '-'])
+                .trim_end()
+                .to_string();
         }
     }
     text.to_string()
@@ -1223,7 +1242,9 @@ async fn run_listen_daemon(
                 model_path.display(),
                 DEFAULT_MODEL_FILENAME
             );
-            warn!("The daemon will start but transcription will fail until a model or CLI is available.");
+            warn!(
+                "The daemon will start but transcription will fail until a model or CLI is available."
+            );
         }
     }
 
@@ -1330,7 +1351,8 @@ async fn run_listen_daemon(
     let chunk_size = (native_rate * VAD_CHUNK_MS / 1000) as usize;
 
     // Accumulation buffer in the cpal callback (shared via Arc<Mutex>)
-    let accumulator: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(chunk_size * 2)));
+    let accumulator: Arc<Mutex<Vec<f32>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(chunk_size * 2)));
     let acc_clone = Arc::clone(&accumulator);
     let channels = native_channels;
 
@@ -1341,7 +1363,9 @@ async fn run_listen_daemon(
     let audio_stream = device.build_input_stream(
         &stream_config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let Ok(mut acc) = acc_clone.lock() else { return; };
+            let Ok(mut acc) = acc_clone.lock() else {
+                return;
+            };
             // Mix to mono
             for chunk in data.chunks(channels as usize) {
                 let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
@@ -1788,9 +1812,12 @@ async fn main() -> Result<()> {
         None => run_daemon().await,
         Some(Command::Toggle) => run_toggle().await,
         Some(Command::Status) => run_status().await,
-        Some(Command::Listen { threshold, streaming, streaming_url, no_wake_word }) => {
-            run_listen_daemon(threshold, streaming, &streaming_url, !no_wake_word).await
-        }
+        Some(Command::Listen {
+            threshold,
+            streaming,
+            streaming_url,
+            no_wake_word,
+        }) => run_listen_daemon(threshold, streaming, &streaming_url, !no_wake_word).await,
     }
 }
 

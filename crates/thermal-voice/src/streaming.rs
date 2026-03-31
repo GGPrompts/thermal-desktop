@@ -13,9 +13,8 @@ use futures_util::{FutureExt as _, SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
-    connect_async,
+    MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{self, Message},
-    MaybeTlsStream, WebSocketStream,
 };
 use tracing::{debug, info, warn};
 
@@ -112,8 +111,7 @@ impl StreamingTranscriber {
             Some(Some(Err(e))) => {
                 // Connection-level errors
                 match &e {
-                    tungstenite::Error::ConnectionClosed
-                    | tungstenite::Error::AlreadyClosed => {
+                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
                         debug!("streaming STT connection closed");
                         Ok(None)
                     }
@@ -145,15 +143,12 @@ impl StreamingTranscriber {
                         None => continue, // Skip non-transcript messages (ping, etc.)
                     }
                 }
-                Some(Err(e)) => {
-                    match &e {
-                        tungstenite::Error::ConnectionClosed
-                        | tungstenite::Error::AlreadyClosed => {
-                            return Ok(None);
-                        }
-                        _ => return Err(e).context("streaming STT receive error"),
+                Some(Err(e)) => match &e {
+                    tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+                        return Ok(None);
                     }
-                }
+                    _ => return Err(e).context("streaming STT receive error"),
+                },
                 None => return Ok(None),
             }
         }

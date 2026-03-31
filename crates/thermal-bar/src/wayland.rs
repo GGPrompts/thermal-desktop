@@ -274,8 +274,7 @@ impl PointerHandler for BarState {
     ) {
         for event in events {
             match event.kind {
-                PointerEventKind::Enter { .. }
-                | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.pointer_position = event.position;
                 }
                 PointerEventKind::Leave { .. } => {
@@ -537,7 +536,7 @@ fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
                     || module.text.starts_with('\u{1F50E}')           // monitoring
                     || module.text.starts_with('\u{1F514}')           // wake word
                     || module.text.starts_with('\u{1F3A4}')           // listening
-                    || module.text.starts_with('\u{1F525}');          // processing/fire
+                    || module.text.starts_with('\u{1F525}'); // processing/fire
                 if is_voice {
                     regions.push(ClickRegion {
                         x: module.x,

@@ -325,13 +325,37 @@ pub fn daemon_socket_path() -> std::path::PathBuf {
 
 /// Connect to the conductor daemon, subscribe to all events, and return a
 /// stream-like async reader. Returns `None` if the daemon is unreachable.
+///
+/// Uses a 2-second timeout on the entire connect+subscribe handshake to avoid
+/// hanging on stale sockets left behind after a daemon crash.
 pub async fn connect_and_subscribe() -> Result<Option<DaemonEventStream>> {
     let sock_path = daemon_socket_path();
     if !sock_path.exists() {
         return Ok(None);
     }
 
-    let stream = match UnixStream::connect(&sock_path).await {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        connect_and_subscribe_inner(&sock_path),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                "timed out connecting to conductor daemon at {} — stale socket?",
+                sock_path.display()
+            );
+            let _ = std::fs::remove_file(&sock_path);
+            Ok(None)
+        }
+    }
+}
+
+async fn connect_and_subscribe_inner(
+    sock_path: &std::path::Path,
+) -> Result<Option<DaemonEventStream>> {
+    let stream = match UnixStream::connect(sock_path).await {
         Ok(s) => s,
         Err(e) => {
             warn!("cannot connect to conductor daemon at {}: {e}", sock_path.display());

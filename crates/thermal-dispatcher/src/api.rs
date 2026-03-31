@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen3:8b";
-const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
+const DEFAULT_CLAUDE_MODEL: &str = "haiku";
 const DEFAULT_COPILOT_MODEL: &str = "gpt-4.1";
 
 /// LLM backend selection.
@@ -1022,8 +1022,8 @@ mod tests {
     }
 
     #[test]
-    fn default_claude_model_is_sonnet() {
-        assert_eq!(DEFAULT_CLAUDE_MODEL, "sonnet");
+    fn default_claude_model_is_haiku() {
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "haiku");
     }
 
     #[test]
@@ -1036,7 +1036,7 @@ mod tests {
         // Clear the env var to test defaults
         // SAFETY: single-threaded test, no other threads reading this var
         unsafe { std::env::remove_var("THERMAL_DISPATCHER_MODEL") };
-        assert_eq!(resolve_model(&LlmBackend::ClaudeCli), "sonnet");
+        assert_eq!(resolve_model(&LlmBackend::ClaudeCli), "haiku");
         assert_eq!(resolve_model(&LlmBackend::CopilotCli), "gpt-4.1");
         assert_eq!(resolve_model(&LlmBackend::Ollama), "qwen3:8b");
     }

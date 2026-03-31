@@ -534,7 +534,6 @@ fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
                 // Detect it by checking for known mic icon codepoints.
                 let is_voice = module.text.starts_with('\u{1F507}')   // muted
                     || module.text.starts_with('\u{1F50E}')           // monitoring
-                    || module.text.starts_with('\u{1F514}')           // wake word
                     || module.text.starts_with('\u{1F3A4}')           // listening
                     || module.text.starts_with('\u{1F525}'); // processing/fire
                 if is_voice {

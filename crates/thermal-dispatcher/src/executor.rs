@@ -73,6 +73,48 @@ async fn execute_read() -> Result<String> {
     execute_commander_tool("capture_pane", &json!({})).await
 }
 
+/// Publish a message to the thermal-messages bus (fire-and-forget).
+/// Used to surface voice transcripts and dispatcher responses in the TUI.
+pub async fn publish_to_bus(from_type: &str, from_key: &str, to_type: &str, content: &str) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let msg = Message {
+        seq: 0,
+        ts: now_ms,
+        from: AgentId::new(from_type, from_key),
+        to: AgentId::new(to_type, "default"),
+        context_id: None,
+        project: None,
+        content: content.to_string(),
+        msg_type: MessageType::AgentMsg,
+        metadata: HashMap::new(),
+    };
+
+    let sock_path = crate::messages_socket_path();
+    match UnixStream::connect(&sock_path).await {
+        Ok(stream) => {
+            let (_, mut writer) = stream.into_split();
+            let mut payload = match serde_json::to_string(&msg) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("failed to serialize bus message: {e}");
+                    return;
+                }
+            };
+            payload.push('\n');
+            if let Err(e) = writer.write_all(payload.as_bytes()).await {
+                warn!("failed to write to messages.sock: {e}");
+            }
+        }
+        Err(e) => {
+            debug!("messages.sock unavailable for publish: {e}");
+        }
+    }
+}
+
 /// Handle the `route` tool — forward a message to an agent via the
 /// thermal-messages bus (messages.sock).
 async fn execute_route(input: &Value) -> Result<String> {

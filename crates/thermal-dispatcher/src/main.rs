@@ -277,10 +277,16 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
     })
     .await;
 
+    // Publish voice transcript to message bus so TUI can show it
+    executor::publish_to_bus("user", "voice", "dispatcher", &msg.transcript).await;
+
     // Send to LLM backend and execute the tool-use loop
     match dispatch_command(&msg.transcript, state).await {
         Ok(response_text) => {
             info!(response = %response_text, "dispatch complete");
+
+            // Publish dispatcher response to message bus for TUI visibility
+            executor::publish_to_bus("dispatcher", "voice", "user", &response_text).await;
 
             // Update HUD: result
             write_hud_state(&HudState::Result {

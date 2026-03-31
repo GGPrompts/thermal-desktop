@@ -35,7 +35,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Send start/stop toggle to the running daemon (for Hyprland keybind).
+    /// Records voice → transcribes → types at cursor via wtype.
     Toggle,
+    /// Start/stop recording and send transcript to thermal-dispatcher.
+    /// Like toggle, but routes through the AI dispatcher instead of typing.
+    Dispatch,
     /// Print current daemon state and exit.
     Status,
     /// Run daemon in always-listening mode with Voice Activity Detection.
@@ -967,6 +971,7 @@ async fn run_daemon() -> Result<()> {
                 let response = match daemon_cmd.action.as_str() {
                     "start" => handle_start(&mut recorder),
                     "stop" => handle_stop(&mut recorder, &config).await,
+                    "dispatch" => handle_dispatch(&mut recorder, &config).await,
                     "status" => handle_status(&recorder),
                     other => SocketResponse::error(&format!("unknown action: {other}")),
                 };
@@ -1104,6 +1109,57 @@ async fn handle_stop(recorder: &mut Recorder, config: &Config) -> SocketResponse
     }
 }
 
+async fn handle_dispatch(recorder: &mut Recorder, config: &Config) -> SocketResponse {
+    if !recorder.is_recording() {
+        return SocketResponse::ok("not_recording");
+    }
+
+    let samples = recorder.stop();
+    write_state(VoiceState::Processing, Some("transcribing"));
+
+    let min_samples = (SAMPLE_RATE as f64 * 0.3) as usize;
+    if samples.len() < min_samples {
+        write_state(VoiceState::Muted, None);
+        return SocketResponse::error("audio too short (< 0.3s)");
+    }
+
+    let config_cmd = config.whisper_command.clone();
+    let config_model = config.model_path.clone();
+    let transcript = tokio::task::spawn_blocking(move || {
+        let cfg = Config {
+            model_path: config_model,
+            whisper_command: config_cmd,
+        };
+        transcribe(&samples, &cfg)
+    })
+    .await;
+
+    match transcript {
+        Ok(Ok(text)) => {
+            info!("dispatcher transcript: {text}");
+            write_state(VoiceState::Processing, Some("dispatching"));
+
+            let text_clone = text.clone();
+            tokio::spawn(async move {
+                dispatch_to_dispatcher(text_clone).await;
+            });
+
+            write_state(VoiceState::Muted, None);
+            SocketResponse::with_transcript(text)
+        }
+        Ok(Err(e)) => {
+            write_state(VoiceState::Muted, None);
+            error!("transcription failed: {e}");
+            SocketResponse::error(&format!("transcription failed: {e}"))
+        }
+        Err(e) => {
+            write_state(VoiceState::Muted, None);
+            error!("transcription task panicked: {e}");
+            SocketResponse::error("transcription task panicked")
+        }
+    }
+}
+
 fn handle_status(recorder: &Recorder) -> SocketResponse {
     let state = if recorder.is_recording() {
         VoiceState::Listening
@@ -1157,6 +1213,58 @@ async fn run_toggle() -> Result<()> {
             let resp = send_to_daemon("stop").await?;
             if let Some(transcript) = &resp.transcript {
                 println!("{transcript}");
+            } else if let Some(err) = &resp.error {
+                eprintln!("error: {err}");
+            }
+        }
+        VoiceState::Processing => {
+            eprintln!("currently processing, please wait...");
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch subcommand
+// ---------------------------------------------------------------------------
+
+async fn run_dispatch() -> Result<()> {
+    if check_daemon_running().is_none() {
+        if !socket_path().exists() {
+            eprintln!("thermal-voice daemon is not running.");
+            eprintln!("Start it with: thermal-voice");
+            std::process::exit(1);
+        }
+    }
+
+    let status_resp = send_to_daemon("status").await?;
+    let current_state = status_resp
+        .state
+        .as_deref()
+        .and_then(|s| match s {
+            "muted" => Some(VoiceState::Muted),
+            "monitoring" => Some(VoiceState::Monitoring),
+            "wake_word" => Some(VoiceState::WakeWord),
+            "listening" => Some(VoiceState::Listening),
+            "processing" => Some(VoiceState::Processing),
+            _ => None,
+        })
+        .unwrap_or(VoiceState::Muted);
+
+    match current_state {
+        VoiceState::Muted | VoiceState::Monitoring | VoiceState::WakeWord => {
+            let resp = send_to_daemon("start").await?;
+            if let Some(err) = resp.error {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+            println!("listening (dispatch mode)...");
+        }
+        VoiceState::Listening => {
+            let resp = send_to_daemon("dispatch").await?;
+            if let Some(transcript) = &resp.transcript {
+                println!("dispatched: {transcript}");
             } else if let Some(err) = &resp.error {
                 eprintln!("error: {err}");
             }
@@ -1697,6 +1805,25 @@ async fn run_listen_daemon(
                             SocketResponse::ok("not_recording")
                         }
                     }
+                    "dispatch" => {
+                        if ptt_active {
+                            let resp = handle_dispatch(&mut ptt_recorder, &config).await;
+                            ptt_active = false;
+                            current_voice_state = if wake_word_detector.is_some() {
+                                VoiceState::WakeWord
+                            } else {
+                                VoiceState::Monitoring
+                            };
+                            write_state(current_voice_state, None);
+                            if let Some(ref mut ww_det) = wake_word_detector {
+                                ww_det.reset();
+                                ww_buffer.clear();
+                            }
+                            resp
+                        } else {
+                            SocketResponse::ok("not_recording")
+                        }
+                    }
                     "status" => {
                         if ptt_active {
                             SocketResponse::state_response(VoiceState::Listening)
@@ -1812,6 +1939,7 @@ async fn main() -> Result<()> {
     match cli.command {
         None => run_daemon().await,
         Some(Command::Toggle) => run_toggle().await,
+        Some(Command::Dispatch) => run_dispatch().await,
         Some(Command::Status) => run_status().await,
         Some(Command::Listen {
             threshold,

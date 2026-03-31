@@ -34,6 +34,7 @@ use wayland_client::{
 
 use thermal_core::ClaudeStatePoller;
 
+use crate::daemon_subscriber;
 use crate::renderer::Renderer;
 use crate::voice::{HudMode, VoiceStatePoller};
 
@@ -383,9 +384,22 @@ pub async fn run() -> anyhow::Result<()> {
         "thermal-hud: renderer initialized, entering render loop"
     );
 
-    // Phase 3: Set up the ClaudeStatePoller for agent sessions.
-    let mut poller = ClaudeStatePoller::new()
-        .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?;
+    // Phase 3: Set up agent session state source.
+    //
+    // Prefer daemon semantic subscriptions (real-time, event-driven) over
+    // file-watching (ClaudeStatePoller).  Falls back to the poller when the
+    // daemon is not running.
+    let daemon_rx = daemon_subscriber::try_spawn_subscriber();
+    let mut poller = if daemon_rx.is_some() {
+        tracing::info!("Using daemon semantic subscription for agent state");
+        None
+    } else {
+        tracing::info!("Daemon not available — using ClaudeStatePoller fallback");
+        Some(
+            ClaudeStatePoller::new()
+                .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?,
+        )
+    };
 
     // Phase 4: Set up the VoiceStatePoller for voice assistant UI.
     let mut voice_poller = VoiceStatePoller::new()
@@ -455,8 +469,14 @@ pub async fn run() -> anyhow::Result<()> {
                 renderer.render_voice_state(&voice_mode, result_age)
             }
             HudMode::AgentTabs => {
-                // Fall back to agent tab rendering.
-                let mut sessions = poller.poll();
+                // Get sessions from daemon subscription or file poller.
+                let mut sessions = if let Some(ref rx) = daemon_rx {
+                    rx.borrow().clone()
+                } else if let Some(ref mut p) = poller {
+                    p.poll()
+                } else {
+                    Vec::new()
+                };
 
                 // Sort by workspace (same order as renderer) so click
                 // regions line up with rendered tabs.

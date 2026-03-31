@@ -10,6 +10,7 @@ mod client;
 mod color_mapping;
 mod context_environment;
 mod daemon;
+mod daemon_subscriber;
 mod dbus_interface;
 mod environment_pipeline;
 mod font_config;

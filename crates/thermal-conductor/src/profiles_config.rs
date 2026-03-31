@@ -52,18 +52,13 @@ pub fn user_config_path() -> String {
     expand_tilde("~/.config/thermal/profiles.toml")
 }
 
-/// Load profiles from config file. Search order:
-/// 1. ./config/profiles.toml (dev)
-/// 2. ~/.config/thermal/profiles.toml (user)
+/// Load profiles from ~/.config/thermal/profiles.toml.
 pub fn load_profiles() -> (Option<String>, Vec<Profile>) {
-    let candidates = ["config/profiles.toml".to_string(), user_config_path()];
-
-    for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path)
-            && let Ok(config) = toml::from_str::<ProfileConfig>(&content)
-        {
-            return (config.default_cwd, config.profiles);
-        }
+    let path = user_config_path();
+    if let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(config) = toml::from_str::<ProfileConfig>(&content)
+    {
+        return (config.default_cwd, config.profiles);
     }
 
     // Fallback: single "Custom" profile

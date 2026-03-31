@@ -847,10 +847,23 @@ pub struct SessionsPage {
     last_bus_seq: u64,
     /// Last connection attempt time (for retry throttling).
     last_bus_connect_attempt: Option<Instant>,
+
+    // -- Daemon semantic subscription --
+    /// When using the Daemon backend, receives session state from the daemon's
+    /// semantic event stream instead of file-watching via ClaudeStatePoller.
+    daemon_sub_rx: Option<tokio::sync::watch::Receiver<Vec<ClaudeSessionState>>>,
 }
 
 impl SessionsPage {
     pub fn new(backend_pref: BackendPreference) -> Self {
+        // When using the Daemon backend, try to subscribe to semantic events
+        // for real-time session state (avoids file-watching overhead).
+        let daemon_sub_rx = if matches!(backend_pref, BackendPreference::Daemon) {
+            crate::daemon_subscriber::try_spawn_subscriber()
+        } else {
+            None
+        };
+
         Self {
             sessions: Vec::new(),
             display_rows: Vec::new(),
@@ -891,13 +904,22 @@ impl SessionsPage {
             bus_connection: None,
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
+            daemon_sub_rx,
         }
     }
 
     fn update_from_poller(&mut self, poller: &mut ClaudeStatePoller) {
-        let updated = poller.poll();
-        if !updated.is_empty() {
-            self.sessions = updated;
+        // When a daemon subscription is active, use it instead of file polling.
+        if let Some(ref rx) = self.daemon_sub_rx {
+            let sessions = rx.borrow().clone();
+            if !sessions.is_empty() || self.sessions.is_empty() {
+                self.sessions = sessions;
+            }
+        } else {
+            let updated = poller.poll();
+            if !updated.is_empty() {
+                self.sessions = updated;
+            }
         }
         // Cache context_percent
         for s in &mut self.sessions {
@@ -3342,6 +3364,7 @@ mod tests {
             daemon_session_map: HashMap::new(),
             last_daemon_ls: None,
             last_focus_time: None,
+            daemon_sub_rx: None,
         }
     }
 

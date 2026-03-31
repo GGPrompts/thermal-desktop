@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
+
+mod daemon_client;
 
 /// Thermal Audio — TTS voice announcements for Claude session state changes.
 #[derive(Parser)]
@@ -701,7 +703,7 @@ async fn main() -> Result<()> {
 
     // Use a tokio mpsc channel to forward TTS requests to the main loop,
     // which owns the AudioManager (not Send-safe across tasks).
-    let (sock_tx, mut sock_rx) = tokio::sync::mpsc::unbounded_channel::<TtsRequest>();
+    let (sock_tx, sock_rx) = tokio::sync::mpsc::unbounded_channel::<TtsRequest>();
 
     // Spawn a task that accepts socket connections and parses requests.
     // Control messages (mute/volume/status) are handled directly in the
@@ -728,7 +730,231 @@ async fn main() -> Result<()> {
         }
     });
 
-    // State poller (synchronous) — we run it on a timer.
+    // Try connecting to the conductor daemon for event-driven mode.
+    let daemon_stream = match daemon_client::connect_and_subscribe().await {
+        Ok(Some(stream)) => {
+            info!("connected to conductor daemon — using event-driven mode");
+            Some(stream)
+        }
+        Ok(None) => {
+            warn!("conductor daemon unavailable — falling back to file-polling mode");
+            None
+        }
+        Err(e) => {
+            warn!("daemon connection error: {e} — falling back to file-polling mode");
+            None
+        }
+    };
+
+    match daemon_stream {
+        Some(stream) => {
+            run_daemon_event_loop(stream, &mut audio, &mut voices, audio_state, sock_rx).await
+        }
+        None => {
+            run_poll_loop(&mut audio, &mut voices, audio_state, sock_rx).await
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event-driven mode (daemon semantic events)
+// ---------------------------------------------------------------------------
+
+/// Run the main loop using daemon semantic events for state change announcements.
+async fn run_daemon_event_loop(
+    mut stream: daemon_client::DaemonEventStream,
+    audio: &mut AudioManager,
+    voices: &mut VoicePool,
+    audio_state: Arc<Mutex<AudioState>>,
+    mut sock_rx: tokio::sync::mpsc::UnboundedReceiver<TtsRequest>,
+) -> Result<()> {
+    use daemon_client::*;
+
+    // Track per-session display names and previous activity for announcements.
+    let mut session_names: HashMap<String, String> = HashMap::new();
+    let mut session_activities: HashMap<String, AgentActivity> = HashMap::new();
+    // Track context thresholds to avoid repeat alerts (keyed by session_id).
+    let mut prev_context_level: HashMap<String, ContextThreshold> = HashMap::new();
+
+    loop {
+        tokio::select! {
+            biased;
+
+            // Socket TTS requests (direct API calls) — highest priority.
+            Some(req) = sock_rx.recv() => {
+                let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
+                let high_priority = req.priority == Priority::High;
+                info!("socket TTS: voice={voice}, priority={:?}, text={:?}", req.priority, req.text);
+                let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                if !is_muted {
+                    if let Err(e) = audio.speak(voice, &req.text, high_priority).await {
+                        warn!("socket TTS failed: {e}");
+                    }
+                } else {
+                    info!("socket TTS skipped (muted)");
+                }
+            }
+
+            // Daemon event stream.
+            msg = stream.next_message() => {
+                match msg {
+                    Ok(Some(DaemonMessage::Snapshot(sync))) => {
+                        let snap = &sync.snapshot;
+                        let label = daemon_session_label(snap);
+                        debug!("snapshot: {} ({}) activity={:?}", snap.session_id, label, snap.agent_activity);
+                        session_names.insert(snap.session_id.clone(), label);
+                        session_activities.insert(snap.session_id.clone(), snap.agent_activity.clone());
+                    }
+                    Ok(Some(DaemonMessage::Events(batch))) => {
+                        for event in batch.events {
+                            let sid = &event.session_id;
+                            let label = session_names.get(sid).cloned()
+                                .unwrap_or_else(|| short_id(sid));
+
+                            let text = match &event.kind {
+                                SemanticEventKind::SessionSpawned { display_name, .. } => {
+                                    let name = display_name.as_deref().unwrap_or(&label);
+                                    session_names.insert(sid.clone(), name.to_string());
+                                    Some(format!("{name} started"))
+                                }
+                                SemanticEventKind::SessionExited { .. } => {
+                                    session_activities.remove(sid);
+                                    Some(format!("{label} exited"))
+                                }
+                                SemanticEventKind::AgentActivityChanged { activity, previous } => {
+                                    let prev = previous.as_ref()
+                                        .or_else(|| session_activities.get(sid))
+                                        .cloned()
+                                        .unwrap_or(AgentActivity::Idle);
+                                    session_activities.insert(sid.clone(), activity.clone());
+                                    daemon_activity_text(&label, &prev, activity)
+                                }
+                                SemanticEventKind::ToolStarted { tool_name } => {
+                                    session_activities.insert(sid.clone(), AgentActivity::ToolRunning);
+                                    Some(format!("{label} using {tool_name}"))
+                                }
+                                SemanticEventKind::ContextThresholdCrossed { level, saturation } => {
+                                    // Only announce if this is a new/higher threshold.
+                                    let dominated = match (&prev_context_level.get(sid), level) {
+                                        (Some(ContextThreshold::Critical), _) => true,
+                                        (Some(ContextThreshold::Warning), ContextThreshold::Warning) => true,
+                                        _ => false,
+                                    };
+                                    if dominated {
+                                        None
+                                    } else {
+                                        prev_context_level.insert(sid.clone(), level.clone());
+                                        let pct = saturation.map(|s| (s * 100.0) as u32).unwrap_or(0);
+                                        let urgency = match level {
+                                            ContextThreshold::Critical => "Alert",
+                                            ContextThreshold::Warning => "Warning",
+                                        };
+                                        Some(format!("{urgency}, {label} at {pct}% context"))
+                                    }
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(text) = text {
+                                info!("[{sid}] daemon event: {text}");
+                                let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                                let voice_active = is_voice_active();
+                                if !is_muted && !voice_active {
+                                    let voice = voices.assign(sid);
+                                    if let Err(e) = audio.announce(sid, voice, &text).await {
+                                        warn!("announce failed: {e}");
+                                    }
+                                } else if voice_active {
+                                    info!("suppressed announcement (voice active): {text}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(Some(DaemonMessage::SessionExited { id, .. })) => {
+                        let label = session_names.remove(&id).unwrap_or_else(|| short_id(&id));
+                        session_activities.remove(&id);
+                        prev_context_level.remove(&id);
+                        let text = format!("{label} exited");
+                        info!("[{id}] daemon event: {text}");
+                        let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                        if !is_muted && !is_voice_active() {
+                            let voice = voices.assign(&id);
+                            if let Err(e) = audio.announce(&id, voice, &text).await {
+                                warn!("announce failed: {e}");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        warn!("daemon disconnected — will not reconnect (restart thermal-audio to retry)");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!("daemon stream error: {e} — continuing");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Map daemon AgentActivity transitions to TTS text, analogous to `transition_text`.
+fn daemon_activity_text(
+    label: &str,
+    prev: &daemon_client::AgentActivity,
+    curr: &daemon_client::AgentActivity,
+) -> Option<String> {
+    use daemon_client::AgentActivity::*;
+    match (prev, curr) {
+        (Idle, Thinking) | (Idle, StreamingOutput) | (WaitingInput, Thinking) => {
+            Some(format!("{label} started working"))
+        }
+        (_, ToolRunning) => {
+            // ToolStarted events provide tool_name; this is the fallback.
+            Some(format!("{label} running a tool"))
+        }
+        (_, WaitingInput) | (_, Prompting) => Some(format!("{label} needs input")),
+        (Thinking, Idle) | (ToolRunning, Idle) | (StreamingOutput, Idle) => {
+            Some(format!("{label} finished"))
+        }
+        (_, Exited) => Some(format!("{label} exited")),
+        _ => None,
+    }
+}
+
+/// Derive a label from a daemon session snapshot.
+fn daemon_session_label(snap: &daemon_client::SemanticSessionSnapshot) -> String {
+    if let Some(ref name) = snap.display_name {
+        if !name.is_empty() {
+            return name.clone();
+        }
+    }
+    if let Some(ref cwd) = snap.cwd {
+        if let Some(name) = std::path::Path::new(cwd).file_name().and_then(|n| n.to_str()) {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    short_id(&snap.session_id)
+}
+
+/// Short session ID for labels.
+fn short_id(id: &str) -> String {
+    if id.len() > 8 { id[..8].to_string() } else { id.to_string() }
+}
+
+// ---------------------------------------------------------------------------
+// Poll-based fallback mode (ClaudeStatePoller)
+// ---------------------------------------------------------------------------
+
+/// Run the main loop using file-polling for state change announcements.
+/// This is the fallback when the conductor daemon is unavailable.
+async fn run_poll_loop(
+    audio: &mut AudioManager,
+    voices: &mut VoicePool,
+    audio_state: Arc<Mutex<AudioState>>,
+    mut sock_rx: tokio::sync::mpsc::UnboundedReceiver<TtsRequest>,
+) -> Result<()> {
     let mut poller = ClaudeStatePoller::new().context("creating state poller")?;
     let mut prev_states: HashMap<String, (ClaudeStatus, Option<String>)> = HashMap::new();
     let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
@@ -752,8 +978,6 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
-            // Bias toward socket TTS so direct requests aren't starved
-            // by the state-poller branch (which can await multiple edge-tts calls).
             biased;
 
             Some(req) = sock_rx.recv() => {
@@ -2061,5 +2285,145 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"muted\":true"));
         assert!(json.contains("\"volume\":0.5"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Daemon event-driven mode: activity text mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn daemon_activity_idle_to_thinking_announces_started() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &Idle, &Thinking);
+        assert_eq!(text, Some("opus started working".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_waiting_to_thinking_announces_started() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &WaitingInput, &Thinking);
+        assert_eq!(text, Some("opus started working".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_any_to_tool_running() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("sonnet", &Thinking, &ToolRunning);
+        assert_eq!(text, Some("sonnet running a tool".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_any_to_waiting_input() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &Thinking, &WaitingInput);
+        assert_eq!(text, Some("opus needs input".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_thinking_to_idle_announces_finished() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &Thinking, &Idle);
+        assert_eq!(text, Some("opus finished".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_tool_to_idle_announces_finished() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &ToolRunning, &Idle);
+        assert_eq!(text, Some("opus finished".to_string()));
+    }
+
+    #[test]
+    fn daemon_activity_idle_to_idle_is_none() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &Idle, &Idle);
+        assert!(text.is_none());
+    }
+
+    #[test]
+    fn daemon_activity_any_to_exited() {
+        use daemon_client::AgentActivity::*;
+        let text = daemon_activity_text("opus", &Thinking, &Exited);
+        assert_eq!(text, Some("opus exited".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Daemon session label derivation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn daemon_label_prefers_display_name() {
+        let snap = daemon_client::SemanticSessionSnapshot {
+            session_id: "abc123".into(),
+            backend: String::new(),
+            runtime: daemon_client::AgentRuntime::Claude,
+            display_name: Some("opus".into()),
+            title: None,
+            cwd: Some("/home/user/projects/thermal-desktop".into()),
+            workspace_root: None,
+            pid: None,
+            started_at: None,
+            last_activity_at: None,
+            exit_code: None,
+            is_alive: true,
+            agent_activity: daemon_client::AgentActivity::Idle,
+            current_tool: None,
+            context_state: daemon_client::ContextState::default(),
+        };
+        assert_eq!(daemon_session_label(&snap), "opus");
+    }
+
+    #[test]
+    fn daemon_label_falls_back_to_cwd_basename() {
+        let snap = daemon_client::SemanticSessionSnapshot {
+            session_id: "abc123".into(),
+            backend: String::new(),
+            runtime: daemon_client::AgentRuntime::Claude,
+            display_name: None,
+            title: None,
+            cwd: Some("/home/user/projects/thermal-desktop".into()),
+            workspace_root: None,
+            pid: None,
+            started_at: None,
+            last_activity_at: None,
+            exit_code: None,
+            is_alive: true,
+            agent_activity: daemon_client::AgentActivity::Idle,
+            current_tool: None,
+            context_state: daemon_client::ContextState::default(),
+        };
+        assert_eq!(daemon_session_label(&snap), "thermal-desktop");
+    }
+
+    #[test]
+    fn daemon_label_falls_back_to_short_id() {
+        let snap = daemon_client::SemanticSessionSnapshot {
+            session_id: "abcdef1234567890".into(),
+            backend: String::new(),
+            runtime: daemon_client::AgentRuntime::Claude,
+            display_name: None,
+            title: None,
+            cwd: None,
+            workspace_root: None,
+            pid: None,
+            started_at: None,
+            last_activity_at: None,
+            exit_code: None,
+            is_alive: true,
+            agent_activity: daemon_client::AgentActivity::Idle,
+            current_tool: None,
+            context_state: daemon_client::ContextState::default(),
+        };
+        assert_eq!(daemon_session_label(&snap), "abcdef12");
+    }
+
+    #[test]
+    fn short_id_truncates_long_ids() {
+        assert_eq!(short_id("abcdef1234567890"), "abcdef12");
+    }
+
+    #[test]
+    fn short_id_preserves_short_ids() {
+        assert_eq!(short_id("abc"), "abc");
     }
 }

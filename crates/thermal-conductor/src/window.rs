@@ -466,15 +466,28 @@ pub fn run() -> anyhow::Result<()> {
         window.set_title(&initial_title);
     }
 
-    // ── Claude state poller ──────────────────────────────────────────────────
-    let claude_poller = match ClaudeStatePoller::new() {
-        Ok(poller) => {
-            tracing::info!("Claude state poller initialized");
-            Some(poller)
-        }
-        Err(e) => {
-            tracing::warn!("Failed to create Claude state poller: {e} — HUD disabled");
-            None
+    // ── Agent state source ───────────────────────────────────────────────────
+    // In client mode (daemon available), prefer semantic subscriptions.
+    // In standalone mode, fall back to file-watching via ClaudeStatePoller.
+    let is_client_mode = matches!(session_mode, SessionMode::Client { .. });
+    let daemon_sub_rx = if is_client_mode {
+        crate::daemon_subscriber::try_spawn_subscriber()
+    } else {
+        None
+    };
+    let claude_poller = if daemon_sub_rx.is_some() {
+        tracing::info!("Using daemon semantic subscription for agent state");
+        None
+    } else {
+        match ClaudeStatePoller::new() {
+            Ok(poller) => {
+                tracing::info!("Claude state poller initialized");
+                Some(poller)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create Claude state poller: {e} — HUD disabled");
+                None
+            }
         }
     };
 
@@ -540,6 +553,7 @@ pub fn run() -> anyhow::Result<()> {
         term_event_rx,
         claude_poller,
         claude_session: None,
+        daemon_sub_rx,
         pty_child_pid,
         inject_session_id,
         inject_watcher,
@@ -647,8 +661,21 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // ── Poll Claude state ──────────────────────────────────────────
-        // Non-blocking: drains file-watch events and re-reads changed files.
-        let all_sessions = if let Some(ref mut poller) = state.claude_poller {
+        // Prefer daemon subscription (client mode) over file-watching.
+        let all_sessions = if let Some(ref rx) = state.daemon_sub_rx {
+            let sessions = rx.borrow().clone();
+            // In client mode, match by session_id if available, else by pid.
+            if let SessionMode::Client { ref session_id, .. } = state.session_mode {
+                state.claude_session = sessions
+                    .iter()
+                    .find(|s| s.session_id == *session_id)
+                    .cloned()
+                    .or_else(|| find_matching_session(&sessions, state.pty_child_pid));
+            } else {
+                state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
+            }
+            sessions
+        } else if let Some(ref mut poller) = state.claude_poller {
             let sessions = poller.poll();
             state.claude_session = find_matching_session(&sessions, state.pty_child_pid);
             sessions
@@ -1170,9 +1197,13 @@ struct ConductorWindow {
     /// Terminal event receiver — relays PtyWrite responses back to the PTY.
     term_event_rx: tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
     /// Claude state poller — watches /tmp/claude-code-state/ for session files.
+    /// Used in standalone mode; `None` when daemon subscription is active.
     claude_poller: Option<ClaudeStatePoller>,
     /// Cached matching Claude session for the HUD overlay.
     claude_session: Option<ClaudeSessionState>,
+    /// Daemon semantic subscription — receives session states from the daemon.
+    /// Active in client mode; takes priority over `claude_poller`.
+    daemon_sub_rx: Option<tokio::sync::watch::Receiver<Vec<ClaudeSessionState>>>,
     /// PID of the PTY child process, used to read cwd via /proc/<pid>/cwd.
     /// Zero in client mode (daemon owns the process).
     pty_child_pid: i32,

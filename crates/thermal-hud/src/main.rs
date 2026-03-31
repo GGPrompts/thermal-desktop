@@ -1,3 +1,4 @@
+pub mod daemon_subscriber;
 pub mod renderer;
 pub mod voice;
 pub mod wayland;

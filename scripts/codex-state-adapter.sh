@@ -143,6 +143,11 @@ now_epoch() {
     date +%s
 }
 
+source_mtime_epoch() {
+    local source="$1"
+    stat -c %Y "$source" 2>/dev/null || echo 0
+}
+
 ensure_dirs() {
     mkdir -p "$STATE_DIR"
     mkdir -p "$RUN_DIR"
@@ -233,7 +238,6 @@ write_state_for_session() {
         --arg last_updated "$last_updated" \
         --arg context_percent "$context_percent" \
         --argjson details "$details_json" \
-        --argjson pid "$$" \
         '{
             session_id: $sid,
             agent_type: $agent_type,
@@ -242,7 +246,6 @@ write_state_for_session() {
             working_dir: (if $working_dir == "" then null else $working_dir end),
             last_updated: $last_updated,
             details: $details,
-            pid: $pid,
             subagent_count: 0,
             context_percent: (if $context_percent == "" then null else ($context_percent | tonumber) end)
         }' > "$temp_file" 2>/dev/null; then
@@ -403,7 +406,7 @@ session_id_for_source() {
 
 touch_source() {
     local source="$1"
-    SOURCE_LAST_TOUCH["$source"]="$(stat -c %Y "$source" 2>/dev/null || now_epoch)"
+    SOURCE_LAST_TOUCH["$source"]="$(source_mtime_epoch "$source")"
 }
 
 process_line() {
@@ -572,19 +575,30 @@ prune_stale_sources() {
 }
 
 watch_mode() {
-    local source now
+    local source now source_mtime
 
     ensure_dirs
     ensure_single_instance
     reset_state_dir
 
     while true; do
+        now="$(now_epoch)"
         while IFS= read -r -d '' source; do
             [[ -z "$source" ]] && continue
+            source_mtime="$(source_mtime_epoch "$source")"
+            if [[ "$source_mtime" -eq 0 || $((now - source_mtime)) -gt "$STALE_SECS" ]]; then
+                if [[ -n "${SOURCE_SESSION_ID[$source]:-}" ]]; then
+                    remove_state_for_session "${SOURCE_SESSION_ID[$source]}"
+                fi
+                unset SOURCE_LINE_COUNT["$source"]
+                unset SOURCE_LAST_TOUCH["$source"]
+                unset SOURCE_SESSION_ID["$source"]
+                unset SOURCE_WORKDIR["$source"]
+                continue
+            fi
             process_source_file "$source"
         done < <(find "$SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null | sort -z)
 
-        now="$(now_epoch)"
         prune_stale_sources "$now"
         sleep "$POLL_INTERVAL"
     done

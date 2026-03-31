@@ -193,7 +193,7 @@ impl ChatEntry {
         if let Some(ref proj) = self.project {
             spans.push(Span::styled(
                 format!(" [{proj}]"),
-                Style::default().fg(COLD),
+                Style::default().fg(TEXT_MUTED),
             ));
         }
 
@@ -469,7 +469,7 @@ impl TuiPage for ChatPage {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(COLD))
+                    .border_style(Style::default().fg(TEXT_MUTED))
                     .title(" Messages ")
                     .title_style(Style::default().fg(ACCENT_COLD))
                     .style(Style::default().bg(BG)),

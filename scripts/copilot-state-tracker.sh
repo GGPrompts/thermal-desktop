@@ -162,7 +162,6 @@ write_state() {
         --arg working_dir "$WORKING_DIR" \
         --arg last_updated "$TIMESTAMP" \
         --argjson details "$details_json" \
-        --argjson pid $$ \
         '{
             session_id: $session_id,
             agent_type: $agent_type,
@@ -172,7 +171,6 @@ write_state() {
             working_dir: $working_dir,
             last_updated: $last_updated,
             details: $details,
-            pid: $pid,
             subagent_count: 0,
             context_percent: null
         }' > "$temp_file" 2>/dev/null; then

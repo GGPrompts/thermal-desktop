@@ -901,7 +901,7 @@ impl TuiPage for ServicesPage {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(COLD))
+                .border_style(Style::default().fg(TEXT_MUTED))
                 .style(Style::default().bg(BG)),
         );
 

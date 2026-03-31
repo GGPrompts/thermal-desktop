@@ -200,13 +200,13 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .bg(BG)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
-        .divider(Span::styled(" | ", Style::default().fg(COLD)))
+        .divider(Span::styled(" | ", Style::default().fg(TEXT_MUTED)))
         .block(
             Block::default()
                 .title(" THERMAL CONDUCTOR ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(COLD))
+                .border_style(Style::default().fg(TEXT_MUTED))
                 .style(Style::default().bg(BG_SURFACE)),
         );
     f.render_widget(tabs, chunks[0]);

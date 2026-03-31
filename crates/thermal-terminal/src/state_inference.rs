@@ -83,13 +83,37 @@ impl AgentType {
 
     /// Try to infer agent type from a spawn command string.
     pub fn from_command(cmd: &str) -> Option<Self> {
-        let lower = cmd.to_lowercase();
-        if lower.contains("claude") {
-            Some(AgentType::Claude)
-        } else if lower.contains("codex") {
-            Some(AgentType::Codex)
-        } else if lower.contains("copilot") {
+        let tokens: Vec<String> = cmd
+            .split_whitespace()
+            .map(|token| {
+                token
+                    .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(token)
+                    .to_lowercase()
+            })
+            .filter(|token| !token.is_empty())
+            .collect();
+
+        if tokens
+            .iter()
+            .any(|token| token == "gh")
+            && tokens.iter().any(|token| token == "copilot")
+        {
             Some(AgentType::Copilot)
+        } else if tokens.iter().any(|token| token.contains("claude")) {
+            Some(AgentType::Claude)
+        } else if tokens
+            .iter()
+            .any(|token| token == "copilot" || token.starts_with("copilot-"))
+        {
+            Some(AgentType::Copilot)
+        } else if tokens
+            .iter()
+            .any(|token| token == "codex" || token.starts_with("codex-"))
+        {
+            Some(AgentType::Codex)
         } else {
             None
         }
@@ -594,10 +618,10 @@ impl AgentStateInference {
             if need_agent && new_agent_type.is_none() {
                 if self.patterns.agent_ident_claude.is_match(line) {
                     new_agent_type = Some(AgentType::Claude);
-                } else if self.patterns.agent_ident_codex.is_match(line) {
-                    new_agent_type = Some(AgentType::Codex);
                 } else if self.patterns.agent_ident_copilot.is_match(line) {
                     new_agent_type = Some(AgentType::Copilot);
+                } else if self.patterns.agent_ident_codex.is_match(line) {
+                    new_agent_type = Some(AgentType::Codex);
                 }
             }
 
@@ -1250,6 +1274,18 @@ mod tests {
             AgentType::from_command("gh copilot suggest"),
             Some(AgentType::Copilot)
         );
+        assert_eq!(
+            AgentType::from_command("gh copilot suggest --prompt 'compare this to codex'"),
+            Some(AgentType::Copilot)
+        );
+        assert_eq!(
+            AgentType::from_command("/usr/bin/gh copilot suggest"),
+            Some(AgentType::Copilot)
+        );
+        assert_eq!(
+            AgentType::from_command("/usr/local/bin/codex-wrapper"),
+            Some(AgentType::Codex)
+        );
         assert_eq!(AgentType::from_command("vim file.rs"), None);
     }
 
@@ -1361,6 +1397,14 @@ mod tests {
                 tool_name: "Grep".to_string()
             }
         );
+    }
+
+    #[test]
+    fn detect_agent_from_output_prefers_copilot_over_codex() {
+        let mut engine = make_engine(None);
+        engine.push_line("GitHub Copilot using gpt-4.1; comparing with Codex output".to_string());
+        engine.detect_agent_from_output();
+        assert_eq!(engine.agent_type(), Some(AgentType::Copilot));
     }
 
     #[test]

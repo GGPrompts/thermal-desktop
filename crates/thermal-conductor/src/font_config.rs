@@ -4,7 +4,7 @@
 //! at startup. Provides runtime font size adjustment (Ctrl+Plus/Minus/0).
 
 /// Default font size when `THERMAL_FONT_SIZE` is not set.
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+const DEFAULT_FONT_SIZE: f32 = 17.0;
 
 /// Line height multiplier relative to font size.
 const LINE_HEIGHT_RATIO: f32 = 1.375;

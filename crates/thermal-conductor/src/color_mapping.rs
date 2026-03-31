@@ -62,11 +62,11 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::Green => PaletteColor::WARM.to_f32_array(), // color2  #22c55e
         NamedColor::Yellow => PaletteColor::HOT.to_f32_array(), // color3  #eab308
         NamedColor::Blue => PaletteColor::ACCENT_COOL.to_f32_array(), // color4  #3b82f6
-        NamedColor::Magenta => PaletteColor::FREEZING.to_f32_array(), // color5  #1a0030
+        NamedColor::Magenta => PaletteColor::ACCENT_COLD.to_f32_array(), // color5  #818cf8
         NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(), // color6  #14b8a6
         NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(), // color7 #e9e0ff
 
-        NamedColor::BrightBlack => PaletteColor::COLD.to_f32_array(), // color8  #4a3a8a
+        NamedColor::BrightBlack => [0.42, 0.35, 0.69, 1.0], // color8  #6b5aaf — lighter gray
         NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(), // color9  #dc2626
         NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(), // color10 #0d9488
         NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(), // color11 #f97316
@@ -79,11 +79,11 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
 
         NamedColor::DimBlack => TERM_BG,
         NamedColor::DimRed => PaletteColor::SEARING.to_f32_array(),
-        NamedColor::DimGreen => PaletteColor::MILD.to_f32_array(),
+        NamedColor::DimGreen => [0.17, 0.72, 0.66, 1.0], // #2ab8a8 — brighter teal
         NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
-        NamedColor::DimBlue => PaletteColor::COOL.to_f32_array(),
+        NamedColor::DimBlue => [0.20, 0.47, 0.95, 1.0], // #3378f2 — slight lift over COOL
         NamedColor::DimMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
-        NamedColor::DimCyan => [0.08, 0.45, 0.42, 1.0], // muted teal
+        NamedColor::DimCyan => [0.17, 0.72, 0.66, 1.0], // #2ab8a8 — brighter teal
         NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT.to_f32_array(),
 
         NamedColor::Background => TERM_BG,

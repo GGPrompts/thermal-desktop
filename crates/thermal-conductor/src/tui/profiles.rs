@@ -739,7 +739,7 @@ fn render_field(
     focused: bool,
     placeholder: &str,
 ) {
-    let border_color = if focused { ACCENT_COLD } else { COLD };
+    let border_color = if focused { ACCENT_COLD } else { TEXT_MUTED };
     let text_style = if focused {
         Style::default().fg(TEXT_BRIGHT)
     } else if value.is_empty() {
@@ -787,7 +787,7 @@ fn render_mode_bar(f: &mut Frame, area: Rect, mode: Mode) {
     let mode_line = Line::from(vec![
         Span::styled("  ", Style::default()),
         Span::styled(" Launch ", launch_style),
-        Span::styled("  \u{2502}  ", Style::default().fg(COLD)),
+        Span::styled("  \u{2502}  ", Style::default().fg(TEXT_MUTED)),
         Span::styled(" Edit ", edit_style),
     ]);
     f.render_widget(Paragraph::new(mode_line), area);
@@ -846,7 +846,7 @@ impl TuiPage for ProfilesPage {
         let list_border = if self.focus == Focus::ProfileList {
             ACCENT_COLD
         } else {
-            COLD
+            TEXT_MUTED
         };
         let profile_list = List::new(profile_items)
             .block(
@@ -1059,7 +1059,7 @@ impl ProfilesPage {
         // Worktree toggle
         {
             let focused = self.focus == Focus::WorktreeToggle;
-            let border_color = if focused { ACCENT_COLD } else { COLD };
+            let border_color = if focused { ACCENT_COLD } else { TEXT_MUTED };
             let indicator = if self.worktree_enabled { "[x]" } else { "[ ]" };
             let label = format!("{} Git worktree per session", indicator);
             let text_color = if focused { TEXT_BRIGHT } else { TEXT };
@@ -1150,7 +1150,7 @@ impl ProfilesPage {
         // Icon field
         {
             let focused = self.focus == Focus::IconField;
-            let border_color = if focused { ACCENT_COLD } else { COLD };
+            let border_color = if focused { ACCENT_COLD } else { TEXT_MUTED };
             let icon_display = if self.icon_input.is_empty() {
                 "(none \u{2014} press Enter to pick)".to_string()
             } else if focused {
@@ -1203,7 +1203,7 @@ impl ProfilesPage {
         // Worktree toggle
         {
             let focused = self.focus == Focus::WorktreeToggle;
-            let border_color = if focused { ACCENT_COLD } else { COLD };
+            let border_color = if focused { ACCENT_COLD } else { TEXT_MUTED };
             let indicator = if self.worktree_enabled { "[x]" } else { "[ ]" };
             let label = format!("{} Git worktree per session", indicator);
             let text_color = if focused { TEXT_BRIGHT } else { TEXT };

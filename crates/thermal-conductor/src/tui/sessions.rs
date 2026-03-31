@@ -58,13 +58,13 @@ fn tool_category_color(cat: ToolCategory) -> Color {
         ToolCategory::Write => pal(ThermalPalette::HOT),
         ToolCategory::Execute => pal(ThermalPalette::HOTTER),
         ToolCategory::Thinking => pal(ThermalPalette::MILD),
-        ToolCategory::Idle => pal(ThermalPalette::FREEZING),
+        ToolCategory::Idle => pal(ThermalPalette::TEXT_MUTED),
     }
 }
 
 fn status_color(status: &ClaudeStatus) -> Color {
     match status {
-        ClaudeStatus::Idle => pal(ThermalPalette::COLD),
+        ClaudeStatus::Idle => pal(ThermalPalette::TEXT_MUTED),
         ClaudeStatus::Processing => pal(ThermalPalette::WARM),
         ClaudeStatus::ToolUse => pal(ThermalPalette::HOT),
         ClaudeStatus::AwaitingInput => pal(ThermalPalette::SEARING),
@@ -2061,7 +2061,7 @@ impl TuiPage for SessionsPage {
                     if self.focused_panel == FocusedPanel::AgentList {
                         pal(ThermalPalette::ACCENT_WARM)
                     } else {
-                        COLD
+                        TEXT_MUTED
                     },
                 ))
                 .style(Style::default().bg(BG)),
@@ -2078,7 +2078,7 @@ impl TuiPage for SessionsPage {
                 if let Some(row) = self.display_rows.get(idx) {
                     let sid = &row.session.session_id;
                     let label_span =
-                        Span::styled(" \u{2502} ", Style::default().fg(pal(ThermalPalette::COLD)));
+                        Span::styled(" \u{2502} ", Style::default().fg(TEXT_MUTED));
                     let bar = self.build_timeline_line(sid, bar_width.saturating_sub(3));
                     let mut spans = vec![label_span];
                     spans.extend(bar.spans);
@@ -2106,7 +2106,7 @@ impl TuiPage for SessionsPage {
             let preview_border_color = if self.focused_panel == FocusedPanel::Preview {
                 pal(ThermalPalette::ACCENT_WARM)
             } else {
-                COLD
+                TEXT_MUTED
             };
 
             let preview_widget = if self.preview_content.is_empty() {
@@ -2210,7 +2210,7 @@ impl TuiPage for SessionsPage {
             let input_border_color = if chat_focused {
                 pal(ThermalPalette::ACCENT_WARM)
             } else {
-                COLD
+                TEXT_MUTED
             };
             let input_title = if chat_focused {
                 format!("{}Enter=send, Esc=cancel ", target_hint)
@@ -2381,7 +2381,7 @@ impl TuiPage for SessionsPage {
             let list = List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(COLD))
+                    .border_style(Style::default().fg(TEXT_MUTED))
                     .style(Style::default().bg(BG_SURFACE)),
             );
             f.render_widget(list, popup_rect);

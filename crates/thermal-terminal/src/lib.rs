@@ -10,6 +10,7 @@
 //! - **`state_inference`** — Agent state inference from PTY output patterns + OSC 633 states.
 //! - **`terminal`** — TerminalSize (Dimensions impl for alacritty_terminal).
 
+pub mod event_log;
 pub mod input;
 pub mod osc633;
 pub mod pty;
@@ -17,4 +18,5 @@ pub mod state_inference;
 pub mod terminal;
 
 // Re-export key types for convenience.
+pub use event_log::{EventLog, SessionEvent};
 pub use pty::ExitReason;

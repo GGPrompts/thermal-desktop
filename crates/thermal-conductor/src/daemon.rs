@@ -135,6 +135,24 @@ impl Daemon {
             });
         }
 
+        // Attach per-session JSONL event log for structured diagnostics.
+        {
+            match thermal_terminal::EventLog::for_session(&id, thermal_terminal::event_log::DEFAULT_MAX_ENTRIES) {
+                Ok(mut event_log) => {
+                    event_log.log(&thermal_terminal::SessionEvent::Spawn {
+                        command: shell_path.clone(),
+                        cwd: effective_cwd.clone(),
+                    });
+                    if let Some(si) = terminal.state_inference() {
+                        si.lock().set_event_log(event_log);
+                    }
+                }
+                Err(e) => {
+                    warn!(session = %id, error = %e, "Failed to create session event log");
+                }
+            }
+        }
+
         // Shared dirty flag for the byte processor.
         let pty_dirty = Arc::new(AtomicBool::new(false));
 
@@ -397,6 +415,15 @@ impl Daemon {
                                 Some(reason) => (None, reason.to_string()),
                                 None => (None, String::new()),
                             };
+                            // Log PtyEof to the session event log.
+                            if let Some(si) = session.terminal.state_inference() {
+                                let mut guard = si.lock();
+                                if let Some(log) = guard.event_log_mut() {
+                                    log.log(&thermal_terminal::SessionEvent::PtyEof {
+                                        reason: reason_str.clone(),
+                                    });
+                                }
+                            }
                             let _ = update_tx.send(Response::SessionExited {
                                 id: session_id.clone(),
                                 exit_code,
@@ -601,6 +628,13 @@ impl Daemon {
                     let session = session_arc.lock();
                     if let Some(ref wt_path) = session.worktree_path {
                         Self::remove_worktree(wt_path);
+                    }
+                    // Clean up the session event log file.
+                    if let Some(si) = session.terminal.state_inference() {
+                        let mut guard = si.lock();
+                        if let Some(log) = guard.event_log_mut() {
+                            thermal_terminal::EventLog::remove(log.path());
+                        }
                     }
                     drop(session);
                     // Remove from sidecar (fire-and-forget).

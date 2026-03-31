@@ -250,6 +250,29 @@ fn format_activity(s: &ClaudeSessionState) -> String {
 // Relative timestamps
 // ---------------------------------------------------------------------------
 
+fn format_duration_ms(ms: i64) -> String {
+    let secs = (ms / 1000).max(0);
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m{}s", m, s)
+        }
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h{}m", h, m)
+        }
+    }
+}
+
 fn relative_time(iso: &str) -> String {
     parse_secs_ago(iso)
         .map(|s| {
@@ -1872,7 +1895,7 @@ impl TuiPage for SessionsPage {
         };
 
         let header_cells = [
-            "\u{2610}", "Name", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Updated",
+            "\u{2610}", "Name", "Agent", "Status", "Activity", "Ctx%", "Project", "WS", "Age", "Cmd",
         ]
         .iter()
         .map(|h| {
@@ -1936,6 +1959,11 @@ impl TuiPage for SessionsPage {
                     .map(relative_time)
                     .unwrap_or_else(|| "-".into());
 
+                let cmd_str = s
+                    .last_command_duration_ms
+                    .map(format_duration_ms)
+                    .unwrap_or_else(|| "\u{2014}".into());
+
                 if row.is_subagent {
                     let tree = if row.is_last_child {
                         "\u{2514}\u{2500}"
@@ -1959,6 +1987,7 @@ impl TuiPage for SessionsPage {
                         Cell::from(project.clone()).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(ws_str).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(cmd_str).style(Style::default().fg(TEXT_MUTED)),
                     ])
                 } else {
                     let display_name = s.model_display_name();
@@ -1978,6 +2007,7 @@ impl TuiPage for SessionsPage {
                         Cell::from(project.clone()).style(Style::default().fg(TEXT_MUTED)),
                         Cell::from(ws_str).style(Style::default().fg(ACCENT_COLD)),
                         Cell::from(updated).style(Style::default().fg(TEXT_MUTED)),
+                        Cell::from(cmd_str).style(Style::default().fg(TEXT_MUTED)),
                     ])
                 }
             })
@@ -1990,11 +2020,12 @@ impl TuiPage for SessionsPage {
                 Constraint::Length(14), // session id
                 Constraint::Length(5),  // Agent emoji + count
                 Constraint::Length(10), // status
-                Constraint::Length(28), // activity
+                Constraint::Length(24), // activity
                 Constraint::Length(6),  // ctx%
                 Constraint::Min(14),   // project
                 Constraint::Length(4),  // WS
-                Constraint::Length(8),  // updated
+                Constraint::Length(5),  // age
+                Constraint::Length(6),  // cmd duration
             ],
         )
         .header(header_row)

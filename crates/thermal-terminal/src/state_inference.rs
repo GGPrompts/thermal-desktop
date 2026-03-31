@@ -26,6 +26,7 @@ use regex::Regex;
 use serde::Serialize;
 use tracing::{debug, trace, warn};
 
+use crate::event_log::{EventLog, SessionEvent};
 use crate::osc633::CommandState;
 
 // ── Agent types ─────────────────────────────────────────────────────────────
@@ -248,6 +249,8 @@ pub struct AgentStateInference {
     last_command_duration_ms: Option<i64>,
     /// Count of consecutive non-zero exit codes.
     consecutive_failures: i64,
+    /// Optional per-session JSONL event log for structured diagnostics.
+    event_log: Option<EventLog>,
 }
 
 /// Maximum number of recent lines to keep in the ring buffer.
@@ -283,7 +286,21 @@ impl AgentStateInference {
             command_started_at_iso: None,
             last_command_duration_ms: None,
             consecutive_failures: 0,
+            event_log: None,
         }
+    }
+
+    /// Attach a per-session event log.
+    ///
+    /// Must be called after construction to enable event logging. If not
+    /// called, no events are recorded.
+    pub fn set_event_log(&mut self, log: EventLog) {
+        self.event_log = Some(log);
+    }
+
+    /// Get a mutable reference to the event log (if attached).
+    pub fn event_log_mut(&mut self) -> Option<&mut EventLog> {
+        self.event_log.as_mut()
     }
 
     /// Get the effective agent type (config override > detected > None).
@@ -349,16 +366,25 @@ impl AgentStateInference {
                             self.dirty = true;
                         }
                     }
+                    // Log command start event.
+                    if let Some(ref mut log) = self.event_log {
+                        log.log(&SessionEvent::CommandStart {
+                            command: command.unwrap_or("<unknown>").to_string(),
+                        });
+                    }
                 }
             }
             CommandState::Finished => {
                 // Command finished — compute duration, update exit code and
                 // consecutive failure count.
-                if let Some(started) = self.command_started_at.take() {
+                let duration_ms = if let Some(started) = self.command_started_at.take() {
                     let dur = started.elapsed().as_millis() as i64;
                     self.last_command_duration_ms = Some(dur);
                     self.dirty = true;
-                }
+                    dur as u64
+                } else {
+                    0
+                };
                 // Capture command text if we didn't get it during Executing
                 // (the E mark can arrive at any point before D).
                 if let Some(cmd) = command {
@@ -382,6 +408,18 @@ impl AgentStateInference {
                     // the failure counter.
                     self.last_exit_code = None;
                     self.dirty = true;
+                }
+                // Log command finish event.
+                if let Some(ref mut log) = self.event_log {
+                    let cmd_str = command
+                        .map(|s| s.to_string())
+                        .or_else(|| self.last_command.clone())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    log.log(&SessionEvent::CommandFinish {
+                        command: cmd_str,
+                        exit_code,
+                        duration_ms,
+                    });
                 }
             }
             CommandState::PromptStart => {
@@ -502,12 +540,20 @@ impl AgentStateInference {
         self.detect_context_percent();
 
         if new_status != self.last_status {
+            let old_str = self.last_status.status_str().to_string();
+            let new_str = new_status.status_str().to_string();
             trace!(
-                old = %self.last_status.status_str(),
-                new = %new_status.status_str(),
+                old = %old_str,
+                new = %new_str,
                 field = "status",
                 "state dirty"
             );
+            if let Some(ref mut log) = self.event_log {
+                log.log(&SessionEvent::StatusChange {
+                    old: old_str,
+                    new: new_str,
+                });
+            }
             self.last_status = new_status;
             self.dirty = true;
         }
@@ -742,6 +788,22 @@ enum StripState {
     Charset,
 }
 
+/// Diagnostic counters for [`AnsiStripper`].
+///
+/// Useful for monitoring parser health: if `split_sequences` is high
+/// relative to `sequences_stripped`, PTY read sizes may need tuning.
+#[derive(Debug, Default, Clone)]
+pub struct AnsiStripperStats {
+    /// Sequences that spanned a chunk boundary (feed started mid-sequence).
+    pub split_sequences: u64,
+    /// Total CSI/OSC/APC/charset sequences fully consumed.
+    pub sequences_stripped: u64,
+    /// Total bytes consumed by escape sequences (not emitted to output).
+    pub bytes_stripped: u64,
+    /// Total visible text bytes emitted to the output buffer.
+    pub bytes_visible: u64,
+}
+
 /// Stateful ANSI escape sequence stripper.
 ///
 /// Strips CSI, OSC, APC, and other common escape sequences from a byte
@@ -750,13 +812,20 @@ enum StripState {
 /// read boundaries are consumed correctly.
 struct AnsiStripper {
     state: StripState,
+    stats: AnsiStripperStats,
 }
 
 impl AnsiStripper {
     fn new() -> Self {
         Self {
             state: StripState::Normal,
+            stats: AnsiStripperStats::default(),
         }
+    }
+
+    /// Returns a reference to the diagnostic counters.
+    pub fn stats(&self) -> &AnsiStripperStats {
+        &self.stats
     }
 
     /// Feed a chunk of raw bytes and return the visible text extracted from it.
@@ -768,6 +837,12 @@ impl AnsiStripper {
         let mut out = String::with_capacity(bytes.len());
         let mut i = 0;
 
+        // Track split sequences: if we enter feed() already mid-sequence,
+        // a sequence was split across chunk boundaries.
+        if self.state != StripState::Normal {
+            self.stats.split_sequences += 1;
+        }
+
         while i < bytes.len() {
             let b = bytes[i];
 
@@ -775,6 +850,7 @@ impl AnsiStripper {
                 StripState::Normal => {
                     if b == 0x1B {
                         self.state = StripState::Escape;
+                        self.stats.bytes_stripped += 1;
                         i += 1;
                     } else if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
                         // Skip non-printable control characters.
@@ -783,8 +859,10 @@ impl AnsiStripper {
                         // Visible character or whitespace — handle UTF-8.
                         let remaining = &bytes[i..];
                         if let Some(ch) = decode_utf8_char(remaining) {
+                            let char_len = ch.len_utf8();
                             out.push(ch);
-                            i += ch.len_utf8();
+                            self.stats.bytes_visible += char_len as u64;
+                            i += char_len;
                         } else {
                             // Invalid UTF-8, skip byte.
                             i += 1;
@@ -794,6 +872,7 @@ impl AnsiStripper {
 
                 StripState::Escape => {
                     // We saw ESC last; this byte determines the sequence type.
+                    self.stats.bytes_stripped += 1;
                     match b {
                         b'[' => {
                             self.state = StripState::Csi;
@@ -814,6 +893,7 @@ impl AnsiStripper {
                         _ => {
                             // Other 2-byte ESC sequences: skip this byte and done.
                             self.state = StripState::Normal;
+                            self.stats.sequences_stripped += 1;
                             i += 1;
                         }
                     }
@@ -821,16 +901,20 @@ impl AnsiStripper {
 
                 StripState::Csi => {
                     // CSI sequence: consume until final byte 0x40..=0x7E.
+                    self.stats.bytes_stripped += 1;
                     if (0x40..=0x7E).contains(&b) {
                         self.state = StripState::Normal;
+                        self.stats.sequences_stripped += 1;
                     }
                     i += 1;
                 }
 
                 StripState::Osc => {
+                    self.stats.bytes_stripped += 1;
                     if b == 0x07 {
                         // BEL terminates OSC.
                         self.state = StripState::Normal;
+                        self.stats.sequences_stripped += 1;
                         i += 1;
                     } else if b == 0x1B {
                         // Possible ST (ESC \).
@@ -845,7 +929,9 @@ impl AnsiStripper {
                 StripState::OscEsc => {
                     if b == b'\\' {
                         // ST complete — OSC is done.
+                        self.stats.bytes_stripped += 1;
                         self.state = StripState::Normal;
+                        self.stats.sequences_stripped += 1;
                     } else {
                         // Not ST — the ESC was part of the OSC body (rare).
                         // Stay in OSC and reprocess this byte.
@@ -856,6 +942,7 @@ impl AnsiStripper {
                 }
 
                 StripState::Apc => {
+                    self.stats.bytes_stripped += 1;
                     if b == 0x1B {
                         self.state = StripState::ApcEsc;
                     }
@@ -865,7 +952,9 @@ impl AnsiStripper {
                 StripState::ApcEsc => {
                     if b == b'\\' {
                         // ST complete — APC is done.
+                        self.stats.bytes_stripped += 1;
                         self.state = StripState::Normal;
+                        self.stats.sequences_stripped += 1;
                     } else {
                         // Not ST — stay in APC.
                         self.state = StripState::Apc;
@@ -876,7 +965,9 @@ impl AnsiStripper {
 
                 StripState::Charset => {
                     // Charset designation: consume the one charset byte.
+                    self.stats.bytes_stripped += 1;
                     self.state = StripState::Normal;
+                    self.stats.sequences_stripped += 1;
                     i += 1;
                 }
             }

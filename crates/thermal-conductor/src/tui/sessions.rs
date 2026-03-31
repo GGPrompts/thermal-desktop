@@ -48,7 +48,6 @@ const BG_SURFACE: Color = pal(ThermalPalette::BG_SURFACE);
 const TEXT: Color = pal(ThermalPalette::TEXT);
 const TEXT_BRIGHT: Color = pal(ThermalPalette::TEXT_BRIGHT);
 const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
-const COLD: Color = pal(ThermalPalette::COLD);
 const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
 
 /// Map a ToolCategory to a ratatui Color using thermal palette colors.

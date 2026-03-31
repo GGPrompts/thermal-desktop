@@ -13,14 +13,14 @@
 #   CODEX_SESSIONS_DIR          Source session tree (default: ~/.codex/sessions)
 #   CODEX_STATE_DIR             Output state dir (default: /tmp/codex-state)
 #   CODEX_STATE_POLL_INTERVAL   Watch-mode poll interval in seconds (default: 1)
-#   CODEX_STATE_STALE_SECS      Remove untouched sessions after N seconds (3600)
+#   CODEX_STATE_STALE_SECS      Remove untouched sessions after N seconds (120)
 
 set -euo pipefail
 
 STATE_DIR="${CODEX_STATE_DIR:-/tmp/codex-state}"
 SESSIONS_DIR="${CODEX_SESSIONS_DIR:-${HOME}/.codex/sessions}"
 POLL_INTERVAL="${CODEX_STATE_POLL_INTERVAL:-1}"
-STALE_SECS="${CODEX_STATE_STALE_SECS:-3600}"
+STALE_SECS="${CODEX_STATE_STALE_SECS:-120}"
 
 RUNTIME_BASE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 RUN_DIR="${RUNTIME_BASE}/thermal"
@@ -465,14 +465,18 @@ process_line() {
                     SESSION_DETAILS["$session_id"]="null"
                     ;;
                 token_count)
+                    # Codex JSONL currently exposes token usage snapshots, but not a
+                    # canonical "context percent" equivalent to the CLI's own UI
+                    # indicator. The previous approximation based on last-token usage
+                    # was misleading, so only trust an explicit field if Codex starts
+                    # emitting one in the future.
                     context_percent="$(
                         jq -r '
-                            (.payload.info.model_context_window // .payload.model_context_window // 0) as $window
-                            | (
-                                (.payload.info.last_token_usage.input_tokens // .payload.last_token_usage.input_tokens // .payload.input_tokens // 0)
-                                + (.payload.info.last_token_usage.cached_input_tokens // .payload.last_token_usage.cached_input_tokens // .payload.cached_input_tokens // 0)
-                            ) as $tokens
-                            | if $window > 0 and $tokens > 0 then (($tokens / $window) * 100) else empty end
+                            .payload.context_percent
+                            // .payload.info.context_percent
+                            // .payload.info.context_percentage
+                            // .payload.context_percentage
+                            // empty
                         ' <<<"$line" 2>/dev/null || true
                     )"
                     if [[ -n "$context_percent" ]] && jq -en --arg pct "$context_percent" '$pct | tonumber | . >= 0 and . <= 100' >/dev/null; then

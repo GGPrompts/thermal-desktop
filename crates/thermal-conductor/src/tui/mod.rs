@@ -58,7 +58,6 @@ pub mod palette {
     pub const BG_SURFACE: Color = pal(ThermalPalette::BG_SURFACE);
     pub const TEXT_BRIGHT: Color = pal(ThermalPalette::TEXT_BRIGHT);
     pub const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
-    pub const COLD: Color = pal(ThermalPalette::COLD);
     pub const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
 }
 
@@ -66,7 +65,6 @@ const BG: Color = palette::BG;
 const BG_SURFACE: Color = palette::BG_SURFACE;
 const TEXT_BRIGHT: Color = palette::TEXT_BRIGHT;
 const TEXT_MUTED: Color = palette::TEXT_MUTED;
-const COLD: Color = palette::COLD;
 const ACCENT_COLD: Color = palette::ACCENT_COLD;
 
 // ---------------------------------------------------------------------------

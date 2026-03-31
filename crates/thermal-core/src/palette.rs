@@ -57,8 +57,8 @@ impl Color {
 
     // Cold spectrum
     pub const FREEZING: Color = Color::from_hex(0x1a0030);
-    pub const COLD: Color = Color::from_hex(0x4a3a8a);
-    pub const COOL: Color = Color::from_hex(0x2563eb);
+    pub const COLD: Color = Color::from_hex(0x2d1b69);
+    pub const COOL: Color = Color::from_hex(0x1e3a8a);
 
     // Neutral
     pub const MILD: Color = Color::from_hex(0x0d9488);
@@ -76,10 +76,10 @@ impl Color {
     // Text
     pub const TEXT: Color = Color::from_hex(0xc4b5fd);
     pub const TEXT_BRIGHT: Color = Color::from_hex(0xe9e0ff);
-    pub const TEXT_MUTED: Color = Color::from_hex(0x7c6faa);
+    pub const TEXT_MUTED: Color = Color::from_hex(0x9b8dd1);
 
     // Accents
-    pub const ACCENT_COLD: Color = Color::from_hex(0x818cf8);
+    pub const ACCENT_COLD: Color = Color::from_hex(0x6366f1);
     pub const ACCENT_COOL: Color = Color::from_hex(0x3b82f6);
     pub const ACCENT_NEUTRAL: Color = Color::from_hex(0x14b8a6);
     pub const ACCENT_WARM: Color = Color::from_hex(0xf59e0b);
@@ -518,8 +518,8 @@ impl ThermalPalette {
 
     // Cold spectrum
     pub const FREEZING: [f32; 4] = Self::hex(0x1a, 0x00, 0x30);
-    pub const COLD: [f32; 4] = Self::hex(0x4a, 0x3a, 0x8a);
-    pub const COOL: [f32; 4] = Self::hex(0x25, 0x63, 0xeb);
+    pub const COLD: [f32; 4] = Self::hex(0x2d, 0x1b, 0x69);
+    pub const COOL: [f32; 4] = Self::hex(0x1e, 0x3a, 0x8a);
 
     // Neutral
     pub const MILD: [f32; 4] = Self::hex(0x0d, 0x94, 0x88);
@@ -537,10 +537,10 @@ impl ThermalPalette {
     // Text
     pub const TEXT: [f32; 4] = Self::hex(0xc4, 0xb5, 0xfd);
     pub const TEXT_BRIGHT: [f32; 4] = Self::hex(0xe9, 0xe0, 0xff);
-    pub const TEXT_MUTED: [f32; 4] = Self::hex(0x7c, 0x6f, 0xaa);
+    pub const TEXT_MUTED: [f32; 4] = Self::hex(0x9b, 0x8d, 0xd1);
 
     // Accents
-    pub const ACCENT_COLD: [f32; 4] = Self::hex(0x81, 0x8c, 0xf8);
+    pub const ACCENT_COLD: [f32; 4] = Self::hex(0x63, 0x66, 0xf1);
     pub const ACCENT_COOL: [f32; 4] = Self::hex(0x3b, 0x82, 0xf6);
     pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
     pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);

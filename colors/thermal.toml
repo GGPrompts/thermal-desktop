@@ -27,7 +27,7 @@ white_hot = "#fef3c7"
 [text]
 text        = "#c4b5fd"
 text_bright = "#e9e0ff"
-text_muted  = "#7c6faa"
+text_muted  = "#9b8dd1"
 
 [accent]
 accent_cold    = "#6366f1"

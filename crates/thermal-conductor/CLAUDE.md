@@ -45,6 +45,26 @@ listen_on unix:/tmp/kitty-thc
 ```
 Full thermal-themed kitty.conf lives in `thermal-os-dotfiles/config/kitty/kitty.conf`.
 
+## TUI Sessions Tab (3-Panel Layout)
+Designed as a command center for a vertical monitor:
+- **Top**: Agent session list with model-based display names (opus, sonnet, gpt5.4mini), status badges, context %, workspace number, age, command duration (OSC 633). Single-select focuses kitty window. Multi-select (Space/Ctrl+A) for broadcast.
+- **Middle**: Live terminal preview via `kitty @ get-text --extent=screen`, refreshed 500ms. PgUp/PgDn/Home/End to scroll.
+- **Bottom**: Chat input with @-mention routing and response display via message bus. Tab-triggered autocomplete. Command history (up/down). Press 's' to save session as spawn profile.
+
+**Panel focus**: Tri-state (`FocusedPanel` enum: AgentList/Preview/Chat). Tab/Shift+Tab cycles, click-to-focus, Esc returns to AgentList.
+
+## GPU Terminal Window
+`thermal-conductor window` — wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from `thc daemon` via `spawn_daemon_reader_task()`). Agent overlay HUD is decorative.
+
+## Roadmap: GPU AI Terminal
+- Phase 1 (done): GPU terminal rendering single PTY
+- Phase 2: Multi-pane layout with agent-aware overlays
+- Phase 3 (done): Session daemon streaming to GPU terminal
+- Phase 4: AI-native features (semantic scrollback, context heatmaps)
+
+## Known Issues
+- **Stale socket hazard**: if `conductor.sock` lingers after daemon crash, `thc window` enters client mode against dead socket — clean up with `rm /run/user/$UID/thermal/conductor.sock`
+
 ## Dependencies
 - `thermal-core` for `ClaudeStatePoller` (Sessions tab) and shared palette
 - kitty with `allow_remote_control socket-only` (or `thc daemon` as fallback)

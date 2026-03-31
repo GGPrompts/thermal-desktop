@@ -12,6 +12,11 @@ Shared platform-agnostic terminal primitives for desktop (thermal-conductor) and
 ## Feature Flags
 - `bell_detection` — Adds `Arc<AtomicBool>` bell flag to the event listener. Used by thermobile to poll bell events from JNI.
 
+## Key Infrastructure
+- **AgentStateInference** (`src/state_inference.rs`): Keeps a local `StateFile` struct aligned with `SessionStateV1` to avoid pulling `thermal-core` GPU deps. State files include command telemetry: `last_command`, `last_exit_code`, `last_command_started_at`, `last_command_duration_ms`, `consecutive_failures`.
+- **Per-session event log** (`src/event_log.rs`): JSONL event log at `/run/user/$UID/thermal/sessions/<id>.events.jsonl`. Captures lifecycle events (Spawn, StatusChange, CommandStart, CommandFinish, Resize, PtyEof, Bell). Truncate-on-overflow rotation (5000 entries).
+- **ExitReason** (`src/pty.rs`): Structured session exit enum (PtyEof/Signal/SpawnFailed/FrontendClose/DaemonShutdown). `has_exited()` still works as fast lock-free check.
+
 ## Design Constraints
 - No GPU, no Wayland, no desktop dependencies — this crate must compile for Android NDK targets.
 - `alacritty_terminal` is a downstream concern (thermal-conductor), not a dependency here.

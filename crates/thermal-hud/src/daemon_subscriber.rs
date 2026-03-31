@@ -177,17 +177,61 @@ pub enum Request {
     Ping,
 }
 
-/// Minimal subset of the daemon Response enum.
+/// Daemon Response enum — must match thermal-conductor's Response variant order exactly.
+/// MessagePack encodes enums by variant index, so ordering is critical.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
+    // 0: SessionSpawned
+    SessionSpawned {
+        id: String,
+        name: String,
+    },
+    // 1: SessionList
+    SessionList {
+        sessions: Vec<serde_json::Value>,
+    },
+    // 2: SessionState
+    SessionState {
+        id: String,
+        cols: u16,
+        rows: u16,
+        cells: Vec<serde_json::Value>,
+        cursor: serde_json::Value,
+        title: String,
+        #[serde(default)]
+        mode: u32,
+    },
+    // 3: ScreenUpdate
+    ScreenUpdate {
+        id: String,
+        seq: u64,
+        dirty_cells: Vec<serde_json::Value>,
+        cursor: serde_json::Value,
+        #[serde(default)]
+        mode: u32,
+    },
+    // 4: TitleChanged
+    TitleChanged {
+        id: String,
+        title: String,
+    },
+    // 5: SessionExited
+    SessionExited {
+        id: String,
+        exit_code: Option<i32>,
+        #[serde(default)]
+        reason: String,
+    },
+    // 6: SnapshotSync
     SnapshotSync(SnapshotSync),
+    // 7: EventStream
     EventStream(EventBatch),
-    Pong,
+    // 8: Ok
     Ok,
+    // 9: Error
     Error { message: String },
-    // Catch-all for responses we don't care about in the HUD.
-    #[serde(other)]
-    Other,
+    // 10: Pong
+    Pong,
 }
 
 // ── Wire framing (MessagePack, length-prefixed) ─────────────────────────────
@@ -464,7 +508,13 @@ async fn run_subscription(
                 }
                 let _ = tx.send(aggregator.to_session_states());
             }
-            Response::Pong | Response::Ok | Response::Other => {}
+            Response::Pong | Response::Ok => {}
+            Response::SessionSpawned { .. }
+            | Response::SessionList { .. }
+            | Response::SessionState { .. }
+            | Response::ScreenUpdate { .. }
+            | Response::TitleChanged { .. }
+            | Response::SessionExited { .. } => {}
             Response::Error { message } => {
                 warn!("Daemon error: {message}");
             }

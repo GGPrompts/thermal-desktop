@@ -212,51 +212,61 @@ pub enum Request {
     Ping,
 }
 
-/// Response variants we care about.
+/// Response variants — must match thermal-conductor's Response enum order exactly.
+/// MessagePack encodes enums by variant index, so ordering is critical.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    // We only need to decode these variants; unknown variants will fail
-    // deserialization, which we handle gracefully.
-    SnapshotSync(SnapshotSync),
-    EventStream(EventBatch),
-    Ok,
-    Error { message: String },
-    Pong,
-    // Catch-all for responses we don't care about (SessionSpawned, etc.).
-    // serde will match the first variant it can; since we use externally-tagged
-    // enum encoding (MessagePack), unknown variants cause a decode error which
-    // we skip.
-
-    // ── Variants we don't use but must list for MessagePack enum indexing ────
-    // MessagePack encodes enums by variant index, so we must keep all variants
-    // in the same order as the conductor's Response enum to decode correctly.
+    // 0: SessionSpawned
     SessionSpawned {
         id: String,
         name: String,
     },
+    // 1: SessionList
     SessionList {
         sessions: Vec<serde_json::Value>,
     },
+    // 2: SessionState
     SessionState {
         id: String,
-        #[serde(flatten)]
-        _rest: serde_json::Value,
+        cols: u16,
+        rows: u16,
+        cells: Vec<serde_json::Value>,
+        cursor: serde_json::Value,
+        title: String,
+        #[serde(default)]
+        mode: u32,
     },
+    // 3: ScreenUpdate
     ScreenUpdate {
         id: String,
-        #[serde(flatten)]
-        _rest: serde_json::Value,
+        seq: u64,
+        dirty_cells: Vec<serde_json::Value>,
+        cursor: serde_json::Value,
+        #[serde(default)]
+        mode: u32,
     },
+    // 4: TitleChanged
     TitleChanged {
         id: String,
         title: String,
     },
+    // 5: SessionExited
     SessionExited {
         id: String,
         exit_code: Option<i32>,
         #[serde(default)]
         reason: String,
     },
+    // 6: SnapshotSync
+    SnapshotSync(SnapshotSync),
+    // 7: EventStream
+    EventStream(EventBatch),
+    // 8: Ok
+    Ok,
+    // 9: Error
+    Error { message: String },
+    // 10: Pong
+    Pong,
 }
 
 // ── Frame encoding/decoding ─────────────────────────────────────────────────
@@ -364,9 +374,8 @@ impl DaemonEventStream {
         let resp: Response = match rmp_serde::from_slice(&payload) {
             Ok(r) => r,
             Err(e) => {
-                // Unknown variant or decode error — skip silently.
-                debug!("skipping undecoded daemon response: {e}");
-                return Ok(Some(DaemonMessage::Events(EventBatch { events: vec![] })));
+                warn!("failed to decode daemon response: {e}");
+                return Err(anyhow::anyhow!("failed to decode daemon response: {e}"));
             }
         };
 

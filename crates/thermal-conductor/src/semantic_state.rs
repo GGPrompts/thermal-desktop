@@ -188,13 +188,13 @@ impl SemanticEventBus {
         cwd: Option<String>,
         pid: Option<u32>,
     ) {
-        let state = SemanticSessionState::new(
+        let mut state = SemanticSessionState::new(
             session_id.to_string(),
             display_name.clone(),
             cwd.clone(),
             pid,
         );
-        let seq = state.seq();
+        let seq = state.next_seq();
         self.states.lock().insert(session_id.to_string(), state);
         self.emit(SemanticEvent {
             session_id: session_id.to_string(),
@@ -417,7 +417,10 @@ impl SemanticEventBus {
                 if let Some(level) = crossed_threshold {
                     let seq2 = {
                         let mut states = self.states.lock();
-                        states.get_mut(session_id).map(|s| s.next_seq()).unwrap_or(0)
+                        let Some(seq2) = states.get_mut(session_id).map(|s| s.next_seq()) else {
+                            return;
+                        };
+                        seq2
                     };
                     self.emit(SemanticEvent {
                         session_id: session_id.to_string(),
@@ -431,26 +434,16 @@ impl SemanticEventBus {
             }
 
             StateChangeNotification::CommandStarted { ref command } => {
-                // OSC 633 command start — map to ToolStarted if we have a command name.
-                // The inference engine also emits ToolStarted separately when it
-                // detects tool patterns, so this is a supplementary signal.
+                // OSC 633 command start — update state silently.
+                // The inference engine emits ToolStarted separately with the
+                // actual agent tool name, so we don't emit a duplicate event here.
                 if let Some(cmd) = command {
-                    let seq = {
-                        let mut states = self.states.lock();
-                        if let Some(state) = states.get_mut(session_id) {
-                            state.touch();
-                            state.next_seq()
-                        } else {
-                            return;
-                        }
-                    };
-                    self.emit(SemanticEvent {
-                        session_id: session_id.to_string(),
-                        seq,
-                        kind: SemanticEventKind::ToolStarted {
-                            tool_name: cmd.clone(),
-                        },
-                    });
+                    let mut states = self.states.lock();
+                    if let Some(state) = states.get_mut(session_id) {
+                        state.current_tool = Some(cmd.clone());
+                        state.activity = AgentActivity::ToolRunning;
+                        state.touch();
+                    }
                 }
             }
 
@@ -461,6 +454,7 @@ impl SemanticEventBus {
             } => {
                 let cmd_name = command.unwrap_or_default();
                 if !cmd_name.is_empty() {
+                    let failed = matches!(exit_code, Some(ec) if ec != 0);
                     let seq = {
                         let mut states = self.states.lock();
                         if let Some(state) = states.get_mut(session_id) {
@@ -470,32 +464,22 @@ impl SemanticEventBus {
                             return;
                         }
                     };
-                    self.emit(SemanticEvent {
-                        session_id: session_id.to_string(),
-                        seq,
-                        kind: SemanticEventKind::ToolCompleted {
-                            tool_name: cmd_name.clone(),
-                            duration_ms: Some(duration_ms),
-                        },
-                    });
-                }
-                // If the command failed, also emit ToolFailed.
-                if let Some(ec) = exit_code {
-                    if ec != 0 {
-                        let seq = {
-                            let mut states = self.states.lock();
-                            if let Some(state) = states.get_mut(session_id) {
-                                state.next_seq()
-                            } else {
-                                return;
-                            }
-                        };
+                    if failed {
                         self.emit(SemanticEvent {
                             session_id: session_id.to_string(),
                             seq,
                             kind: SemanticEventKind::ToolFailed {
                                 tool_name: cmd_name.clone(),
-                                error: Some(format!("exit code {ec}")),
+                                error: Some(format!("exit code {}", exit_code.unwrap())),
+                            },
+                        });
+                    } else {
+                        self.emit(SemanticEvent {
+                            session_id: session_id.to_string(),
+                            seq,
+                            kind: SemanticEventKind::ToolCompleted {
+                                tool_name: cmd_name.clone(),
+                                duration_ms: Some(duration_ms),
                             },
                         });
                     }
@@ -524,7 +508,7 @@ impl SemanticEventBus {
                     None,
                 );
                 let seq = state.next_seq();
-                self.states.lock().insert(session_id.to_string(), state);
+                states.insert(session_id.to_string(), state);
                 seq
             }
         };
@@ -556,13 +540,32 @@ fn now_rfc3339() -> String {
     let dur = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    // Simple ISO 8601 — chrono is not a dependency.
-    let secs = dur.as_secs();
-    let nanos = dur.subsec_nanos();
+    let total_secs = dur.as_secs();
+    let millis = dur.subsec_nanos() / 1_000_000;
+
+    // Convert Unix timestamp to calendar date/time (UTC).
+    // Algorithm from https://howardhinnant.github.io/date_algorithms.html
+    let days = (total_secs / 86400) as i64;
+    let time_of_day = (total_secs % 86400) as u32;
+    let hour = time_of_day / 3600;
+    let minute = (time_of_day % 3600) / 60;
+    let second = time_of_day % 60;
+
+    // Civil from days (epoch = 1970-01-01 = day 0).
+    let z = days + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
     format!(
-        "{}.{:03}Z",
-        secs,
-        nanos / 1_000_000
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, minute, second, millis
     )
 }
 

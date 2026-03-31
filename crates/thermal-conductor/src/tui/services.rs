@@ -23,6 +23,7 @@ use ratatui::{
 use thermal_core::{ClaudeStatePoller, palette::ThermalPalette};
 
 use super::TuiPage;
+use super::settings::{self, ServiceSettings};
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -413,11 +414,14 @@ pub struct ServicesPage {
     last_refresh: Instant,
     /// Cached thermal-audio mute/volume state.
     audio_state: AudioControlState,
+    /// Parsed settings.toml data for inline config summaries.
+    settings: ServiceSettings,
 }
 
 impl ServicesPage {
     pub fn new() -> Self {
         let statuses = SERVICES.iter().map(get_service_status).collect();
+        let settings = settings::load_settings();
         Self {
             statuses,
             selected: 0,
@@ -425,6 +429,7 @@ impl ServicesPage {
             pending_restart: None,
             last_refresh: Instant::now(),
             audio_state: AudioControlState::default(),
+            settings,
         }
     }
 
@@ -573,6 +578,24 @@ impl ServicesPage {
         }
     }
 
+    /// Open settings.toml in $EDITOR and reload on return.
+    fn open_settings_editor(&mut self) {
+        match settings::open_in_editor() {
+            Ok(true) => {
+                self.settings = settings::load_settings();
+                self.status_msg = Some(("Settings reloaded".into(), false, Instant::now()));
+            }
+            Ok(false) => {
+                self.settings = settings::load_settings();
+                self.status_msg =
+                    Some(("Editor exited with error".into(), true, Instant::now()));
+            }
+            Err(e) => {
+                self.status_msg = Some((e, true, Instant::now()));
+            }
+        }
+    }
+
     /// Force-kill ALL instances of the selected service (SIGKILL).
     fn force_kill_selected(&mut self) {
         let def = &SERVICES[self.selected];
@@ -705,7 +728,7 @@ impl TuiPage for ServicesPage {
         f.render_widget(title, chunks[0]);
 
         // Service table
-        let header = Row::new(vec!["", "Service", "Description", "Status", "PID"])
+        let header = Row::new(vec!["", "Service", "Description", "Status", "PID", "Config"])
             .style(
                 Style::default()
                     .fg(ACCENT_COLD)
@@ -745,6 +768,11 @@ impl TuiPage for ServicesPage {
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "-".to_string());
 
+                let config_text = self
+                    .settings
+                    .summary_for(def.binary)
+                    .unwrap_or_else(|| "-".to_string());
+
                 let row_style = if selected {
                     Style::default().bg(BG_SURFACE).fg(TEXT_BRIGHT)
                 } else {
@@ -765,6 +793,7 @@ impl TuiPage for ServicesPage {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(pid_text, Style::default().fg(TEXT_MUTED)),
+                    Span::styled(config_text, Style::default().fg(TEXT_MUTED)),
                 ])
                 .style(row_style)
             })
@@ -778,6 +807,7 @@ impl TuiPage for ServicesPage {
                 Constraint::Length(22), // description
                 Constraint::Length(9),  // status
                 Constraint::Length(8),  // PID
+                Constraint::Min(20),   // config summary
             ],
         )
         .header(header)
@@ -804,6 +834,13 @@ impl TuiPage for ServicesPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(": restart  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
+                "e",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": edit config  ", Style::default().fg(TEXT_MUTED)),
             Span::styled(
                 "K",
                 Style::default().fg(SEARING).add_modifier(Modifier::BOLD),
@@ -866,6 +903,9 @@ impl TuiPage for ServicesPage {
             }
             KeyCode::Char('r') => {
                 self.restart_selected();
+            }
+            KeyCode::Char('e') => {
+                self.open_settings_editor();
             }
             KeyCode::Char('K') => {
                 self.force_kill_selected();

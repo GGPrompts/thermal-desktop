@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use ratatui::{
     Frame,
@@ -195,6 +196,10 @@ pub struct ProfilesPage {
     launch_cwd: String,
     backend_pref: BackendPreference,
 
+    /// Spawn result channel: the background thread writes `(message, is_error)` here.
+    /// Drained in `tick()` to update `status_msg`.
+    spawn_result: Arc<Mutex<Option<(String, bool)>>>,
+
     // Shared state
     status_msg: Option<(String, bool)>,
 }
@@ -250,6 +255,7 @@ impl ProfilesPage {
             spawning: Arc::new(AtomicBool::new(false)),
             launch_cwd,
             backend_pref,
+            spawn_result: Arc::new(Mutex::new(None)),
             status_msg: None,
         }
     }
@@ -421,17 +427,22 @@ impl ProfilesPage {
         self.spawning.store(true, Ordering::SeqCst);
 
         let spawning_flag = Arc::clone(&self.spawning);
+        let result_slot = Arc::clone(&self.spawn_result);
         let profile_clone = profile_name.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
-            if let Ok(rt) = rt {
-                rt.block_on(async {
-                    let backend = match crate::backend::detect_backend(backend_pref).await {
-                        Ok(b) => b,
-                        Err(_) => return,
-                    };
+            let outcome: Result<String, String> = match rt {
+                Err(e) => Err(format!("Failed to create async runtime: {e}")),
+                Ok(rt) => rt.block_on(async {
+                    let backend = crate::backend::detect_backend(backend_pref)
+                        .await
+                        .map_err(|e| format!("Backend detection failed: {e}"))?;
+
+                    let backend_name = backend.name().to_string();
+                    let mut spawned = 0u32;
+                    let mut last_err: Option<String> = None;
 
                     match backend {
                         crate::backend::Backend::Kitty(controller) => {
@@ -445,13 +456,16 @@ impl ProfilesPage {
                                 let (spawn_cwd, wt_path) = if worktree {
                                     match crate::cmd_create_worktree(&effective_cwd, &id) {
                                         Ok(wt) => (wt.clone(), Some(wt)),
-                                        Err(_) => (effective_cwd.clone(), None),
+                                        Err(e) => {
+                                            tracing::warn!("Worktree creation failed: {e}");
+                                            (effective_cwd.clone(), None)
+                                        }
                                     }
                                 } else {
                                     (effective_cwd.clone(), None)
                                 };
 
-                                let _ = controller
+                                match controller
                                     .spawn(
                                         &id,
                                         &command,
@@ -459,22 +473,58 @@ impl ProfilesPage {
                                         profile_clone.as_deref(),
                                         wt_path.as_deref(),
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(()) => spawned += 1,
+                                    Err(e) => {
+                                        tracing::error!("Kitty spawn failed: {e}");
+                                        last_err = Some(format!("{e}"));
+                                    }
+                                }
                             }
                         }
                         crate::backend::Backend::Daemon(mut client) => {
                             for _ in 0..count {
-                                let _ = client
+                                match client
                                     .spawn_session(
                                         Some(command.clone()),
                                         Some(effective_cwd.clone()),
                                         worktree,
                                     )
-                                    .await;
+                                    .await
+                                {
+                                    Ok(_id) => spawned += 1,
+                                    Err(e) => {
+                                        tracing::error!("Daemon spawn failed: {e}");
+                                        last_err = Some(format!("{e}"));
+                                    }
+                                }
                             }
                         }
                     }
-                });
+
+                    if spawned == count {
+                        Ok(format!("Spawned {spawned} session(s) via {backend_name}"))
+                    } else if spawned > 0 {
+                        Err(format!(
+                            "Spawned {spawned}/{count} via {backend_name}: {}",
+                            last_err.unwrap_or_default()
+                        ))
+                    } else {
+                        Err(format!(
+                            "Spawn failed via {backend_name}: {}",
+                            last_err.unwrap_or_else(|| "unknown error".into())
+                        ))
+                    }
+                }),
+            };
+
+            let msg = match outcome {
+                Ok(s) => (s, false),
+                Err(s) => (s, true),
+            };
+            if let Ok(mut slot) = result_slot.lock() {
+                *slot = Some(msg);
             }
             spawning_flag.store(false, Ordering::SeqCst);
         });
@@ -745,7 +795,14 @@ impl TuiPage for ProfilesPage {
         "Profiles"
     }
 
-    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {}
+    fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
+        // Drain spawn result from background thread.
+        if let Ok(mut slot) = self.spawn_result.lock() {
+            if let Some(msg) = slot.take() {
+                self.status_msg = Some(msg);
+            }
+        }
+    }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
         f.render_widget(Block::default().style(Style::default().bg(BG)), area);

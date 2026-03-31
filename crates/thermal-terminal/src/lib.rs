@@ -7,9 +7,11 @@
 //! - **`osc633`** — OSC 633 shell-integration parser and command tracker.
 //! - **`input`**  — Platform-agnostic key encoding (KeyCode + Modifiers -> PTY bytes).
 //! - **`pty`**    — PtySession: fork/exec + blocking reader thread.
+//! - **`state_inference`** — Agent state inference from PTY output patterns + OSC 633 states.
 //! - **`terminal`** — TerminalSize (Dimensions impl for alacritty_terminal).
 
 pub mod input;
 pub mod osc633;
 pub mod pty;
+pub mod state_inference;
 pub mod terminal;

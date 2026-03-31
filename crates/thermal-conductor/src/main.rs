@@ -31,6 +31,7 @@ use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use clap::{Parser, Subcommand};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
+use tracing::{info, warn};
 
 use backend::{Backend, BackendPreference, detect_backend};
 
@@ -195,6 +196,8 @@ fn main() -> Result<()> {
 
     let backend_pref = cli.backend;
 
+    info!("thermal-conductor starting");
+
     // TUI runs its own synchronous event loop — no tokio needed.
     if matches!(command, Commands::Tui) {
         return tui::run(backend_pref);
@@ -282,8 +285,9 @@ async fn cmd_spawn(
                     match cmd_create_worktree(&cwd, &id) {
                         Ok(wt) => (wt.clone(), Some(wt)),
                         Err(e) => {
-                            eprintln!(
-                                "  Warning: worktree creation failed ({e}), using original cwd"
+                            warn!(
+                                error = %e,
+                                "worktree creation failed, using original cwd"
                             );
                             (cwd.clone(), None)
                         }

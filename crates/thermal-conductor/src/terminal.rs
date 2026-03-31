@@ -33,6 +33,7 @@ use tracing::{debug, info};
 
 use crate::kitty_graphics::{ImageStore, KittyGraphicsParser};
 use crate::osc633::{CommandTracker, Osc633Parser};
+use thermal_terminal::state_inference::{AgentStateInference, InferenceConfig};
 
 // Re-use shared terminal size and default constants from thermal-terminal.
 use thermal_terminal::terminal::TerminalSize;
@@ -119,6 +120,14 @@ pub struct Terminal {
     /// Wrapped in `Arc<Mutex>` so the byte-processor task can store images
     /// and the renderer can read them for GPU texture upload.
     image_store: Arc<Mutex<ImageStore>>,
+
+    /// Agent state inference engine — infers agent status from PTY output
+    /// patterns and OSC 633 command state, writes state files.
+    ///
+    /// `None` when no inference config has been attached (default).
+    /// Set via [`Terminal::attach_state_inference`] before spawning the
+    /// byte processor.
+    state_inference: Option<Arc<Mutex<AgentStateInference>>>,
 }
 
 #[allow(dead_code)]
@@ -146,6 +155,7 @@ impl Terminal {
             event_rx,
             command_tracker: Arc::new(Mutex::new(CommandTracker::new())),
             image_store: Arc::new(Mutex::new(ImageStore::new())),
+            state_inference: None,
         }
     }
 
@@ -216,6 +226,7 @@ impl Terminal {
         let term = Arc::clone(&self.term);
         let tracker = Arc::clone(&self.command_tracker);
         let image_store = Arc::clone(&self.image_store);
+        let inference = self.state_inference.as_ref().map(Arc::clone);
 
         tokio::spawn(async move {
             let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
@@ -277,6 +288,12 @@ impl Terminal {
                             for mark in &marks {
                                 t.apply(mark);
                             }
+                            // Feed latest command state to the inference engine.
+                            if let Some(ref inf) = inference {
+                                if let Some(block) = t.current_block() {
+                                    inf.lock().update_command_state(block.state.clone());
+                                }
+                            }
                             drop(t);
                             term_guard = term.lock();
                             // Refresh cursor after re-acquiring the FairMutex —
@@ -290,6 +307,12 @@ impl Terminal {
                                 t.set_current_line(refreshed_line);
                             }
                         }
+
+                        // Feed output bytes to the state inference engine.
+                        if let Some(ref inf) = inference {
+                            inf.lock().feed_bytes(filtered);
+                        }
+
                         processor.advance(&mut *term_guard, filtered);
                     }
                 }
@@ -301,6 +324,11 @@ impl Terminal {
                     unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_raw) },
                     &[1u8],
                 );
+            }
+
+            // Clean up state inference file on session exit.
+            if let Some(ref inf) = inference {
+                inf.lock().cleanup();
             }
 
             info!("Terminal byte processor exiting (PTY channel closed)");
@@ -320,6 +348,21 @@ impl Terminal {
     /// hold the lock while rendering.
     pub fn command_tracker(&self) -> Arc<Mutex<CommandTracker>> {
         Arc::clone(&self.command_tracker)
+    }
+
+    /// Attach an agent state inference engine.
+    ///
+    /// Must be called before [`spawn_byte_processor`] to enable state
+    /// inference in the byte processing pipeline. If not called, no state
+    /// inference is performed.
+    pub fn attach_state_inference(&mut self, config: InferenceConfig) {
+        let engine = AgentStateInference::new(config);
+        self.state_inference = Some(Arc::new(Mutex::new(engine)));
+    }
+
+    /// Return a clone of the shared `AgentStateInference` handle, if attached.
+    pub fn state_inference(&self) -> Option<Arc<Mutex<AgentStateInference>>> {
+        self.state_inference.as_ref().map(Arc::clone)
     }
 
     /// Return a clone of the shared `ImageStore` handle.

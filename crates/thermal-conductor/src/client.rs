@@ -63,9 +63,12 @@ impl DaemonClient {
             return Ok(None);
         }
 
-        let stream = match UnixStream::connect(&socket_path).await {
-            Ok(s) => s,
-            Err(e) => {
+        // Timeout the socket connect to avoid blocking indefinitely if the
+        // daemon is hung (socket file exists but nobody is accepting).
+        let connect_fut = UnixStream::connect(&socket_path);
+        let stream = match tokio::time::timeout(Duration::from_secs(3), connect_fut).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 // Connection refused means daemon crashed but socket remains.
                 if e.kind() == std::io::ErrorKind::ConnectionRefused {
                     warn!(
@@ -78,6 +81,13 @@ impl DaemonClient {
                     return Ok(None);
                 }
                 return Err(e).context("Failed to connect to daemon socket");
+            }
+            Err(_elapsed) => {
+                warn!(
+                    "Timed out connecting to daemon socket at {}",
+                    socket_path.display()
+                );
+                return Ok(None);
             }
         };
 

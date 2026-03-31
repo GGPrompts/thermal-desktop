@@ -1,13 +1,44 @@
-//! Ollama API client for local LLM inference via qwen3:8b.
+//! LLM backend for voice command dispatch.
+//!
+//! Supports three backends in priority order:
+//! 1. **Claude CLI** (`claude -p`) — structured output via `--json-schema`
+//! 2. **Copilot CLI** (`gh copilot -p`) — structured output via `--output-format json`
+//! 3. **Ollama** (local HTTP API) — offline fallback via qwen3:8b
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
-const DEFAULT_MODEL: &str = "qwen3:8b";
+const DEFAULT_OLLAMA_MODEL: &str = "qwen3:8b";
+const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
+const DEFAULT_COPILOT_MODEL: &str = "gpt-4.1";
+
+/// LLM backend selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmBackend {
+    /// Claude CLI (`claude -p`) with structured JSON output.
+    ClaudeCli,
+    /// GitHub Copilot CLI (`gh copilot -p`) with JSON output.
+    CopilotCli,
+    /// Local Ollama HTTP API (offline fallback).
+    Ollama,
+}
+
+impl std::fmt::Display for LlmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmBackend::ClaudeCli => write!(f, "claude-cli"),
+            LlmBackend::CopilotCli => write!(f, "copilot-cli"),
+            LlmBackend::Ollama => write!(f, "ollama"),
+        }
+    }
+}
 
 /// System prompt that gives the model its role as a voice assistant dispatcher.
+///
+/// Used by all backends. The `/no_think` suffix is only relevant for Qwen3
+/// but harmless for other models.
 const SYSTEM_PROMPT: &str = r#"You hear voice transcripts from a Linux desktop user. You have 3 tools:
 
 - speak(text) — reply to the user via TTS
@@ -31,9 +62,123 @@ User: "good morning" → speak("Good morning!")
 
 Plain English only, no markdown. Keep speak text under 2 sentences. /no_think"#;
 
-/// Resolve the model name: env var `THERMAL_DISPATCHER_MODEL` overrides the default.
-pub fn resolve_model() -> String {
-    std::env::var("THERMAL_DISPATCHER_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+/// JSON schema for structured tool-call output from CLI backends.
+/// Forces the model to return a `tool_calls` array with speak/read/route actions.
+const TOOL_CALL_JSON_SCHEMA: &str = r#"{"type":"object","properties":{"tool_calls":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string","enum":["speak","read","route"]},"input":{"type":"object"}},"required":["name","input"]}}},"required":["tool_calls"]}"#;
+
+/// Resolve the model name for a given backend.
+///
+/// `THERMAL_DISPATCHER_MODEL` env var overrides the default for any backend.
+pub fn resolve_model(backend: &LlmBackend) -> String {
+    if let Ok(model) = std::env::var("THERMAL_DISPATCHER_MODEL") {
+        return model;
+    }
+    match backend {
+        LlmBackend::ClaudeCli => DEFAULT_CLAUDE_MODEL.to_string(),
+        LlmBackend::CopilotCli => DEFAULT_COPILOT_MODEL.to_string(),
+        LlmBackend::Ollama => DEFAULT_OLLAMA_MODEL.to_string(),
+    }
+}
+
+/// Detect the best available backend by probing CLI tools, then Ollama.
+///
+/// Priority: Claude CLI > Copilot CLI > Ollama.
+/// Set `THERMAL_DISPATCHER_BACKEND` to force a specific backend:
+/// `claude`, `copilot`, or `ollama`.
+pub async fn detect_backend(http: &reqwest::Client) -> Result<LlmBackend> {
+    // Allow explicit override via env var
+    if let Ok(forced) = std::env::var("THERMAL_DISPATCHER_BACKEND") {
+        match forced.to_lowercase().as_str() {
+            "claude" | "claude-cli" => {
+                if check_claude_cli_available().await {
+                    info!("backend forced to claude-cli via THERMAL_DISPATCHER_BACKEND");
+                    return Ok(LlmBackend::ClaudeCli);
+                }
+                anyhow::bail!("THERMAL_DISPATCHER_BACKEND=claude but claude CLI not available");
+            }
+            "copilot" | "copilot-cli" => {
+                if check_copilot_cli_available().await {
+                    info!("backend forced to copilot-cli via THERMAL_DISPATCHER_BACKEND");
+                    return Ok(LlmBackend::CopilotCli);
+                }
+                anyhow::bail!("THERMAL_DISPATCHER_BACKEND=copilot but gh copilot not available");
+            }
+            "ollama" => {
+                info!("backend forced to ollama via THERMAL_DISPATCHER_BACKEND");
+                return Ok(LlmBackend::Ollama);
+            }
+            other => {
+                anyhow::bail!(
+                    "unknown THERMAL_DISPATCHER_BACKEND={other}; valid: claude, copilot, ollama"
+                );
+            }
+        }
+    }
+
+    // Auto-detect: try Claude CLI first
+    if check_claude_cli_available().await {
+        info!("detected claude CLI — using as primary backend");
+        return Ok(LlmBackend::ClaudeCli);
+    }
+
+    // Try Copilot CLI
+    if check_copilot_cli_available().await {
+        info!("detected copilot CLI — using as secondary backend");
+        return Ok(LlmBackend::CopilotCli);
+    }
+
+    // Fall back to Ollama
+    let model = resolve_model(&LlmBackend::Ollama);
+    if check_ollama_health(http, &model).await.is_ok() {
+        info!("falling back to Ollama (local offline backend)");
+        return Ok(LlmBackend::Ollama);
+    }
+
+    anyhow::bail!(
+        "no LLM backend available — install claude CLI, gh copilot, or start Ollama"
+    );
+}
+
+/// Check if `claude` CLI is installed and authenticated.
+async fn check_claude_cli_available() -> bool {
+    match tokio::process::Command::new("claude")
+        .args(["--version"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let available = output.status.success();
+            if available {
+                let version = String::from_utf8_lossy(&output.stdout);
+                debug!(version = %version.trim(), "claude CLI available");
+            }
+            available
+        }
+        Err(_) => false,
+    }
+}
+
+/// Check if `gh copilot` is installed and working.
+async fn check_copilot_cli_available() -> bool {
+    match tokio::process::Command::new("gh")
+        .args(["copilot", "--version"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let available = output.status.success();
+            if available {
+                let version = String::from_utf8_lossy(&output.stdout);
+                debug!(version = %version.trim(), "gh copilot available");
+            }
+            available
+        }
+        Err(_) => false,
+    }
 }
 
 /// Check that Ollama is reachable and the configured model is available.
@@ -177,6 +322,314 @@ fn build_ollama_messages(messages: &[Value]) -> Vec<Value> {
 
     ollama_messages
 }
+
+// ---------------------------------------------------------------------------
+// CLI backend: Claude CLI / Copilot CLI
+// ---------------------------------------------------------------------------
+
+/// Call a CLI-based LLM (Claude or Copilot) with the dispatcher's tool schema.
+///
+/// Uses `--json-schema` to force structured `tool_calls` output. The transcript
+/// is passed as the prompt; conversation history is included in the system prompt
+/// as context. Returns the same normalised format as `call_ollama()`.
+pub async fn call_cli_llm(
+    backend: &LlmBackend,
+    model: &str,
+    messages: &[Value],
+) -> Result<Value> {
+    // Build the full prompt: system prompt + conversation history + current message
+    let prompt = build_cli_prompt(messages);
+
+    let start = std::time::Instant::now();
+
+    let output = match backend {
+        LlmBackend::ClaudeCli => call_claude_cli(model, &prompt).await?,
+        LlmBackend::CopilotCli => call_copilot_cli(model, &prompt).await?,
+        LlmBackend::Ollama => unreachable!("call_cli_llm should not be called with Ollama backend"),
+    };
+
+    let duration_ms = start.elapsed().as_millis();
+
+    // Parse tool_calls from the structured output
+    let tool_calls = output
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Convert to normalised Anthropic-compatible content blocks
+    let mut content_blocks = Vec::new();
+    let has_tool_calls = !tool_calls.is_empty();
+
+    for (i, tc) in tool_calls.iter().enumerate() {
+        let name = tc
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let input = tc.get("input").cloned().unwrap_or(serde_json::json!({}));
+
+        content_blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": format!("cli_tool_{i}"),
+            "name": name,
+            "input": input,
+        }));
+    }
+
+    let stop_reason = if has_tool_calls { "tool_use" } else { "end_turn" };
+
+    info!(
+        backend = %backend,
+        model = %model,
+        stop_reason = %stop_reason,
+        tool_count = tool_calls.len(),
+        duration_ms = duration_ms,
+        "CLI LLM response"
+    );
+
+    Ok(serde_json::json!({
+        "stop_reason": stop_reason,
+        "content": content_blocks,
+    }))
+}
+
+/// Build the prompt string for CLI backends from conversation messages.
+///
+/// Includes the system prompt context and conversation history, then the
+/// current user message as the prompt.
+fn build_cli_prompt(messages: &[Value]) -> String {
+    let mut parts = Vec::new();
+
+    // Add conversation history (skip the last message which is the current prompt)
+    let history = if messages.len() > 1 {
+        &messages[..messages.len() - 1]
+    } else {
+        &[]
+    };
+
+    if !history.is_empty() {
+        parts.push("Previous conversation:".to_string());
+        for msg in history {
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+            let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            parts.push(format!("{role}: {content}"));
+        }
+        parts.push(String::new()); // blank line separator
+    }
+
+    // The current user message
+    if let Some(last) = messages.last() {
+        let content = last.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        parts.push(format!("User: {content}"));
+    }
+
+    parts.join("\n")
+}
+
+/// Invoke `claude -p` with structured JSON output.
+async fn call_claude_cli(model: &str, prompt: &str) -> Result<Value> {
+    debug!(model = %model, prompt_len = prompt.len(), "calling claude CLI");
+
+    let output = tokio::process::Command::new("claude")
+        .args([
+            "-p",
+            "--output-format", "json",
+            "--no-session-persistence",
+            "--model", model,
+            "--system-prompt", SYSTEM_PROMPT,
+            "--json-schema", TOOL_CALL_JSON_SCHEMA,
+            prompt,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .context("failed to spawn claude CLI — is it installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Try to extract error from JSON output
+        if let Ok(json) = serde_json::from_str::<Value>(&stdout) {
+            if json.get("is_error") == Some(&Value::Bool(true)) {
+                let result = json
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                anyhow::bail!("claude CLI error: {result}");
+            }
+        }
+        anyhow::bail!(
+            "claude CLI exited with {}: {}",
+            output.status,
+            truncate(stderr.trim(), 500)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse the JSON result — claude outputs a single JSON object
+    let parsed: Value =
+        serde_json::from_str(&stdout).context("parsing claude CLI JSON output")?;
+
+    // Extract structured_output which contains our tool_calls
+    if let Some(structured) = parsed.get("structured_output") {
+        debug!(structured = %structured, "claude CLI structured output");
+        return Ok(structured.clone());
+    }
+
+    // Fallback: try to parse the result text as JSON (shouldn't happen with --json-schema)
+    if let Some(result) = parsed.get("result").and_then(|v| v.as_str()) {
+        if let Ok(json) = serde_json::from_str::<Value>(result) {
+            return Ok(json);
+        }
+        // Model returned plain text instead of tool calls — wrap in a speak call
+        warn!(
+            result = %truncate(result, 200),
+            "claude CLI returned plain text instead of structured output"
+        );
+        return Ok(serde_json::json!({
+            "tool_calls": [{"name": "speak", "input": {"text": result}}]
+        }));
+    }
+
+    anyhow::bail!("unexpected claude CLI output format: {}", truncate(&stdout, 500));
+}
+
+/// Invoke `gh copilot -p` with JSON output.
+async fn call_copilot_cli(model: &str, prompt: &str) -> Result<Value> {
+    debug!(model = %model, prompt_len = prompt.len(), "calling copilot CLI");
+
+    // Build the full prompt with tool-call instructions baked in,
+    // since gh copilot doesn't support --json-schema directly.
+    let full_prompt = format!(
+        "{SYSTEM_PROMPT}\n\n\
+        IMPORTANT: Respond with ONLY a JSON object in this exact format:\n\
+        {{\"tool_calls\": [{{\"name\": \"speak|read|route\", \"input\": {{...}}}}]}}\n\n\
+        User transcript: {prompt}"
+    );
+
+    let output = tokio::process::Command::new("gh")
+        .args([
+            "copilot",
+            "-p",
+            &full_prompt,
+            "--model", model,
+            "--output-format", "json",
+            "--no-custom-instructions",
+            "--allow-all-tools",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .context("failed to spawn gh copilot — is it installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "gh copilot exited with {}: {}",
+            output.status,
+            truncate(stderr.trim(), 500)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Copilot outputs streaming JSONL — find the assistant.message with content
+    let mut assistant_text = String::new();
+    for line in stdout.lines() {
+        if let Ok(event) = serde_json::from_str::<Value>(line) {
+            // Look for assistant.message events with content
+            if event.get("type").and_then(|v| v.as_str()) == Some("assistant.message") {
+                if let Some(content) = event
+                    .get("data")
+                    .and_then(|d| d.get("content"))
+                    .and_then(|v| v.as_str())
+                {
+                    assistant_text = content.to_string();
+                }
+            }
+        }
+    }
+
+    if assistant_text.is_empty() {
+        anyhow::bail!("no assistant response in copilot output");
+    }
+
+    // Try to parse as JSON tool_calls
+    if let Ok(json) = serde_json::from_str::<Value>(&assistant_text) {
+        if json.get("tool_calls").is_some() {
+            return Ok(json);
+        }
+    }
+
+    // Try to extract JSON from markdown code blocks
+    let extracted = extract_json_from_text(&assistant_text);
+    if let Some(json) = extracted {
+        if json.get("tool_calls").is_some() {
+            return Ok(json);
+        }
+    }
+
+    // Fallback: wrap plain text in speak
+    warn!(
+        text = %truncate(&assistant_text, 200),
+        "copilot returned plain text, wrapping in speak"
+    );
+    Ok(serde_json::json!({
+        "tool_calls": [{"name": "speak", "input": {"text": assistant_text}}]
+    }))
+}
+
+/// Try to extract a JSON object from text that might be wrapped in markdown code fences.
+fn extract_json_from_text(text: &str) -> Option<Value> {
+    // Try direct parse first
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        return Some(v);
+    }
+
+    // Try extracting from ```json ... ``` blocks
+    if let Some(start) = text.find("```json") {
+        let after_fence = &text[start + 7..];
+        if let Some(end) = after_fence.find("```") {
+            let json_str = after_fence[..end].trim();
+            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+                return Some(v);
+            }
+        }
+    }
+
+    // Try extracting from ``` ... ``` blocks (no language tag)
+    if let Some(start) = text.find("```") {
+        let after_fence = &text[start + 3..];
+        // Skip optional language tag on the same line
+        let json_start = after_fence.find('\n').unwrap_or(0);
+        let rest = &after_fence[json_start..];
+        if let Some(end) = rest.find("```") {
+            let json_str = rest[..end].trim();
+            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+                return Some(v);
+            }
+        }
+    }
+
+    // Try finding { ... } in the text
+    if let Some(start) = text.find('{') {
+        if let Some(end) = text.rfind('}') {
+            let json_str = &text[start..=end];
+            if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+                return Some(v);
+            }
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Ollama backend (offline fallback)
+// ---------------------------------------------------------------------------
 
 /// Call the Ollama chat API with tool definitions.
 ///
@@ -546,8 +999,28 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn default_model_is_qwen3() {
-        assert_eq!(DEFAULT_MODEL, "qwen3:8b");
+    fn default_ollama_model_is_qwen3() {
+        assert_eq!(DEFAULT_OLLAMA_MODEL, "qwen3:8b");
+    }
+
+    #[test]
+    fn default_claude_model_is_sonnet() {
+        assert_eq!(DEFAULT_CLAUDE_MODEL, "sonnet");
+    }
+
+    #[test]
+    fn default_copilot_model_is_gpt41() {
+        assert_eq!(DEFAULT_COPILOT_MODEL, "gpt-4.1");
+    }
+
+    #[test]
+    fn resolve_model_returns_default_per_backend() {
+        // Clear the env var to test defaults
+        // SAFETY: single-threaded test, no other threads reading this var
+        unsafe { std::env::remove_var("THERMAL_DISPATCHER_MODEL") };
+        assert_eq!(resolve_model(&LlmBackend::ClaudeCli), "sonnet");
+        assert_eq!(resolve_model(&LlmBackend::CopilotCli), "gpt-4.1");
+        assert_eq!(resolve_model(&LlmBackend::Ollama), "qwen3:8b");
     }
 
     // -----------------------------------------------------------------------
@@ -575,7 +1048,7 @@ mod tests {
     fn system_prompt_ends_with_no_think() {
         assert!(
             SYSTEM_PROMPT.ends_with("/no_think"),
-            "system prompt should end with /no_think to disable Qwen3 thinking mode"
+            "system prompt should end with /no_think (harmless for non-Qwen models)"
         );
     }
 
@@ -586,5 +1059,92 @@ mod tests {
     #[test]
     fn ollama_base_url_is_localhost() {
         assert_eq!(OLLAMA_BASE_URL, "http://localhost:11434");
+    }
+
+    // -----------------------------------------------------------------------
+    // LlmBackend display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backend_display_names() {
+        assert_eq!(format!("{}", LlmBackend::ClaudeCli), "claude-cli");
+        assert_eq!(format!("{}", LlmBackend::CopilotCli), "copilot-cli");
+        assert_eq!(format!("{}", LlmBackend::Ollama), "ollama");
+    }
+
+    #[test]
+    fn backend_equality() {
+        assert_eq!(LlmBackend::ClaudeCli, LlmBackend::ClaudeCli);
+        assert_ne!(LlmBackend::ClaudeCli, LlmBackend::Ollama);
+    }
+
+    // -----------------------------------------------------------------------
+    // CLI prompt building
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_cli_prompt_single_message() {
+        let msgs = vec![json!({"role": "user", "content": "hello"})];
+        let prompt = build_cli_prompt(&msgs);
+        assert!(prompt.contains("User: hello"));
+        // No history section for single message
+        assert!(!prompt.contains("Previous conversation"));
+    }
+
+    #[test]
+    fn build_cli_prompt_with_history() {
+        let msgs = vec![
+            json!({"role": "user", "content": "open firefox"}),
+            json!({"role": "assistant", "content": "Routed to system."}),
+            json!({"role": "user", "content": "thanks"}),
+        ];
+        let prompt = build_cli_prompt(&msgs);
+        assert!(prompt.contains("Previous conversation"));
+        assert!(prompt.contains("user: open firefox"));
+        assert!(prompt.contains("assistant: Routed to system."));
+        assert!(prompt.contains("User: thanks"));
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON extraction from text
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_json_direct_parse() {
+        let text = r#"{"tool_calls":[{"name":"speak","input":{"text":"hi"}}]}"#;
+        let result = extract_json_from_text(text).unwrap();
+        assert!(result.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn extract_json_from_code_fence() {
+        let text = "Here is the result:\n```json\n{\"tool_calls\":[{\"name\":\"read\",\"input\":{}}]}\n```\n";
+        let result = extract_json_from_text(text).unwrap();
+        assert!(result.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn extract_json_from_braces() {
+        let text = "I'll route that: {\"tool_calls\":[{\"name\":\"route\",\"input\":{\"to\":\"@claude\",\"message\":\"hi\"}}]}";
+        let result = extract_json_from_text(text).unwrap();
+        assert!(result.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn extract_json_returns_none_for_plain_text() {
+        let result = extract_json_from_text("just plain text here");
+        assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // TOOL_CALL_JSON_SCHEMA is valid JSON
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tool_call_schema_is_valid_json() {
+        let parsed: Value = serde_json::from_str(TOOL_CALL_JSON_SCHEMA)
+            .expect("TOOL_CALL_JSON_SCHEMA should be valid JSON");
+        assert_eq!(parsed["type"], "object");
+        assert!(parsed["properties"]["tool_calls"].is_object());
     }
 }

@@ -21,6 +21,7 @@ use tracing::{error, info, warn};
 use crate::kitty::{
     SidecarEntry, next_unique_name, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
 };
+use thermal_terminal::state_inference::{AgentType, InferenceConfig};
 use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
     self, CellData, ColorData, CursorData, DirtyCellData, Request, Response, SessionInfo,
@@ -115,10 +116,24 @@ impl Daemon {
             (cwd_path.clone(), None)
         };
 
-        let terminal = Terminal::with_size(120, 36);
+        let mut terminal = Terminal::with_size(120, 36);
         let mut pty = PtySession::spawn_sized(&shell_path, Some(&effective_cwd), 120, 36)
             .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?;
         let pty_output_rx = pty.take_output();
+
+        // Attach agent state inference to the terminal byte processor.
+        // Infers agent type from the shell command; state files are written
+        // to /tmp/{claude-code,codex,copilot}-state/ for the ClaudeStatePoller.
+        {
+            let agent_type = AgentType::from_command(&shell_path);
+            let child_pid = pty.child_pid().as_raw() as u32;
+            terminal.attach_state_inference(InferenceConfig {
+                session_id: id.clone(),
+                child_pid,
+                agent_type,
+                working_dir: Some(effective_cwd.clone()),
+            });
+        }
 
         // Shared dirty flag for the byte processor.
         let pty_dirty = Arc::new(AtomicBool::new(false));

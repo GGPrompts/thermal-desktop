@@ -1,10 +1,13 @@
 //! thermal-dispatcher: AI voice command dispatcher daemon.
 //!
 //! Listens on a Unix socket for transcript JSON from thermal-voice,
-//! sends transcripts to a local LLM via Ollama (qwen3:8b) with tool-use,
-//! classifies tools by trust tier (AUTO/CONFIRM/BLOCK), executes or gates
-//! them accordingly, and sends natural language responses to thermal-audio
-//! for TTS playback.
+//! sends transcripts to an LLM (Claude CLI, Copilot CLI, or local Ollama)
+//! with tool-use, classifies tools by trust tier (AUTO/CONFIRM/BLOCK),
+//! executes or gates them accordingly, and sends natural language responses
+//! to thermal-audio for TTS playback.
+//!
+//! Backend priority: Claude CLI > Copilot CLI > Ollama (offline fallback).
+//! Override with `THERMAL_DISPATCHER_BACKEND=claude|copilot|ollama`.
 
 mod api;
 mod config;
@@ -79,15 +82,22 @@ async fn main() -> Result<()> {
 
     info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Resolve model name (env var or default)
-    let model = api::resolve_model();
-    info!(model = %model, "using Ollama model");
-
-    // Health check: verify Ollama is running and model is available
+    // Detect best available backend (Claude CLI > Copilot CLI > Ollama)
     let http = reqwest::Client::new();
-    api::check_ollama_health(&http, &model)
+    let backend = api::detect_backend(&http)
         .await
-        .context("Ollama health check failed")?;
+        .context("no LLM backend available")?;
+
+    // Resolve model name for the selected backend
+    let model = api::resolve_model(&backend);
+    info!(backend = %backend, model = %model, "LLM backend selected");
+
+    // If using Ollama, verify the model is available
+    if backend == api::LlmBackend::Ollama {
+        api::check_ollama_health(&http, &model)
+            .await
+            .context("Ollama health check failed")?;
+    }
 
     // Load trust tier config
     let config_path = find_config_file();
@@ -122,6 +132,7 @@ async fn main() -> Result<()> {
 
     // Shared state wrapped in Arc for concurrent access
     let shared = std::sync::Arc::new(SharedState {
+        backend,
         model,
         trust_config,
         tool_schemas,
@@ -148,6 +159,7 @@ async fn main() -> Result<()> {
 
 /// State shared across client handler tasks.
 struct SharedState {
+    backend: api::LlmBackend,
     model: String,
     #[allow(dead_code)] // Retained for future use; agents handle their own permissions now
     trust_config: TrustConfig,
@@ -234,7 +246,7 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
     })
     .await;
 
-    // Send to Ollama and execute the tool-use loop
+    // Send to LLM backend and execute the tool-use loop
     match dispatch_command(&msg.transcript, state).await {
         Ok(response_text) => {
             info!(response = %response_text, "dispatch complete");
@@ -282,23 +294,22 @@ async fn handle_client(stream: UnixStream, state: &SharedState) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Core dispatch logic — Ollama tool-use loop
+// Core dispatch logic — routes to CLI or Ollama backend
 // ---------------------------------------------------------------------------
 
 async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<String> {
-    let http = &state.http;
-
-    // Classify transcript complexity (logged for observability; single model)
+    // Classify transcript complexity (logged for observability)
     let complexity = escalation::classify_complexity(transcript);
     info!(
         complexity = ?complexity,
+        backend = %state.backend,
         model = %state.model,
         "classified transcript"
     );
 
     // Build messages with conversational history.
     // Lock the context briefly to build the initial messages, then release.
-    let mut messages = {
+    let messages = {
         let mut ctx = state.conversation.lock().await;
         if ctx.is_expired() {
             info!("conversation context expired, resetting");
@@ -308,7 +319,156 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         ctx.build_messages(transcript)
     };
 
-    // Loop: send to model, handle tool calls, feed results back
+    // Route to the appropriate backend
+    match &state.backend {
+        api::LlmBackend::ClaudeCli | api::LlmBackend::CopilotCli => {
+            dispatch_via_cli(transcript, state, messages).await
+        }
+        api::LlmBackend::Ollama => {
+            dispatch_via_ollama(transcript, state, messages).await
+        }
+    }
+}
+
+/// Dispatch via CLI backend (Claude CLI or Copilot CLI).
+///
+/// Uses structured JSON output to get tool calls, executes them, and if
+/// `read()` was called, makes a follow-up call with the screen content
+/// to get a summary for the user.
+async fn dispatch_via_cli(
+    transcript: &str,
+    state: &SharedState,
+    mut messages: Vec<serde_json::Value>,
+) -> Result<String> {
+    let mut iterations = 0usize;
+
+    loop {
+        iterations += 1;
+        if iterations > MAX_TOOL_ITERATIONS {
+            warn!(iterations, "CLI dispatch hit max iterations");
+            let mut ctx = state.conversation.lock().await;
+            let response = "I hit the maximum number of steps. Please try a simpler request.".to_string();
+            ctx.add_turn(transcript, &response);
+            return Ok(response);
+        }
+
+        let response = api::call_cli_llm(&state.backend, &state.model, &messages)
+            .await
+            .context("CLI LLM call failed")?;
+
+        let stop_reason = response
+            .get("stop_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("end_turn");
+
+        let content = response
+            .get("content")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if stop_reason != "tool_use" || content.is_empty() {
+            // No tool calls — nothing to do (shouldn't happen with JSON schema)
+            let text = extract_text_response(&content);
+            let response = if text.is_empty() {
+                "I didn't understand that command.".to_string()
+            } else {
+                text
+            };
+            let mut ctx = state.conversation.lock().await;
+            ctx.add_turn(transcript, &response);
+            return Ok(response);
+        }
+
+        // Execute all tool calls
+        let mut tool_results = Vec::new();
+        let mut has_read = false;
+        let mut last_speak_text = String::new();
+
+        for block in &content {
+            if block.get("type").and_then(|v| v.as_str()) != Some("tool_use") {
+                continue;
+            }
+
+            let tool_name = block
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let tool_input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+
+            info!(tool = %tool_name, "CLI backend: executing tool");
+
+            let result = executor::execute_tool(tool_name, &tool_input).await;
+            let result_text = match result {
+                Ok(text) => text,
+                Err(e) => format!("Tool execution error: {e:#}"),
+            };
+
+            if tool_name == "read" {
+                has_read = true;
+            }
+            if tool_name == "speak" {
+                last_speak_text = tool_input
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+            }
+
+            tool_results.push((tool_name.to_string(), result_text));
+        }
+
+        // If read() was called, we need to follow up with the screen content
+        // so the model can summarize it for the user.
+        if has_read {
+            let screen_content = tool_results
+                .iter()
+                .find(|(name, _)| name == "read")
+                .map(|(_, text)| text.as_str())
+                .unwrap_or("");
+
+            // Append assistant + tool result to conversation for follow-up
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": format!("[called read() — screen captured]"),
+            }));
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": format!("Terminal screen content:\n{screen_content}\n\nSummarize what you see for the user via speak()."),
+            }));
+
+            // Continue the loop — the next iteration will get a speak() call
+            continue;
+        }
+
+        // Determine the response text
+        let response_text = if !last_speak_text.is_empty() {
+            last_speak_text
+        } else {
+            tool_results
+                .iter()
+                .map(|(name, text)| format!("{name}: {text}"))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+
+        let mut ctx = state.conversation.lock().await;
+        ctx.add_turn(transcript, &response_text);
+        return Ok(response_text);
+    }
+}
+
+/// Dispatch via Ollama backend (local offline fallback).
+///
+/// Multi-turn tool-use loop: sends messages to Ollama, processes tool calls,
+/// feeds results back until the model returns `end_turn`.
+async fn dispatch_via_ollama(
+    transcript: &str,
+    state: &SharedState,
+    mut messages: Vec<serde_json::Value>,
+) -> Result<String> {
+    let http = &state.http;
+
     let mut iterations = 0usize;
     loop {
         iterations += 1;

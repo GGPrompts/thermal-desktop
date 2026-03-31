@@ -2756,9 +2756,9 @@ impl PointerHandler for ConductorWindow {
                         let th = self.terminal.term_handle();
                         let mut t = th.lock();
                         if vertical.discrete > 0 {
-                            t.scroll_display(Scroll::Delta(3));
-                        } else if vertical.discrete < 0 {
                             t.scroll_display(Scroll::Delta(-3));
+                        } else if vertical.discrete < 0 {
+                            t.scroll_display(Scroll::Delta(3));
                         }
                         self.dirty = true;
                     }

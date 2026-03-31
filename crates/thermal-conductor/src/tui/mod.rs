@@ -8,6 +8,7 @@ pub mod chat;
 pub mod profiles;
 pub mod services;
 pub mod sessions;
+pub mod settings;
 
 use std::io;
 use std::time::Duration;

@@ -961,6 +961,215 @@ mod tests {
         assert_eq!(session_with_model(Some(" gpt-5.4 "), None).model_display_name(), "gpt5.4");
     }
 
+    // --- session_is_dead edge cases ---
+
+    #[test]
+    fn dead_pid_within_grace_period_is_not_dead() {
+        // A session with a dead PID but a recent last_updated timestamp should
+        // survive the 120s grace period (hook PIDs are ephemeral).
+        use time::OffsetDateTime;
+        use time::format_description::well_known::Rfc3339;
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let state = ClaudeSessionState {
+            session_id: "grace-period".into(),
+            pid: Some(999_999_999), // dead PID
+            last_updated: Some(now),
+            ..ClaudeSessionState::default()
+        };
+        assert!(!session_is_dead(&state), "session within 120s grace should not be dead even with dead PID");
+    }
+
+    #[test]
+    fn no_pid_field_does_not_panic() {
+        // State file with no `pid` field at all should not panic, just fall through
+        // to age-based check.
+        let state = ClaudeSessionState {
+            session_id: "no-pid".into(),
+            pid: None,
+            last_updated: None,
+            ..ClaudeSessionState::default()
+        };
+        // No PID + no last_updated → session_is_dead returns false (no evidence of death).
+        assert!(!session_is_dead(&state));
+    }
+
+    #[test]
+    fn pid_one_init_liveness() {
+        // PID 1 (init/systemd) — test that session_is_dead handles it without
+        // panicking. In containers/sandboxes, kill(1, 0) may fail with EPERM so
+        // we just verify no panic occurs (liveness depends on environment).
+        let state = ClaudeSessionState {
+            session_id: "pid-one".into(),
+            pid: Some(1),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        // Should not panic regardless of whether PID 1 is visible.
+        let _ = session_is_dead(&state);
+    }
+
+    #[test]
+    fn pid_zero_skips_liveness_check() {
+        // PID 0 is the idle process — the code checks `pid > 0` before calling
+        // pid_is_alive, so PID 0 should fall through to the PID-alive branch
+        // (returning false = not dead) without attempting kill(0, 0).
+        let state = ClaudeSessionState {
+            session_id: "pid-zero".into(),
+            pid: Some(0),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        // pid=0 → pid > 0 is false → skip liveness → PID exists → return false.
+        assert!(!session_is_dead(&state));
+    }
+
+    #[test]
+    fn malformed_json_in_state_dir_skips_cleanly() {
+        // Simulate what happens when read_file encounters malformed JSON —
+        // it should return None (skip the file) without panicking.
+        let dir = tempfile::tempdir().unwrap();
+        let bad_file = dir.path().join("bad.json");
+        std::fs::write(&bad_file, "this is not json {{{").unwrap();
+
+        let result = ClaudeStatePoller::read_file(&bad_file);
+        assert!(result.is_none(), "malformed JSON should be skipped, not panic");
+    }
+
+    #[test]
+    fn empty_json_file_skips_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_file = dir.path().join("empty.json");
+        std::fs::write(&empty_file, "").unwrap();
+
+        let result = ClaudeStatePoller::read_file(&empty_file);
+        assert!(result.is_none(), "empty file should be skipped");
+    }
+
+    #[test]
+    fn truncated_json_file_skips_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let trunc_file = dir.path().join("truncated.json");
+        std::fs::write(&trunc_file, r#"{"session_id": "trunc"#).unwrap();
+
+        let result = ClaudeStatePoller::read_file(&trunc_file);
+        assert!(result.is_none(), "truncated JSON should be skipped");
+    }
+
+    #[test]
+    fn nonexistent_file_skips_cleanly() {
+        let path = Path::new("/tmp/thermal-test-nonexistent-file-12345.json");
+        let result = ClaudeStatePoller::read_file(path);
+        assert!(result.is_none(), "nonexistent file should be skipped");
+    }
+
+    #[test]
+    fn rapid_file_churn_does_not_thrash() {
+        // Simulate rapid write/delete churn — read_all_files should handle
+        // files disappearing between readdir and read without panicking.
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write 20 files, delete half, read_all_files should succeed.
+        for i in 0..20 {
+            let path = dir.path().join(format!("session-{i}.json"));
+            let json = format!(
+                r#"{{"session_id": "churn-{i}", "status": "idle", "pid": {pid}}}"#,
+                pid = std::process::id()
+            );
+            std::fs::write(&path, json).unwrap();
+        }
+        // Delete every other file to simulate churn.
+        for i in (0..20).step_by(2) {
+            let path = dir.path().join(format!("session-{i}.json"));
+            let _ = std::fs::remove_file(&path);
+        }
+
+        let files = ClaudeStatePoller::read_all_files(dir.path());
+        // Should have ~10 remaining files (the odd-numbered ones).
+        assert_eq!(files.len(), 10, "should read exactly the surviving files");
+        for (_, state) in &files {
+            assert!(state.session_id.starts_with("churn-"));
+        }
+    }
+
+    #[test]
+    fn read_all_files_ignores_non_json() {
+        use time::OffsetDateTime;
+        use time::format_description::well_known::Rfc3339;
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Use our own PID so the session is alive and doesn't get filtered.
+        let json = format!(
+            r#"{{"session_id": "valid", "pid": {}, "last_updated": "{}"}}"#,
+            std::process::id(),
+            now,
+        );
+        std::fs::write(dir.path().join("session.json"), json).unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a state file").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[section]").unwrap();
+
+        let files = ClaudeStatePoller::read_all_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files.values().next().unwrap().session_id, "valid");
+    }
+
+    #[test]
+    fn session_with_unparseable_timestamp_not_dead() {
+        // If last_updated is present but not valid RFC 3339, the grace period
+        // parse fails and falls through — should not panic.
+        let state = ClaudeSessionState {
+            session_id: "bad-ts".into(),
+            pid: None,
+            last_updated: Some("not-a-timestamp".into()),
+            ..ClaudeSessionState::default()
+        };
+        // Bad timestamp → Rfc3339 parse fails → returns false (not dead).
+        assert!(!session_is_dead(&state));
+    }
+
+    #[test]
+    fn dead_pid_past_grace_period_is_dead() {
+        // Dead PID + old timestamp (well past 120s grace) → dead.
+        let state = ClaudeSessionState {
+            session_id: "dead-past-grace".into(),
+            pid: Some(999_999_999),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        assert!(session_is_dead(&state), "dead PID past grace period should be dead");
+    }
+
+    #[test]
+    fn collapse_handles_mixed_dead_and_alive() {
+        // Collapse with multiple sessions: some dead PIDs, some alive.
+        use time::OffsetDateTime;
+        use time::format_description::well_known::Rfc3339;
+        let now = OffsetDateTime::now_utc().format(&Rfc3339).unwrap();
+
+        let alive = ClaudeSessionState {
+            session_id: "alive-session".into(),
+            pid: Some(std::process::id()),
+            last_updated: Some(now.clone()),
+            ..ClaudeSessionState::default()
+        };
+        let dead = ClaudeSessionState {
+            session_id: "dead-session".into(),
+            pid: Some(999_999_999),
+            last_updated: Some("2024-01-01T00:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        let fresh_no_pid = ClaudeSessionState {
+            session_id: "fresh-no-pid".into(),
+            pid: None,
+            last_updated: Some(now),
+            ..ClaudeSessionState::default()
+        };
+
+        // collapse_sessions_by_id doesn't filter dead sessions (that's read_file's job),
+        // but we verify it handles diverse states without panicking.
+        let collapsed = collapse_sessions_by_id(vec![alive, dead, fresh_no_pid]);
+        assert_eq!(collapsed.len(), 3);
+    }
+
     // --- type alias smoke tests ---
 
     #[test]

@@ -20,3 +20,6 @@ arc-swap = "1"
 portable-pty = "0.8"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 nix = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

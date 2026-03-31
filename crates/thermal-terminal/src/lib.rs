@@ -20,3 +20,4 @@ pub mod terminal;
 // Re-export key types for convenience.
 pub use event_log::{EventLog, SessionEvent};
 pub use pty::ExitReason;
+pub use state_inference::StateChangeNotification;

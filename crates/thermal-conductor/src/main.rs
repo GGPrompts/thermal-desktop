@@ -25,6 +25,7 @@ mod persist;
 pub(crate) mod profiles_config;
 mod protocol;
 mod pty;
+mod semantic_state;
 mod terminal;
 pub(crate) mod tui;
 mod window;

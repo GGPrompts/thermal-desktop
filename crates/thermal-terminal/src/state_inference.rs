@@ -20,6 +20,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -28,6 +29,37 @@ use tracing::{debug, trace, warn};
 
 use crate::event_log::{EventLog, SessionEvent};
 use crate::osc633::CommandState;
+
+// ── State change notifications ────────────────────────────────────────────
+
+/// A notification emitted when the inference engine detects a state change.
+/// Used by the daemon to bridge into semantic events without polling.
+#[derive(Debug, Clone)]
+pub enum StateChangeNotification {
+    /// Agent activity status changed.
+    StatusChanged {
+        old: InferredStatus,
+        new: InferredStatus,
+    },
+    /// A tool invocation started.
+    ToolStarted { tool_name: String },
+    /// A tool invocation completed (inferred from status change away from ToolUse).
+    ToolCompleted { tool_name: String },
+    /// Agent type was detected from output.
+    AgentDetected { agent_type: AgentType },
+    /// Model name was detected from output.
+    ModelDetected { model: String },
+    /// Context percentage was updated.
+    ContextUpdated { percent: f32 },
+    /// OSC 633 command started executing.
+    CommandStarted { command: Option<String> },
+    /// OSC 633 command finished.
+    CommandFinished {
+        command: Option<String>,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+    },
+}
 
 // ── Agent types ─────────────────────────────────────────────────────────────
 
@@ -251,6 +283,8 @@ pub struct AgentStateInference {
     consecutive_failures: i64,
     /// Optional per-session JSONL event log for structured diagnostics.
     event_log: Option<EventLog>,
+    /// Optional channel for emitting state change notifications to the daemon.
+    change_tx: Option<std_mpsc::Sender<StateChangeNotification>>,
 }
 
 /// Maximum number of recent lines to keep in the ring buffer.
@@ -287,6 +321,7 @@ impl AgentStateInference {
             last_command_duration_ms: None,
             consecutive_failures: 0,
             event_log: None,
+            change_tx: None,
         }
     }
 
@@ -298,9 +333,82 @@ impl AgentStateInference {
         self.event_log = Some(log);
     }
 
+    /// Attach a state change notification sender.
+    ///
+    /// When set, the inference engine emits [`StateChangeNotification`]s on
+    /// every detected state transition. The daemon uses this channel to
+    /// bridge into semantic events without polling.
+    pub fn set_change_tx(&mut self, tx: std_mpsc::Sender<StateChangeNotification>) {
+        self.change_tx = Some(tx);
+    }
+
+    /// Emit a state change notification (non-blocking, best-effort).
+    fn emit(&self, notification: StateChangeNotification) {
+        if let Some(ref tx) = self.change_tx {
+            let _ = tx.send(notification);
+        }
+    }
+
     /// Get a mutable reference to the event log (if attached).
     pub fn event_log_mut(&mut self) -> Option<&mut EventLog> {
         self.event_log.as_mut()
+    }
+
+    // ── Public getters for daemon-owned state bridging ──────────────────
+
+    /// Current inferred status.
+    pub fn last_status(&self) -> &InferredStatus {
+        &self.last_status
+    }
+
+    /// Session ID from config.
+    pub fn session_id(&self) -> &str {
+        &self.config.session_id
+    }
+
+    /// PID of the PTY child process.
+    pub fn child_pid(&self) -> u32 {
+        self.config.child_pid
+    }
+
+    /// Working directory from config.
+    pub fn working_dir(&self) -> Option<&str> {
+        self.config.working_dir.as_deref()
+    }
+
+    /// Detected or configured agent type.
+    pub fn agent_type(&self) -> Option<AgentType> {
+        self.effective_agent_type()
+    }
+
+    /// Detected model name from output.
+    pub fn detected_model(&self) -> Option<&str> {
+        self.detected_model.as_deref()
+    }
+
+    /// Last detected context percentage (0.0..100.0).
+    pub fn context_percent(&self) -> Option<f32> {
+        self.context_percent
+    }
+
+    /// Last command string (from OSC 633).
+    pub fn last_command(&self) -> Option<&str> {
+        self.last_command.as_deref()
+    }
+
+    /// Last command exit code.
+    pub fn last_exit_code(&self) -> Option<i32> {
+        self.last_exit_code
+    }
+
+    /// Duration of the last command in milliseconds.
+    pub fn last_command_duration_ms(&self) -> Option<i64> {
+        self.last_command_duration_ms
+    }
+
+    /// Count of consecutive non-zero exit codes.
+    pub fn consecutive_failures(&self) -> i64 {
+        self.consecutive_failures
     }
 
     /// Get the effective agent type (config override > detected > None).
@@ -372,6 +480,9 @@ impl AgentStateInference {
                             command: command.unwrap_or("<unknown>").to_string(),
                         });
                     }
+                    self.emit(StateChangeNotification::CommandStarted {
+                        command: command.map(|s| s.to_string()),
+                    });
                 }
             }
             CommandState::Finished => {
@@ -410,17 +521,22 @@ impl AgentStateInference {
                     self.dirty = true;
                 }
                 // Log command finish event.
+                let cmd_str = command
+                    .map(|s| s.to_string())
+                    .or_else(|| self.last_command.clone())
+                    .unwrap_or_else(|| "<unknown>".to_string());
                 if let Some(ref mut log) = self.event_log {
-                    let cmd_str = command
-                        .map(|s| s.to_string())
-                        .or_else(|| self.last_command.clone())
-                        .unwrap_or_else(|| "<unknown>".to_string());
                     log.log(&SessionEvent::CommandFinish {
-                        command: cmd_str,
+                        command: cmd_str.clone(),
                         exit_code,
                         duration_ms,
                     });
                 }
+                self.emit(StateChangeNotification::CommandFinished {
+                    command: Some(cmd_str),
+                    exit_code,
+                    duration_ms,
+                });
             }
             CommandState::PromptStart => {
                 // New prompt cycle — clear the command-started timestamp so
@@ -506,10 +622,16 @@ impl AgentStateInference {
             self.detected_agent_type = Some(at);
             self.dirty = true;
             self.update_state_file_path();
+            self.emit(StateChangeNotification::AgentDetected { agent_type: at });
         }
-        if let Some(model) = new_model {
+        if let Some(ref model) = new_model {
             debug!(model = %model, "Detected model from output");
             trace!(field = "model", value = %model, "state dirty");
+            self.emit(StateChangeNotification::ModelDetected {
+                model: model.clone(),
+            });
+        }
+        if let Some(model) = new_model {
             self.detected_model = Some(model);
             self.dirty = true;
         }
@@ -552,6 +674,24 @@ impl AgentStateInference {
                     new: new_str,
                 });
             }
+            // Emit tool lifecycle notifications when transitioning to/from ToolUse.
+            if let InferredStatus::ToolUse { ref tool_name } = new_status {
+                self.emit(StateChangeNotification::ToolStarted {
+                    tool_name: tool_name.clone(),
+                });
+            }
+            if let InferredStatus::ToolUse { ref tool_name } = self.last_status {
+                if !matches!(new_status, InferredStatus::ToolUse { .. }) {
+                    self.emit(StateChangeNotification::ToolCompleted {
+                        tool_name: tool_name.clone(),
+                    });
+                }
+            }
+            // Emit the general status change notification.
+            self.emit(StateChangeNotification::StatusChanged {
+                old: self.last_status.clone(),
+                new: new_status.clone(),
+            });
             self.last_status = new_status;
             self.dirty = true;
         }
@@ -677,6 +817,9 @@ impl AgentStateInference {
                                 trace!(field = "context_percent", value = pct, "state dirty");
                                 self.context_percent = Some(pct);
                                 self.dirty = true;
+                                self.emit(StateChangeNotification::ContextUpdated {
+                                    percent: pct,
+                                });
                             }
                             return;
                         }

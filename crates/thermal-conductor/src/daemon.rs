@@ -24,9 +24,11 @@ use crate::kitty::{
 };
 use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
-    self, CellData, ColorData, CursorData, DirtyCellData, Request, Response, SessionInfo,
+    self, CellData, ColorData, CursorData, DirtyCellData, EventScope, Request, Response,
+    SessionInfo,
 };
 use crate::pty::PtySession;
+use crate::semantic_state::{SemanticEventBus, event_matches_categories};
 use crate::terminal::Terminal;
 use thermal_terminal::state_inference::{AgentType, InferenceConfig};
 
@@ -66,6 +68,8 @@ struct Session {
 pub(crate) struct Daemon {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
     next_id: AtomicU64,
+    /// Canonical semantic event bus — the single source of truth for session state.
+    pub(crate) event_bus: Arc<SemanticEventBus>,
 }
 
 impl Daemon {
@@ -73,6 +77,7 @@ impl Daemon {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicU64::new(1),
+            event_bus: Arc::new(SemanticEventBus::new(256)),
         }
     }
 
@@ -125,14 +130,46 @@ impl Daemon {
         // Attach agent state inference to the terminal byte processor.
         // Infers agent type from the shell command; state files are written
         // to /tmp/{claude-code,codex,copilot}-state/ for the ClaudeStatePoller.
+        let child_pid = pty.child_pid().as_raw() as u32;
         {
             let agent_type = AgentType::from_command(&shell_path);
-            let child_pid = pty.child_pid().as_raw() as u32;
             terminal.attach_state_inference(InferenceConfig {
                 session_id: id.clone(),
                 child_pid,
                 agent_type,
                 working_dir: Some(effective_cwd.clone()),
+            });
+        }
+
+        // Attach state change notification channel for semantic event bridging.
+        // The std::sync::mpsc sender is used from the byte processor thread;
+        // a relay task drains it into the SemanticEventBus via tokio.
+        let (change_tx, change_rx) = std::sync::mpsc::channel();
+        if let Some(si) = terminal.state_inference() {
+            si.lock().set_change_tx(change_tx);
+        }
+
+        // Spawn the notification relay task.
+        {
+            let event_bus = Arc::clone(&self.event_bus);
+            let session_id = id.clone();
+            tokio::spawn(async move {
+                loop {
+                    // Poll the std::sync::mpsc channel with a short sleep to
+                    // avoid busy-waiting.  The channel is populated from the
+                    // blocking byte processor thread.
+                    match change_rx.try_recv() {
+                        Ok(notif) => {
+                            event_bus.process_notification(&session_id, notif);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
             });
         }
 
@@ -197,8 +234,9 @@ impl Daemon {
             assign_unique_name(&base, &existing_names)
         };
 
-        // Clone values for sidecar before they're moved into Session.
+        // Clone values for sidecar and semantic events before they're moved into Session.
         let sidecar_cwd = cwd_path.clone();
+        let semantic_cwd = cwd_path.clone();
         let sidecar_worktree = worktree_path.clone();
 
         let session = Session {
@@ -228,6 +266,7 @@ impl Daemon {
             let update_tx = update_tx.clone();
             let title_ref = Arc::clone(&title);
             let session_id = id.clone();
+            let event_bus = Arc::clone(&self.event_bus);
 
             tokio::spawn(async move {
                 let mut event_rx = {
@@ -250,8 +289,10 @@ impl Daemon {
                             *title_ref.lock() = new_title.clone();
                             let _ = update_tx.send(Response::TitleChanged {
                                 id: session_id.clone(),
-                                title: new_title,
+                                title: new_title.clone(),
                             });
+                            // Emit semantic title change event.
+                            event_bus.title_changed(&session_id, new_title);
                         }
                         _ => {}
                     }
@@ -266,6 +307,7 @@ impl Daemon {
             let seq_ref = Arc::clone(&seq);
             let update_tx = update_tx.clone();
             let session_id = id.clone();
+            let event_bus = Arc::clone(&self.event_bus);
 
             tokio::spawn(async move {
                 let wakeup_fd = {
@@ -318,8 +360,10 @@ impl Daemon {
                             let _ = update_tx.send(Response::SessionExited {
                                 id: session_id.clone(),
                                 exit_code,
-                                reason: reason_str,
+                                reason: reason_str.clone(),
                             });
+                            // Emit semantic session exit event.
+                            event_bus.session_exited(&session_id, exit_code, reason_str);
                             break;
                         }
                     }
@@ -498,6 +542,14 @@ impl Daemon {
                 }
             });
         }
+
+        // Emit semantic SessionSpawned event.
+        self.event_bus.session_spawned(
+            &id,
+            Some(display_name.clone()),
+            Some(semantic_cwd),
+            Some(child_pid),
+        );
 
         info!(session = %id, name = %display_name, "Session spawned");
         Ok((id, display_name))
@@ -683,6 +735,9 @@ impl Daemon {
                             warn!("Failed to remove sidecar entry on kill: {e}");
                         }
                     });
+                    // Emit semantic events for kill.
+                    self.event_bus.session_exited(id, None, "killed".to_string());
+                    self.event_bus.session_removed(id);
                     info!(session = %id, "Session killed");
                     Response::Ok
                 } else {
@@ -812,10 +867,10 @@ impl Daemon {
 
             Request::Ping => Response::Pong,
 
-            // SubscribeEvents is handled at the connection level, not here.
-            // The subscription handler will be implemented in therm-6yqa.
+            // SubscribeEvents is handled at the connection level in handle_client.
+            // If it reaches here, it means the connection handler didn't intercept it.
             Request::SubscribeEvents { .. } => Response::Error {
-                message: "SubscribeEvents not yet implemented".into(),
+                message: "SubscribeEvents must be handled at the connection level".into(),
             },
         }
     }
@@ -1059,6 +1114,9 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
     // forwarder so we don't duplicate messages.
     let mut forwarder_handle: Option<tokio::task::JoinHandle<()>> = None;
 
+    // Cancellation handle for the semantic event subscription forwarder.
+    let mut event_forwarder_handle: Option<tokio::task::JoinHandle<()>> = None;
+
     // Spawn a task to forward update broadcasts to this client.
     let (client_tx, mut client_rx) = mpsc::channel::<Response>(64);
 
@@ -1105,6 +1163,83 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
                 continue;
             }
         };
+
+        // Handle SubscribeEvents at the connection level — sends initial
+        // snapshots for all in-scope sessions, then streams incremental events.
+        if let Request::SubscribeEvents { ref scope } = request {
+            // Abort any existing event subscription forwarder.
+            if let Some(handle) = event_forwarder_handle.take() {
+                handle.abort();
+            }
+
+            // Subscribe to the broadcast channel *before* taking snapshots
+            // so we don't miss events that happen between snapshot and stream.
+            let mut event_rx = daemon.event_bus.subscribe();
+            let scope_clone = scope.clone();
+
+            // Send initial snapshot syncs for all in-scope sessions.
+            let syncs = daemon.event_bus.snapshot_syncs(scope);
+            for sync in syncs {
+                if client_tx
+                    .send(Response::SnapshotSync(sync))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+
+            // Spawn a forwarder task that streams events matching the scope.
+            let client_tx_clone = client_tx.clone();
+            let daemon_clone = Arc::clone(&daemon);
+            event_forwarder_handle = Some(tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(event) => {
+                            // Filter by scope.
+                            let matches = match &scope_clone {
+                                EventScope::All => true,
+                                EventScope::Session(id) => event.session_id == *id,
+                                EventScope::Categories(cats) => {
+                                    event_matches_categories(&event.kind, cats)
+                                }
+                            };
+                            if matches {
+                                let batch = crate::protocol::EventBatch {
+                                    events: vec![event],
+                                };
+                                if client_tx_clone
+                                    .send(Response::EventStream(batch))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(skipped = n, "Event subscriber lagged; sending resync snapshots");
+                            // Force resync: re-send snapshots for all in-scope sessions.
+                            let syncs = daemon_clone.event_bus.snapshot_syncs(&scope_clone);
+                            for sync in syncs {
+                                if client_tx_clone
+                                    .send(Response::SnapshotSync(sync))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
+                    }
+                }
+            }));
+
+            continue;
+        }
 
         // Handle attach specially so the explicit SessionState snapshot is
         // always delivered before streamed broadcasts.
@@ -1188,8 +1323,11 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     }
 
-    // Clean up: abort forwarder and detach from session if attached.
+    // Clean up: abort forwarders and detach from session if attached.
     if let Some(handle) = forwarder_handle.take() {
+        handle.abort();
+    }
+    if let Some(handle) = event_forwarder_handle.take() {
         handle.abort();
     }
     if let Some(id) = attached_session {

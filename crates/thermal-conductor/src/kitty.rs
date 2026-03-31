@@ -102,7 +102,11 @@ pub fn next_unique_name(base: &str, is_taken: impl Fn(&str) -> bool) -> String {
 /// - If taken, appends a suffix: "opus-2", "opus-3", etc.
 /// - Skips the entry with `exclude_session_id` (so re-upserts don't collide with
 ///   the session's own prior name).
-pub fn assign_display_name(base: &str, existing: &[SidecarEntry], exclude_session_id: Option<&str>) -> String {
+pub fn assign_display_name(
+    base: &str,
+    existing: &[SidecarEntry],
+    exclude_session_id: Option<&str>,
+) -> String {
     next_unique_name(base, |candidate| {
         existing.iter().any(|e| {
             if let Some(exc) = exclude_session_id {
@@ -257,14 +261,19 @@ impl KittyController {
         }
 
         // Bare `kitty @ ls` as final fallback (maybe kitty uses a default socket).
-        let result = Command::new("kitty")
-            .args(["@", "ls"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            Command::new("kitty")
+                .args(["@", "ls"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|s| s.success())
+        .unwrap_or(false);
 
         if result {
             let _ = self.available.set(true);
@@ -273,15 +282,21 @@ impl KittyController {
     }
 
     /// Test if a specific socket path works for `kitty @ ls`.
+    /// Times out after 3 seconds to avoid hanging when kitty is unresponsive.
     async fn try_socket(&self, socket: &str) -> bool {
-        Command::new("kitty")
-            .args(["@", "--to", socket, "ls"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            Command::new("kitty")
+                .args(["@", "--to", socket, "ls"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|s| s.success())
+        .unwrap_or(false)
     }
 
     // ── Spawn ───────────────────────────────────────────────────────────────
@@ -522,7 +537,9 @@ async fn sidecar_read() -> SidecarData {
 
 /// Acquire an exclusive flock on the sidecar lockfile, perform a read-modify-write,
 /// then release. This prevents concurrent thc invocations from clobbering each other.
-pub async fn sidecar_locked_update(f: impl FnOnce(&mut SidecarData) + Send + 'static) -> Result<()> {
+pub async fn sidecar_locked_update(
+    f: impl FnOnce(&mut SidecarData) + Send + 'static,
+) -> Result<()> {
     // Run the locked operation in a blocking task to avoid holding the lock
     // across an async suspension point.
     tokio::task::spawn_blocking(move || {
@@ -573,7 +590,6 @@ async fn sidecar_add(entry: SidecarEntry) -> Result<()> {
     })
     .await
 }
-
 
 /// Remove an entry from the sidecar by session ID (locked read-modify-write).
 pub async fn sidecar_remove(id: &str) -> Result<()> {
@@ -642,7 +658,8 @@ mod tests {
     #[test]
     fn sidecar_deserializes_without_display_name() {
         // Old sidecar files won't have display_name — serde(default) handles it.
-        let json = r#"{"sessions":[{"session_id":"old","original_cwd":"/tmp","spawn_time":1700000000}]}"#;
+        let json =
+            r#"{"sessions":[{"session_id":"old","original_cwd":"/tmp","spawn_time":1700000000}]}"#;
         let data: SidecarData = serde_json::from_str(json).expect("deserialize");
         assert_eq!(data.sessions[0].session_id, "old");
         assert_eq!(data.sessions[0].display_name, None);
@@ -761,10 +778,7 @@ mod tests {
     fn assign_display_name_excludes_own_session() {
         // Re-upserting s1 should not conflict with s1's own display_name.
         let entries = vec![make_entry("s1", Some("opus"))];
-        assert_eq!(
-            assign_display_name("opus", &entries, Some("s1")),
-            "opus"
-        );
+        assert_eq!(assign_display_name("opus", &entries, Some("s1")), "opus");
     }
 
     #[test]
@@ -774,10 +788,7 @@ mod tests {
             make_entry("s2", Some("opus-2")),
         ];
         // Re-upserting s1 — "opus" is s1's own (excluded), but "opus-2" is s2's.
-        assert_eq!(
-            assign_display_name("opus", &entries, Some("s1")),
-            "opus"
-        );
+        assert_eq!(assign_display_name("opus", &entries, Some("s1")), "opus");
     }
 
     #[test]

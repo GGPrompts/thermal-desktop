@@ -44,10 +44,7 @@ pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(dir).join("thermal")
     } else {
-        PathBuf::from(format!(
-            "/run/user/{}/thermal",
-            nix::unistd::getuid()
-        ))
+        PathBuf::from(format!("/run/user/{}/thermal", nix::unistd::getuid()))
     }
 }
 
@@ -71,6 +68,37 @@ const MAX_TOOL_ITERATIONS: usize = 10;
 // Main
 // ---------------------------------------------------------------------------
 
+fn pidfile_path() -> PathBuf {
+    runtime_dir().join("dispatcher.pid")
+}
+
+fn enforce_single_instance() {
+    let pidfile = pidfile_path();
+    if pidfile.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            eprintln!("thermal-dispatcher already running (pid {pid}). Exiting.");
+            std::process::exit(0);
+        }
+        let _ = std::fs::remove_file(&pidfile);
+    }
+}
+
+fn write_pidfile() {
+    let pidfile = pidfile_path();
+    if let Some(parent) = pidfile.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&pidfile, std::process::id().to_string());
+}
+
+#[allow(dead_code)] // Available for future graceful shutdown
+fn cleanup_pidfile() {
+    let _ = std::fs::remove_file(pidfile_path());
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -79,6 +107,9 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "thermal_dispatcher=info".parse().unwrap()),
         )
         .init();
+
+    enforce_single_instance();
+    write_pidfile();
 
     info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));
 
@@ -324,9 +355,7 @@ async fn dispatch_command(transcript: &str, state: &SharedState) -> Result<Strin
         api::LlmBackend::ClaudeCli | api::LlmBackend::CopilotCli => {
             dispatch_via_cli(transcript, state, messages).await
         }
-        api::LlmBackend::Ollama => {
-            dispatch_via_ollama(transcript, state, messages).await
-        }
+        api::LlmBackend::Ollama => dispatch_via_ollama(transcript, state, messages).await,
     }
 }
 
@@ -347,7 +376,8 @@ async fn dispatch_via_cli(
         if iterations > MAX_TOOL_ITERATIONS {
             warn!(iterations, "CLI dispatch hit max iterations");
             let mut ctx = state.conversation.lock().await;
-            let response = "I hit the maximum number of steps. Please try a simpler request.".to_string();
+            let response =
+                "I hit the maximum number of steps. Please try a simpler request.".to_string();
             ctx.add_turn(transcript, &response);
             return Ok(response);
         }
@@ -496,10 +526,9 @@ async fn dispatch_via_ollama(
             return Ok(response);
         }
 
-        let response =
-            api::call_ollama(http, &state.model, &state.tool_schemas, &messages)
-                .await
-                .context("Ollama API call failed")?;
+        let response = api::call_ollama(http, &state.model, &state.tool_schemas, &messages)
+            .await
+            .context("Ollama API call failed")?;
 
         // Check stop reason (normalised by call_ollama)
         let stop_reason = response
@@ -686,7 +715,10 @@ fn extract_single_arg_calls(text: &str, func: &str) -> Vec<String> {
         let rest = text[abs_start..].trim_start();
         let quote = match rest.chars().next() {
             Some(q @ ('"' | '\'')) => q,
-            _ => { search_from = abs_start; continue; }
+            _ => {
+                search_from = abs_start;
+                continue;
+            }
         };
         let after_quote = &rest[1..];
         if let Some(end) = after_quote.find(quote) {
@@ -728,7 +760,12 @@ fn extract_route_call(text: &str) -> Option<(String, String)> {
 
 /// Extract a keyword argument value: `key="value"` or `key='value'`.
 fn extract_kwarg(text: &str, key: &str) -> Option<String> {
-    let patterns = [format!("{key}=\""), format!("{key}='"), format!("{key} = \""), format!("{key} = '")];
+    let patterns = [
+        format!("{key}=\""),
+        format!("{key}='"),
+        format!("{key} = \""),
+        format!("{key} = '"),
+    ];
     for pat in &patterns {
         if let Some(start) = text.find(pat.as_str()) {
             let quote = pat.chars().last()?;

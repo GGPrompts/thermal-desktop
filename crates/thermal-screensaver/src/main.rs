@@ -871,6 +871,38 @@ impl ProvidesRegistryState for App {
 
 // -- Main --
 
+fn pidfile_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("thermal")
+        .join("screensaver.pid")
+}
+
+fn enforce_single_instance() {
+    let pidfile = pidfile_path();
+    if pidfile.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            eprintln!("thermal-screensaver already running (pid {pid}). Exiting.");
+            std::process::exit(0);
+        }
+        let _ = std::fs::remove_file(&pidfile);
+    }
+}
+
+fn write_pidfile() {
+    let pidfile = pidfile_path();
+    if let Some(parent) = pidfile.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&pidfile, std::process::id().to_string());
+}
+
+fn cleanup_pidfile() {
+    let _ = std::fs::remove_file(pidfile_path());
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -880,6 +912,9 @@ fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    enforce_single_instance();
+    write_pidfile();
 
     info!(
         "thermal-screensaver v{} starting (timeout={}s)",
@@ -978,12 +1013,8 @@ fn main() {
 
         // Watchdog: if Exclusive keyboard grab held >5 min with no input, exit gracefully
         // to avoid locking out the user after DPMS/idle transitions.
-        if app.phase == Phase::Active
-            && app.last_input.elapsed() > Duration::from_secs(5 * 60)
-        {
-            warn!(
-                "screensaver watchdog: Exclusive grab held >5 min without input, exiting"
-            );
+        if app.phase == Phase::Active && app.last_input.elapsed() > Duration::from_secs(5 * 60) {
+            warn!("screensaver watchdog: Exclusive grab held >5 min without input, exiting");
             break;
         }
 
@@ -1019,4 +1050,5 @@ fn main() {
     if let Some(notification) = app.idle_notification.take() {
         notification.destroy();
     }
+    cleanup_pidfile();
 }

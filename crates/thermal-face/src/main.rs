@@ -411,14 +411,7 @@ impl CompositorHandler for FaceApp {
         _: wl_output::Transform,
     ) {
     }
-    fn frame(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-    }
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {}
     fn surface_enter(
         &mut self,
         _: &Connection,
@@ -445,13 +438,7 @@ impl OutputHandler for FaceApp {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_output::WlOutput,
-    ) {
-    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
 }
 
 // -- LayerShellHandler --
@@ -534,6 +521,38 @@ impl ProvidesRegistryState for FaceApp {
 // Main
 // ---------------------------------------------------------------------------
 
+fn pidfile_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("thermal")
+        .join("face.pid")
+}
+
+fn enforce_single_instance() {
+    let pidfile = pidfile_path();
+    if pidfile.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            eprintln!("thermal-face already running (pid {pid}). Exiting.");
+            std::process::exit(0);
+        }
+        let _ = std::fs::remove_file(&pidfile);
+    }
+}
+
+fn write_pidfile() {
+    let pidfile = pidfile_path();
+    if let Some(parent) = pidfile.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&pidfile, std::process::id().to_string());
+}
+
+fn cleanup_pidfile() {
+    let _ = std::fs::remove_file(pidfile_path());
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -542,10 +561,10 @@ fn main() {
         )
         .init();
 
-    info!(
-        "thermal-face v{} starting",
-        env!("CARGO_PKG_VERSION"),
-    );
+    enforce_single_instance();
+    write_pidfile();
+
+    info!("thermal-face v{} starting", env!("CARGO_PKG_VERSION"),);
 
     // --- Wayland connection ---
     let conn = Connection::connect_to_env().expect("Failed to connect to Wayland");
@@ -555,20 +574,13 @@ fn main() {
     let qh: QueueHandle<FaceApp> = event_queue.handle();
 
     // Bind globals
-    let compositor =
-        CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
-    let layer_shell =
-        LayerShell::bind(&globals, &qh).expect("wlr-layer-shell not available");
+    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor not available");
+    let layer_shell = LayerShell::bind(&globals, &qh).expect("wlr-layer-shell not available");
 
     // Create layer surface: bottom-right, 200x200, Layer::Top
     let wl_surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(
-        &qh,
-        wl_surface,
-        Layer::Top,
-        Some("thermal-face"),
-        None,
-    );
+    let layer =
+        layer_shell.create_layer_surface(&qh, wl_surface, Layer::Top, Some("thermal-face"), None);
 
     layer.set_anchor(Anchor::BOTTOM | Anchor::RIGHT);
     layer.set_size(FACE_SIZE, FACE_SIZE);
@@ -634,9 +646,8 @@ fn main() {
 
     info!("wgpu adapter: {:?}", adapter.get_info());
 
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&Default::default(), None))
-            .expect("Failed to create wgpu device");
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default(), None))
+        .expect("Failed to create wgpu device");
 
     // Query surface capabilities for format selection
     let caps = wgpu_surface.get_capabilities(&adapter);
@@ -688,6 +699,7 @@ fn main() {
 
         if app.exit {
             info!("thermal-face: exit requested");
+            cleanup_pidfile();
             break;
         }
 

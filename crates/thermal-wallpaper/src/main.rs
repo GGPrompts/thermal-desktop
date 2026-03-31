@@ -581,6 +581,38 @@ impl ProvidesRegistryState for WallpaperState {
 
 // ── Main ────────────────────────────────────────────────────────────────────
 
+fn pidfile_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
+        .join("thermal")
+        .join("wallpaper.pid")
+}
+
+fn enforce_single_instance() {
+    let pidfile = pidfile_path();
+    if pidfile.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&pidfile)
+            && let Ok(pid) = contents.trim().parse::<u32>()
+            && std::path::Path::new(&format!("/proc/{pid}")).exists()
+        {
+            eprintln!("thermal-wallpaper already running (pid {pid}). Exiting.");
+            std::process::exit(0);
+        }
+        let _ = std::fs::remove_file(&pidfile);
+    }
+}
+
+fn write_pidfile() {
+    let pidfile = pidfile_path();
+    if let Some(parent) = pidfile.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&pidfile, std::process::id().to_string());
+}
+
+fn cleanup_pidfile() {
+    let _ = std::fs::remove_file(pidfile_path());
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -588,6 +620,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    enforce_single_instance();
+    write_pidfile();
 
     info!("thermal-wallpaper starting");
 
@@ -816,6 +851,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    cleanup_pidfile();
     info!("thermal-wallpaper exiting");
     Ok(())
 }

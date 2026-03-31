@@ -167,6 +167,9 @@ pub struct Osc633Parser {
     /// `633`.  Before confirmation we buffer everything so we can abandon
     /// non-633 OSC sequences cheaply.
     confirmed_633: bool,
+    /// Set when ESC (0x1B) is seen inside an OSC, cleared on the next byte.
+    /// Only `\` (0x5C) immediately after ESC should terminate via ST.
+    after_esc: bool,
 }
 
 impl Osc633Parser {
@@ -192,12 +195,12 @@ impl Osc633Parser {
                     }
                     // ESC inside an OSC signals the start of ST (`ESC \`).
                     0x1B => {
-                        // We leave `in_osc = true`; the next byte should be
-                        // `\` (0x5C) to complete ST.  We don't push ESC into
-                        // the body buffer.
+                        self.after_esc = true;
+                        continue;
                     }
                     // `\` after ESC completes ST terminator.
-                    0x5C if !self.buf.is_empty() || self.confirmed_633 => {
+                    0x5C if self.after_esc => {
+                        self.after_esc = false;
                         if self.confirmed_633 {
                             if let Some(mark) = parse_633_body(&self.buf) {
                                 marks.push(mark);
@@ -206,6 +209,7 @@ impl Osc633Parser {
                         self.reset();
                     }
                     _ => {
+                        self.after_esc = false;
                         if !self.confirmed_633 {
                             // Still accumulating the OSC code prefix to see
                             // if it is `633`.
@@ -254,6 +258,7 @@ impl Osc633Parser {
         self.buf.clear();
         self.in_osc = false;
         self.confirmed_633 = false;
+        self.after_esc = false;
     }
 }
 

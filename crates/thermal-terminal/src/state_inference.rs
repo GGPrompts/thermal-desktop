@@ -418,8 +418,14 @@ impl AgentStateInference {
 
     /// During command execution, check output for tool use or processing patterns.
     fn infer_executing_status(&self) -> InferredStatus {
-        // Check recent lines for tool call patterns (newest first).
-        for line in self.recent_lines.iter().rev().take(15) {
+        // Check the live unterminated line first — it has the most recent content
+        // (prompts and spinners are often rendered without a trailing newline).
+        let lines_iter = std::iter::once(&self.current_line)
+            .filter(|l| !l.is_empty())
+            .chain(self.recent_lines.iter().rev());
+
+        // Check for tool call patterns.
+        for line in lines_iter.clone().take(16) {
             if let Some(caps) = self.patterns.tool_call.captures(line) {
                 if let Some(m) = caps.get(1) {
                     return InferredStatus::ToolUse {
@@ -430,7 +436,7 @@ impl AgentStateInference {
         }
 
         // Check for spinner/thinking patterns.
-        for line in self.recent_lines.iter().rev().take(5) {
+        for line in lines_iter.take(6) {
             if self.patterns.spinner.is_match(line) {
                 return InferredStatus::Processing;
             }
@@ -442,15 +448,21 @@ impl AgentStateInference {
 
     /// Check output patterns, falling back to the given default.
     fn infer_from_output_or(&self, default: InferredStatus) -> InferredStatus {
+        // Include the live unterminated line — prompts like `>` and spinners
+        // are often rendered without a trailing newline.
+        let lines_iter = std::iter::once(&self.current_line)
+            .filter(|l| !l.is_empty())
+            .chain(self.recent_lines.iter().rev());
+
         // Check for awaiting input patterns in very recent lines.
-        for line in self.recent_lines.iter().rev().take(5) {
+        for line in lines_iter.clone().take(6) {
             if self.patterns.awaiting_input.is_match(line) {
                 return InferredStatus::AwaitingInput;
             }
         }
 
         // Check for tool use patterns (agent might be showing tool output).
-        for line in self.recent_lines.iter().rev().take(10) {
+        for line in lines_iter.clone().take(11) {
             if let Some(caps) = self.patterns.tool_call.captures(line) {
                 if let Some(m) = caps.get(1) {
                     return InferredStatus::ToolUse {
@@ -461,7 +473,7 @@ impl AgentStateInference {
         }
 
         // Check for spinner/thinking.
-        for line in self.recent_lines.iter().rev().take(3) {
+        for line in lines_iter.take(4) {
             if self.patterns.spinner.is_match(line) {
                 return InferredStatus::Processing;
             }

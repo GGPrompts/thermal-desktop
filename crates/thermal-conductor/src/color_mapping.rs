@@ -84,7 +84,7 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::DimBlue => PaletteColor::COOL.to_f32_array(),
         NamedColor::DimMagenta => PaletteColor::ACCENT_COLD.to_f32_array(),
         NamedColor::DimCyan => [0.08, 0.45, 0.42, 1.0], // muted teal
-        NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT_MUTED.to_f32_array(),
+        NamedColor::DimWhite | NamedColor::DimForeground => PaletteColor::TEXT.to_f32_array(),
 
         NamedColor::Background => TERM_BG,
         NamedColor::Cursor => PaletteColor::WHITE_HOT.to_f32_array(),

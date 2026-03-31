@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use nix::libc;
 use nix::pty::openpty;
 use nix::sys::signal::{self, Signal};
+use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::{self, ForkResult, Pid};
 use tokio::sync::mpsc;
 use tracing::{error, info};
@@ -331,6 +332,9 @@ impl Drop for PtySession {
         // Send SIGHUP to the child process (standard terminal hangup signal).
         // The child may already be dead, so ignore errors.
         let _ = signal::kill(self.child_pid, Signal::SIGHUP);
+
+        // Reap the child to avoid zombie accumulation in long-lived daemons.
+        let _ = waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG));
 
         info!(
             pid = self.child_pid.as_raw(),

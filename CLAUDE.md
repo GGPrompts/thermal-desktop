@@ -37,11 +37,11 @@ kitty @ remote control API          thc daemon (Unix socket)
     ↕ kitty windows (PTYs)              ↕ alacritty_terminal PTYs
 ```
 
-Backend is selected via `--backend=auto|kitty|daemon` (default: `auto`). In `auto` mode, kitty is probed first (`kitty @ ls`); the daemon is used if kitty remote control is unavailable. Session metadata (worktree paths, profile names, spawn times, display names) is persisted in a sidecar file at `/run/user/$UID/thermal/sessions.json`.
+Backend is selected via `--backend=auto|kitty|daemon` (default: `auto`). In `auto` mode, kitty is probed first — checks `KITTY_LISTEN_ON`, then globs `/tmp/kitty-thc-*` for socket discovery (works from outside kitty), then bare `kitty @ ls` as fallback; the daemon is used if kitty remote control is unavailable. Session metadata (worktree paths, profile names, spawn times, display names) is persisted in a sidecar file at `/run/user/$UID/thermal/sessions.json`.
 
 #### Sessions Tab (3-Panel Layout)
 The Sessions tab is designed as a command center for a vertical monitor:
-- **Top**: Agent session list with model-based display names (opus, sonnet, gpt5.4mini instead of hex IDs), status badges, context %, workspace number. Single-select focuses the agent's kitty window (workspace switch). Multi-select (Space/Ctrl+A) for broadcast.
+- **Top**: Agent session list with model-based display names (opus, sonnet, gpt5.4mini instead of hex IDs), status badges, context %, workspace number, age (time since last state update), command duration (from OSC 633 telemetry). Single-select focuses the agent's kitty window (workspace switch). Multi-select (Space/Ctrl+A) for broadcast.
 - **Middle**: Live terminal preview via `kitty @ get-text --extent=screen` of the selected session, refreshed every 500ms. PgUp/PgDn/Home/End to scroll. Mouse scroll when preview is focused.
 - **Bottom**: Chat input with @-mention routing (@dispatcher, @claude, @system, etc.) and response display via message bus subscriber. @-mentions take priority over highlighted session routing. Tab-triggered autocomplete popup for live agents. Command history (up/down arrows). Press 's' on a session to save it as a spawn profile.
 
@@ -60,7 +60,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | Crate | Status | Description |
 |-------|--------|-------------|
 | **thermal-core** | Production | Shared palette, GPU context factory, multi-agent StatePoller (Claude/Codex/Copilot), text rendering, PTY session mgmt |
-| **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size, native agent state inference from PTY output (used by thermal-conductor and thermobile) |
+| **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session (with structured ExitReason), terminal size, native agent state inference from PTY output, per-session JSONL event log (used by thermal-conductor and thermobile) |
 | **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Profiles/Services/Messages) + GPU terminal window. Sessions tab: 3-panel layout with agent list, live kitty preview, @-mention chat with bus routing. Named agents (opus, sonnet, gpt5.4mini). Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
 | **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions + voice level meter). Mouse click support: workspace switch, voice mute toggle, session focus |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
@@ -87,7 +87,9 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 - **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes). Sessions can be saved as profiles via 's' hotkey.
 - **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution. Used by thermal-messages routing (dispatcher delegates all actions to agents via route).
 - **Display name registry** (`sessions.json` sidecar): Maps session_id → display_name (opus, sonnet-2, gpt5.4mini). Dedup numbering for multiple sessions with same model. Used by TUI, HUD, and message bus for @-mention routing.
-- **AgentStateInference** (`thermal-terminal/src/state_inference.rs`): Native PTY-based agent state detection. Combines OSC 633 CommandTracker transitions with output heuristics (spinners, tool blocks, prompts) to infer agent status. Writes state files atomically to `/tmp/*-state/` directories. Used by thermal-conductor daemon mode; replaces hook scripts.
+- **AgentStateInference** (`thermal-terminal/src/state_inference.rs`): Native PTY-based agent state detection. Combines OSC 633 CommandTracker transitions with output heuristics (spinners, tool blocks, prompts) to infer agent status. Writes state files atomically to `/tmp/*-state/` directories. State files include command telemetry: `last_command`, `last_exit_code`, `last_command_started_at`, `last_command_duration_ms`, `consecutive_failures`. Used by thermal-conductor daemon mode; replaces hook scripts.
+- **Per-session event log** (`thermal-terminal/src/event_log.rs`): JSONL event log per daemon session at `/run/user/$UID/thermal/sessions/<id>.events.jsonl`. Captures semantic lifecycle events (Spawn, StatusChange, CommandStart, CommandFinish, Resize, PtyEof, Bell) with ISO 8601 timestamps. Truncate-on-overflow rotation (default 5000 entries). Written by AgentStateInference + daemon; cleaned up on session removal.
+- **ExitReason** (`thermal-terminal/src/pty.rs`): Structured session exit enum (PtyEof/Signal/SpawnFailed/FrontendClose/DaemonShutdown) replacing bare `has_exited()` boolean. Propagated through the daemon protocol's `SessionExited` response. `has_exited()` still works as a fast lock-free check.
 - **Settings** (`~/.config/thermal/settings.toml`): Unified per-component config file. Read by the TUI Services tab (inline summary + 'e' hotkey to edit in `$EDITOR`). Auto-created with documented defaults on first access.
 
 ## Color Palette
@@ -143,7 +145,7 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 ## Known Issues
 - **thermal-lock on NVIDIA**: GPU context clash when kitty (OpenGL/Vulkan) and thermal-lock (wgpu) compete for GPU. Surface format fix applied (queries capabilities instead of hardcoding Bgra8UnormSrgb), but still disabled in Hyprland config pending further testing.
 - **thermal-launch**: Functional but fuzzy matching and reticle UI need refinement.
-- **thermal-conductor GPU window**: Supports standalone mode and daemon client mode (`SessionMode::Client` streams from `thc daemon`). Agent overlay HUD is decorative. Daemon streaming is implemented but needs end-to-end testing.
+- **thermal-conductor GPU window**: Supports standalone mode and daemon client mode (`SessionMode::Client` streams from `thc daemon`). Agent overlay HUD is decorative. Daemon streaming is implemented but needs end-to-end testing. **Stale socket hazard**: if `conductor.sock` lingers after a daemon crash/kill, `thc window` may enter client mode against a dead socket — clean up with `rm /run/user/$UID/thermal/conductor.sock`. The `/rebuild` skill should also clean stale sockets.
 - **NVIDIA DPMS resume** (therm-uqay): After 1-2hr AFK, terminals could become unresponsive. Mitigated: hypridle now uses brightness 0 instead of DPMS off, `NVD_BACKEND=direct` added, and thermal-wallpaper/bar/screensaver have non-fatal `conn.flush()` + screensaver has 5min watchdog for keyboard grab release.
 
 ## Voice Pipeline

@@ -154,6 +154,13 @@ const SERVICES: &[ServiceDef] = &[
         command: None,
         args: &[],
     },
+    ServiceDef {
+        binary: "thermal-conductor",
+        description: "Session daemon",
+        pid_source: PidSource::Pgrep,
+        command: Some("thc"),
+        args: &["daemon"],
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -379,6 +386,7 @@ fn cleanup_stale_socket(def: &ServiceDef) {
         "thermal-messages" => Some("messages.sock"),
         "thermal-audio" => Some("audio.sock"),
         "thermal-voice" => Some("voice.sock"),
+        "thermal-conductor" => Some("conductor.sock"),
         _ => None,
     };
     if let Some(name) = sock_name {

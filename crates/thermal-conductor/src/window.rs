@@ -784,15 +784,15 @@ fn spawn_daemon_reader_task(
                 } => {
                     // Apply dirty cells incrementally to the local term.
                     let mut term = term_handle.lock();
-                    let screen_lines = {
+                    let (screen_lines, screen_cols) = {
                         use alacritty_terminal::grid::Dimensions;
-                        term.screen_lines()
+                        (term.screen_lines(), term.columns())
                     };
 
                     for dc in &dirty_cells {
                         let row = dc.row as usize;
                         let col = dc.col as usize;
-                        if row >= screen_lines {
+                        if row >= screen_lines || col >= screen_cols {
                             continue;
                         }
                         let point = Point::new(
@@ -865,10 +865,14 @@ fn spawn_daemon_reader_task(
                     }
 
                     // Apply all cells.
+                    let safe_cols = {
+                        use alacritty_terminal::grid::Dimensions;
+                        term.columns()
+                    };
                     for (i, cell_data) in cells.iter().enumerate() {
                         let row = i / (cols as usize);
                         let col = i % (cols as usize);
-                        if row < rows as usize {
+                        if row < rows as usize && col < safe_cols {
                             let point = Point::new(
                                 alacritty_terminal::index::Line(row as i32),
                                 Column(col),
@@ -999,10 +1003,11 @@ fn apply_session_state_to_term(terminal: &Terminal, response: &Response) {
         }
 
         // Apply cells to the grid.
+        let safe_cols = term.columns();
         for (i, cell_data) in cells.iter().enumerate() {
             let row = i / (*cols as usize);
             let col = i % (*cols as usize);
-            if row < *rows as usize {
+            if row < *rows as usize && col < safe_cols {
                 let point = Point::new(alacritty_terminal::index::Line(row as i32), Column(col));
                 let grid_cell = &mut term.grid_mut()[point];
                 grid_cell.c = cell_data.ch;

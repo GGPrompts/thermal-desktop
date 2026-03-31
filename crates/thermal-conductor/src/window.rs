@@ -1279,7 +1279,7 @@ impl ConductorWindow {
             && let Some(ctx_pct) = session.context_percent
         {
             // Normalize from 0-100 to 0.0-1.0.
-            let normalized = (ctx_pct / 100.0).clamp(0.0, 1.0);
+            let normalized = (ctx_pct as f32 / 100.0).clamp(0.0, 1.0);
             self.context_heatmap.render(
                 normalized,
                 &self.wgpu.queue,
@@ -1390,7 +1390,7 @@ impl ConductorWindow {
                             .claude_session
                             .as_ref()
                             .and_then(|s| s.context_percent)
-                            .unwrap_or(0.0);
+                            .unwrap_or(0.0) as f32;
                         self.grid_renderer.render_context_warning(
                             ctx_pct,
                             &self.wgpu.device,
@@ -1573,7 +1573,7 @@ impl ConductorWindow {
                 .claude_session
                 .as_ref()
                 .and_then(|s| s.context_percent)
-                .unwrap_or(0.0);
+                .unwrap_or(0.0) as f32;
             self.grid_renderer.render_context_warning(
                 ctx_pct,
                 &self.wgpu.device,

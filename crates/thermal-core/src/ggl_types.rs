@@ -21,8 +21,11 @@ pub type AgentId = AgentIdV1;
 /// Current version of `TaskState` used throughout the codebase.
 pub type TaskState = TaskStateV1;
 
-// ClaudeStatusV1 is generated but not aliased here — ClaudeStatus stays
-// hand-written in claude_state.rs because it needs #[serde(rename_all)].
+/// Current version of `ClaudeStatus` used throughout the codebase.
+pub type ClaudeStatus = ClaudeStatusV1;
+
+/// Current version of `SessionState` used throughout the codebase.
+pub type SessionState = SessionStateV1;
 
 /// Current version of `ToolArgs` used throughout the codebase.
 pub type ToolArgs = ToolArgsV1;
@@ -42,9 +45,37 @@ pub type ConductorConfig = ConductorConfigV1;
 /// Current version of `PaneInfo` used throughout the codebase.
 pub type PaneInfo = PaneInfoV1;
 
-// ── Copy: codegen now auto-derives for unit-variant enums ───────────────────
-// ── Default: codegen now auto-derives for all-Option structs ────────────────
-// ConductorConfig still needs a manual Default (non-Option fields with values).
+// ── Default impls for types with non-Option fields ─────────────────────────
+
+impl Default for ClaudeStatus {
+    fn default() -> Self {
+        ClaudeStatusV1::Idle
+    }
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            session_id: String::new(),
+            parent_session_id: None,
+            agent_id: None,
+            agent_type: None,
+            model: None,
+            status: ClaudeStatusV1::Idle,
+            current_tool: None,
+            subagent_count: Some(0),
+            context_percent: None,
+            working_dir: None,
+            last_updated: None,
+            details: None,
+            hook_type: None,
+            tmux_pane: None,
+            pid: None,
+            workspace: None,
+            source: None,
+        }
+    }
+}
 
 impl Default for ConductorConfig {
     fn default() -> Self {

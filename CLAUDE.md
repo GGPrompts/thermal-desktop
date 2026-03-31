@@ -105,7 +105,8 @@ All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` con
 `thermal-core` uses [ggl](~/projects/ggl) codegen for wire protocol types. Schema source is `crates/thermal-core/schemas/thermal-protocol.ggl`, built via `build.rs` → `ggl-build` → generated Rust in `OUT_DIR`. Integration layer at `src/ggl_types.rs` (type aliases + manual trait impls).
 - **Edit the `.ggl` file** to change type definitions, not the generated output
 - **`ggl_types.rs`** is hand-written glue (aliases, Display, Default) — safe to edit
-- Types not yet migrated to ggl (e.g., `ClaudeStatus`, `ClaudeSessionState`) remain hand-written in their original modules
+- `ClaudeStatus` and `SessionState` (aliased as `ClaudeSessionState`) are ggl-generated with per-type overrides in `build.rs` for serde attributes
+- `thermal-terminal/src/state_inference.rs` keeps a local `StateFile` struct aligned with `SessionStateV1` to avoid pulling `thermal-core` GPU deps
 
 ### Installing / Updating Binaries
 After making changes to a crate, **you must `cargo install`** to update the running binary:

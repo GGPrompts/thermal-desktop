@@ -745,7 +745,7 @@ pub struct SessionsPage {
     display_rows: Vec<DisplayRow>,
     table_state: TableState,
     prev_state: HashMap<String, (ClaudeStatus, Option<String>)>,
-    cached_context_pct: HashMap<String, f32>,
+    cached_context_pct: HashMap<String, f64>,
     history: HashMap<String, VecDeque<HistoryEntry>>,
     history_popup: Option<String>,
     /// working_dir → Hyprland workspace ID cache.
@@ -1907,7 +1907,7 @@ impl TuiPage for SessionsPage {
                 };
 
                 let (ctx_str, ctx_c) = match s.context_percent {
-                    Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
+                    Some(pct) => (format!("{:.0}%", pct), ctx_color(pct as f32)),
                     None => ("-".into(), TEXT_MUTED),
                 };
 

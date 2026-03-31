@@ -297,7 +297,7 @@ struct App {
     /// Previous state per session: (status, current_tool) for change detection
     prev_state: HashMap<String, (ClaudeStatus, Option<String>)>,
     /// Cached context_percent per session (persists across updates that omit it)
-    cached_context_pct: HashMap<String, f32>,
+    cached_context_pct: HashMap<String, f64>,
     /// Status history per session
     history: HashMap<String, VecDeque<HistoryEntry>>,
     /// Which session_id has the history popup open, if any
@@ -542,7 +542,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
             // Context % with threshold colors
             let (ctx_str, ctx_c) = match s.context_percent {
-                Some(pct) => (format!("{:.0}%", pct), ctx_color(pct)),
+                Some(pct) => (format!("{:.0}%", pct), ctx_color(pct as f32)),
                 None => ("-".into(), TEXT_MUTED),
             };
 

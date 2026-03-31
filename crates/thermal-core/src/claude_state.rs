@@ -8,7 +8,6 @@
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,
 };
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -32,70 +31,17 @@ const SESSION_MAX_AGE: Duration = Duration::hours(2);
 /// How often to run the PID liveness + staleness sweep (avoid syscall spam).
 const PRUNE_INTERVAL: Duration = Duration::seconds(30);
 
-// ToolArgs and ToolDetails are now ggl-generated.
+// All state types are now ggl-generated.
 // See ggl_types.rs for type aliases and Default impls.
 // Re-export so downstream `use thermal_core::claude_state::{...}` still works.
-pub use crate::ggl_types::{ToolArgs, ToolDetails};
+pub use crate::ggl_types::{ClaudeStatus, ToolArgs, ToolDetails};
 
-/// Status of a Claude session.
+/// State of a single agent session, deserialized from a JSON state file.
 ///
-/// Kept hand-written because the JSON state files use snake_case values
-/// ("tool_use", "awaiting_input") which requires `#[serde(rename_all)]`.
-/// ggl codegen doesn't support per-type serde attributes yet.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClaudeStatus {
-    #[default]
-    Idle,
-    Processing,
-    ToolUse,
-    AwaitingInput,
-}
-
-/// State of a single Claude session, deserialized from a JSON state file.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ClaudeSessionState {
-    pub session_id: String,
-    pub parent_session_id: Option<String>,
-    pub agent_id: Option<String>,
-    pub agent_type: Option<String>,
-    pub model: Option<String>,
-    pub status: ClaudeStatus,
-    pub current_tool: Option<String>,
-    pub subagent_count: Option<u32>,
-    pub context_percent: Option<f32>,
-    pub working_dir: Option<String>,
-    pub last_updated: Option<String>,
-    pub details: Option<ToolDetails>,
-    pub hook_type: Option<String>,
-    pub tmux_pane: Option<String>,
-    pub pid: Option<u32>,
-    pub workspace: Option<i64>,
-}
-
-impl Default for ClaudeSessionState {
-    fn default() -> Self {
-        Self {
-            session_id: String::new(),
-            parent_session_id: None,
-            agent_id: None,
-            agent_type: None,
-            model: None,
-            status: ClaudeStatus::Idle,
-            current_tool: None,
-            subagent_count: Some(0),
-            context_percent: None,
-            working_dir: None,
-            last_updated: None,
-            details: None,
-            hook_type: None,
-            tmux_pane: None,
-            pid: None,
-            workspace: None,
-        }
-    }
-}
+/// This is a type alias for the ggl-generated `SessionState` type. The name
+/// `ClaudeSessionState` is retained for backward compatibility across the
+/// codebase.
+pub type ClaudeSessionState = crate::ggl_types::SessionState;
 
 impl ClaudeSessionState {
     /// Return a short, human-friendly display name derived from the `model` field.
@@ -271,7 +217,7 @@ fn collapse_sessions_by_id(
 }
 
 /// Check if a process with the given PID is still alive.
-fn pid_is_alive(pid: u32) -> bool {
+fn pid_is_alive(pid: i64) -> bool {
     use nix::sys::signal;
     use nix::unistd::Pid;
     // kill(pid, 0) checks existence without sending a signal.
@@ -852,7 +798,7 @@ mod tests {
         let state = ClaudeSessionState {
             session_id: "live".into(),
             agent_type: Some("claude".into()),
-            pid: Some(std::process::id()),
+            pid: Some(std::process::id() as i64),
             last_updated: Some("2024-01-01T00:00:00Z".into()),
             ..ClaudeSessionState::default()
         };
@@ -1147,7 +1093,7 @@ mod tests {
 
         let alive = ClaudeSessionState {
             session_id: "alive-session".into(),
-            pid: Some(std::process::id()),
+            pid: Some(std::process::id() as i64),
             last_updated: Some(now.clone()),
             ..ClaudeSessionState::default()
         };

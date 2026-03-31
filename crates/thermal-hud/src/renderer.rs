@@ -399,7 +399,7 @@ impl Renderer {
                         parts.into_iter().rev().collect::<Vec<_>>().join("/")
                     })
                     .unwrap_or_default();
-                let ctx_pct = session.context_percent.unwrap_or(0.0);
+                let ctx_pct = session.context_percent.unwrap_or(0.0) as f32;
                 if !cwd_label.is_empty() {
                     let mut cwd_buf =
                         Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));

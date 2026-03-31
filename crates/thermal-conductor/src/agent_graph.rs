@@ -140,7 +140,7 @@ impl AgentGraph {
                 // Update existing node.
                 node.status = session.status.clone();
                 node.current_tool = session.current_tool.clone();
-                node.context_percent = session.context_percent.unwrap_or(0.0);
+                node.context_percent = session.context_percent.unwrap_or(0.0) as f32;
                 node.working_dir = session.working_dir.clone();
                 node.parent_session_id = session.parent_session_id.clone();
                 node.last_updated = now;
@@ -155,7 +155,7 @@ impl AgentGraph {
                     session_id: id.clone(),
                     status: session.status.clone(),
                     current_tool: session.current_tool.clone(),
-                    context_percent: session.context_percent.unwrap_or(0.0),
+                    context_percent: session.context_percent.unwrap_or(0.0) as f32,
                     working_dir: session.working_dir.clone(),
                     parent_session_id: session.parent_session_id.clone(),
                     pos: [cx + jitter_x, cy + jitter_y],
@@ -180,7 +180,7 @@ impl AgentGraph {
                                 to_session: id.clone(),
                                 timestamp: now,
                                 tool_name: tool.clone(),
-                                data_size: session.context_percent.unwrap_or(5.0).max(5.0),
+                                data_size: session.context_percent.unwrap_or(5.0).max(5.0) as f32,
                                 alpha: 1.0,
                             });
                         }

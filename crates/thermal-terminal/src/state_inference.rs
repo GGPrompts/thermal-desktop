@@ -103,8 +103,14 @@ impl InferredStatus {
 
 // ── State file format ───────────────────────────────────────────────────────
 
-/// JSON structure written to state files, matching what `ClaudeStatePoller`
-/// expects to read.
+/// JSON structure written to state files, matching the `SessionStateV1` schema
+/// defined in `thermal-core/schemas/thermal-protocol.ggl`.
+///
+/// Field names and types are aligned with the ggl-generated `SessionStateV1`
+/// struct so that the JSON written here deserializes correctly via
+/// `ClaudeStatePoller` (thermal-core). We keep a local struct rather than
+/// importing `thermal-core` to avoid pulling GPU/Wayland dependencies into
+/// this lightweight, Android-compatible crate.
 #[derive(Debug, Serialize)]
 struct StateFile {
     session_id: String,
@@ -115,15 +121,16 @@ struct StateFile {
     current_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     working_dir: Option<String>,
-    last_updated: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<u32>,
+    last_updated: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pid: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    context_percent: Option<f32>,
-    /// Mark this state file as inference-generated (not hook-based).
-    source: String,
+    context_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
 }
 
 // ── Pattern matchers (compiled once) ────────────────────────────────────────
@@ -502,11 +509,11 @@ impl AgentStateInference {
             status: self.last_status.status_str().to_string(),
             current_tool: self.last_status.tool_name().map(|s| s.to_string()),
             working_dir: self.config.working_dir.clone(),
-            last_updated: now_rfc3339(),
-            pid: Some(self.config.child_pid),
+            last_updated: Some(now_rfc3339()),
+            pid: Some(self.config.child_pid as i64),
             model: self.detected_model.clone(),
-            context_percent: self.context_percent,
-            source: "terminal_inference".to_string(),
+            context_percent: self.context_percent.map(|v| v as f64),
+            source: Some("terminal_inference".to_string()),
         };
 
         let file_path = state_dir.join(format!("{}.json", self.config.session_id));
@@ -937,11 +944,11 @@ mod tests {
             status: "tool_use".to_string(),
             current_tool: Some("Read".to_string()),
             working_dir: Some("/home/user/project".to_string()),
-            last_updated: "2026-03-30T12:00:00Z".to_string(),
+            last_updated: Some("2026-03-30T12:00:00Z".to_string()),
             pid: Some(12345),
             model: Some("claude-sonnet-4-20250514".to_string()),
             context_percent: Some(42.0),
-            source: "terminal_inference".to_string(),
+            source: Some("terminal_inference".to_string()),
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();
@@ -960,11 +967,11 @@ mod tests {
             status: "idle".to_string(),
             current_tool: None,
             working_dir: None,
-            last_updated: "2026-03-30T12:00:00Z".to_string(),
+            last_updated: Some("2026-03-30T12:00:00Z".to_string()),
             pid: Some(12345),
             model: None,
             context_percent: None,
-            source: "terminal_inference".to_string(),
+            source: Some("terminal_inference".to_string()),
         };
 
         let json = serde_json::to_string_pretty(&state).unwrap();

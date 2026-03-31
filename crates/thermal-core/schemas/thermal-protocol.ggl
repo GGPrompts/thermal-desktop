@@ -21,8 +21,16 @@ type TaskState {
     }
 }
 
--- ClaudeStatus is kept hand-written (needs #[serde(rename_all = "snake_case")]).
--- TODO: add per-type serde config to ggl codegen, then migrate ClaudeStatus here.
+-- ClaudeStatus: status of an agent session.
+-- Per-type override in build.rs adds #[serde(rename_all = "snake_case")].
+type ClaudeStatus {
+    @v1 enum {
+        Idle,
+        Processing,
+        ToolUse,
+        AwaitingInput,
+    }
+}
 
 -- ToolArgs: argument details from a tool invocation.
 type ToolArgs {
@@ -40,6 +48,30 @@ type ToolDetails {
         event: Option<String>,
         tool: Option<String>,
         args: Option<ToolArgs@v1>,
+    }
+}
+
+-- SessionState: unified agent session state, read from /tmp/*-state/ JSON files.
+-- Replaces the previous split between StateFile (writer) and ClaudeSessionState (reader).
+type SessionState {
+    @v1 {
+        session_id: String,
+        parent_session_id: Option<String>,
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+        model: Option<String>,
+        status: ClaudeStatus@v1,
+        current_tool: Option<String>,
+        subagent_count: Option<Int>,
+        context_percent: Option<Float>,
+        working_dir: Option<String>,
+        last_updated: Option<String>,
+        details: Option<ToolDetails@v1>,
+        hook_type: Option<String>,
+        tmux_pane: Option<String>,
+        pid: Option<Int>,
+        workspace: Option<Int>,
+        source: Option<String>,
     }
 }
 

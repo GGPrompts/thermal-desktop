@@ -6,6 +6,9 @@ Custom-built Wayland desktop components with a thermal/FLIR infrared aesthetic. 
 
 Cargo workspace with shared dependencies. All components use `thermal-core` for the color palette and shared rendering utilities.
 
+### Disambiguation
+- **thermal-terminal vs kitty**: thermal-terminal is our custom Rust crate (`crates/thermal-terminal/`) — PTY management, OSC 633 parsing, state inference engine. kitty is the external terminal emulator used as a backend. When asked to work on "terminal code", default to `crates/thermal-terminal/` unless kitty is explicitly named.
+
 ### Core Stack
 - **GPU rendering**: wgpu 23 + glyphon 0.7 + cosmic-text 0.12 (glyph atlas)
 - **Wayland**: smithay-client-toolkit 0.19 + winit 0.30

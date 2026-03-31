@@ -149,6 +149,10 @@ struct Patterns {
     agent_ident_codex: Regex,
     agent_ident_copilot: Regex,
     /// Model name extraction from output.
+    ///
+    /// NOTE: The canonical model family list lives in `thermal-core`'s
+    /// `MODEL_REGISTRY` (`claude_state.rs`). Keep this regex's alternations
+    /// in sync when adding new model families there.
     model_pattern: Regex,
 }
 
@@ -167,7 +171,7 @@ impl Patterns {
             agent_ident_codex: Regex::new(r"(?i)codex").unwrap(),
             agent_ident_copilot: Regex::new(r"(?i)copilot").unwrap(),
             model_pattern: Regex::new(
-                r"(?:model|using)[\s:]+([a-zA-Z0-9._-]+(?:opus|sonnet|haiku|gpt[0-9.-]+|o[134]-?[a-z]*)[a-zA-Z0-9._-]*)"
+                r"(?:model|using)[\s:]+([a-zA-Z0-9._-]+(?:opus|sonnet|haiku|gpt[0-9.-]+|o[134]-?[a-z]*|gemini[a-zA-Z0-9._-]*)[a-zA-Z0-9._-]*)"
             ).unwrap(),
         }
     }
@@ -214,6 +218,13 @@ pub struct AgentStateInference {
     state_file_path: Option<PathBuf>,
     /// Compiled regex patterns (shared across calls).
     patterns: Patterns,
+    /// Stateful ANSI escape sequence stripper (carries parse state across
+    /// `feed_bytes` calls so split sequences don't leak into visible text).
+    ansi_stripper: AnsiStripper,
+    /// Dirty flag — set when any exported field changes, cleared on write.
+    /// Persists across `infer_and_write()` calls so throttled writes are
+    /// retried instead of lost.
+    dirty: bool,
 }
 
 /// Maximum number of recent lines to keep in the ring buffer.
@@ -241,6 +252,8 @@ impl AgentStateInference {
             last_write: Instant::now() - MIN_WRITE_INTERVAL, // allow immediate first write
             state_file_path,
             patterns: Patterns::new(),
+            ansi_stripper: AnsiStripper::new(),
+            dirty: false,
         }
     }
 
@@ -255,8 +268,10 @@ impl AgentStateInference {
     /// updates the recent lines buffer. Call [`Self::update_command_state`]
     /// separately with the latest `CommandState` from the tracker.
     pub fn feed_bytes(&mut self, bytes: &[u8]) {
-        // Simple ANSI stripping: skip escape sequences to extract visible text.
-        let text = strip_ansi_visible(bytes);
+        // Stateful ANSI stripping: carries parse state across calls so that
+        // escape sequences split across PTY read boundaries are consumed
+        // correctly instead of leaking fragments into visible text.
+        let text = self.ansi_stripper.feed(bytes);
 
         for ch in text.chars() {
             if ch == '\n' || ch == '\r' {
@@ -353,12 +368,16 @@ impl AgentStateInference {
         // Apply detected values.
         if let Some(at) = new_agent_type {
             debug!(agent = at.as_str(), "Detected agent type from output");
+            trace!(field = "agent_type", value = at.as_str(), "state dirty");
             self.detected_agent_type = Some(at);
+            self.dirty = true;
             self.update_state_file_path();
         }
         if let Some(model) = new_model {
             debug!(model = %model, "Detected model from output");
+            trace!(field = "model", value = %model, "state dirty");
             self.detected_model = Some(model);
+            self.dirty = true;
         }
     }
 
@@ -372,22 +391,45 @@ impl AgentStateInference {
         }
     }
 
-    /// Run the inference pipeline and write state if it changed.
+    /// Run the inference pipeline and write state if anything changed.
+    ///
+    /// The `dirty` flag is set by any exported-field mutation (status, model,
+    /// agent_type, context_percent) and persists across calls. If a write is
+    /// throttled, the flag stays set so the next call retries instead of
+    /// silently dropping the update.
     fn infer_and_write(&mut self) {
         let new_status = self.infer_status();
 
-        // Detect context percentage from recent output.
+        // Detect context percentage from recent output (may set dirty).
         self.detect_context_percent();
 
-        let status_changed = new_status != self.last_status;
-        let throttle_ok = self.last_write.elapsed() >= MIN_WRITE_INTERVAL;
+        if new_status != self.last_status {
+            trace!(
+                old = %self.last_status.status_str(),
+                new = %new_status.status_str(),
+                field = "status",
+                "state dirty"
+            );
+            self.last_status = new_status;
+            self.dirty = true;
+        }
 
-        if status_changed && throttle_ok {
-            self.last_status = new_status;
+        if self.dirty && self.last_write.elapsed() >= MIN_WRITE_INTERVAL {
+            self.dirty = false;
+            let start = Instant::now();
             self.write_state_file();
-        } else if status_changed {
-            // Status changed but we're throttled — remember for next call.
-            self.last_status = new_status;
+            let elapsed = start.elapsed();
+            debug!(
+                elapsed_ms = elapsed.as_millis() as u64,
+                status = %self.last_status.status_str(),
+                "write_state_file"
+            );
+        } else if self.dirty {
+            debug!(
+                status = %self.last_status.status_str(),
+                throttle_remaining_ms = (MIN_WRITE_INTERVAL.saturating_sub(self.last_write.elapsed())).as_millis() as u64,
+                "state write throttled"
+            );
         }
     }
 
@@ -489,7 +531,11 @@ impl AgentStateInference {
                 if let Some(m) = caps.get(1) {
                     if let Ok(pct) = m.as_str().parse::<f32>() {
                         if (0.0..=100.0).contains(&pct) {
-                            self.context_percent = Some(pct);
+                            if self.context_percent != Some(pct) {
+                                trace!(field = "context_percent", value = pct, "state dirty");
+                                self.context_percent = Some(pct);
+                                self.dirty = true;
+                            }
                             return;
                         }
                     }
@@ -561,90 +607,186 @@ impl AgentStateInference {
 
 // ── ANSI stripping ──────────────────────────────────────────────────────────
 
-/// Strip ANSI escape sequences from bytes, returning visible text.
+/// Parser state for the ANSI escape sequence stripper.
 ///
-/// This is a simplified stripper that handles the common CSI (ESC [ ...) and
-/// OSC (ESC ] ...) sequences. It doesn't need to be perfect — we're doing
-/// regex matching on the extracted text, so occasional artifacts are fine.
-fn strip_ansi_visible(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
+/// Carried across `feed()` calls so that escape sequences split across PTY
+/// read boundaries are handled correctly instead of leaking fragments into
+/// the visible text buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripState {
+    /// Normal text — not inside any escape sequence.
+    Normal,
+    /// Saw ESC (0x1B), waiting for the next byte to determine sequence type.
+    Escape,
+    /// Inside a CSI sequence (ESC \[), consuming parameter/intermediate bytes
+    /// until a final byte in 0x40..=0x7E.
+    Csi,
+    /// Inside an OSC sequence (ESC \]), consuming until BEL (0x07) or ST (ESC \\).
+    Osc,
+    /// Inside an OSC sequence, just saw ESC — waiting for `\` to complete ST,
+    /// or any other byte which continues the OSC body.
+    OscEsc,
+    /// Inside an APC sequence (ESC \_), consuming until ST (ESC \\).
+    Apc,
+    /// Inside an APC sequence, just saw ESC — waiting for `\` to complete ST.
+    ApcEsc,
+    /// Saw ESC followed by a charset designator (one of `( ) * +`), waiting
+    /// for the charset byte (e.g. `B`, `0`).
+    Charset,
+}
 
-    while i < bytes.len() {
-        let b = bytes[i];
+/// Stateful ANSI escape sequence stripper.
+///
+/// Strips CSI, OSC, APC, and other common escape sequences from a byte
+/// stream, returning only the visible text. State is preserved across
+/// calls to [`AnsiStripper::feed`] so that sequences split across PTY
+/// read boundaries are consumed correctly.
+struct AnsiStripper {
+    state: StripState,
+}
 
-        if b == 0x1B {
-            // ESC
-            i += 1;
-            if i >= bytes.len() {
-                break;
-            }
-            match bytes[i] {
-                b'[' => {
-                    // CSI sequence: ESC [ ... (ends at 0x40-0x7E)
-                    i += 1;
-                    while i < bytes.len() && !(0x40..=0x7E).contains(&bytes[i]) {
-                        i += 1;
-                    }
-                    if i < bytes.len() {
-                        i += 1; // skip final byte
-                    }
-                }
-                b']' => {
-                    // OSC sequence: ESC ] ... (ends at BEL or ST)
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == 0x07 {
-                            i += 1;
-                            break;
-                        }
-                        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                b'(' | b')' | b'*' | b'+' => {
-                    // Character set designation: ESC ( X
-                    i += 1;
-                    if i < bytes.len() {
-                        i += 1;
-                    }
-                }
-                b'_' => {
-                    // APC sequence: ESC _ ... ST
-                    i += 1;
-                    while i < bytes.len() {
-                        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => {
-                    // Other ESC sequences (2-byte): skip one more byte.
-                    i += 1;
-                }
-            }
-        } else if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
-            // Skip non-printable control characters (except newline/cr/tab).
-            i += 1;
-        } else {
-            // Visible character or whitespace — handle UTF-8.
-            let remaining = &bytes[i..];
-            if let Some(ch) = decode_utf8_char(remaining) {
-                out.push(ch);
-                i += ch.len_utf8();
-            } else {
-                // Invalid UTF-8, skip byte.
-                i += 1;
-            }
+impl AnsiStripper {
+    fn new() -> Self {
+        Self {
+            state: StripState::Normal,
         }
     }
 
-    out
+    /// Feed a chunk of raw bytes and return the visible text extracted from it.
+    ///
+    /// Escape-sequence parsing state is carried across calls, so a sequence
+    /// that starts at the end of one chunk and finishes at the start of the
+    /// next is handled without leaking control characters into the output.
+    fn feed(&mut self, bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len());
+        let mut i = 0;
+
+        while i < bytes.len() {
+            let b = bytes[i];
+
+            match self.state {
+                StripState::Normal => {
+                    if b == 0x1B {
+                        self.state = StripState::Escape;
+                        i += 1;
+                    } else if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
+                        // Skip non-printable control characters.
+                        i += 1;
+                    } else {
+                        // Visible character or whitespace — handle UTF-8.
+                        let remaining = &bytes[i..];
+                        if let Some(ch) = decode_utf8_char(remaining) {
+                            out.push(ch);
+                            i += ch.len_utf8();
+                        } else {
+                            // Invalid UTF-8, skip byte.
+                            i += 1;
+                        }
+                    }
+                }
+
+                StripState::Escape => {
+                    // We saw ESC last; this byte determines the sequence type.
+                    match b {
+                        b'[' => {
+                            self.state = StripState::Csi;
+                            i += 1;
+                        }
+                        b']' => {
+                            self.state = StripState::Osc;
+                            i += 1;
+                        }
+                        b'(' | b')' | b'*' | b'+' => {
+                            self.state = StripState::Charset;
+                            i += 1;
+                        }
+                        b'_' => {
+                            self.state = StripState::Apc;
+                            i += 1;
+                        }
+                        _ => {
+                            // Other 2-byte ESC sequences: skip this byte and done.
+                            self.state = StripState::Normal;
+                            i += 1;
+                        }
+                    }
+                }
+
+                StripState::Csi => {
+                    // CSI sequence: consume until final byte 0x40..=0x7E.
+                    if (0x40..=0x7E).contains(&b) {
+                        self.state = StripState::Normal;
+                    }
+                    i += 1;
+                }
+
+                StripState::Osc => {
+                    if b == 0x07 {
+                        // BEL terminates OSC.
+                        self.state = StripState::Normal;
+                        i += 1;
+                    } else if b == 0x1B {
+                        // Possible ST (ESC \).
+                        self.state = StripState::OscEsc;
+                        i += 1;
+                    } else {
+                        // OSC body — skip.
+                        i += 1;
+                    }
+                }
+
+                StripState::OscEsc => {
+                    if b == b'\\' {
+                        // ST complete — OSC is done.
+                        self.state = StripState::Normal;
+                    } else {
+                        // Not ST — the ESC was part of the OSC body (rare).
+                        // Stay in OSC and reprocess this byte.
+                        self.state = StripState::Osc;
+                        continue; // reprocess without advancing i
+                    }
+                    i += 1;
+                }
+
+                StripState::Apc => {
+                    if b == 0x1B {
+                        self.state = StripState::ApcEsc;
+                    }
+                    i += 1;
+                }
+
+                StripState::ApcEsc => {
+                    if b == b'\\' {
+                        // ST complete — APC is done.
+                        self.state = StripState::Normal;
+                    } else {
+                        // Not ST — stay in APC.
+                        self.state = StripState::Apc;
+                        continue; // reprocess without advancing i
+                    }
+                    i += 1;
+                }
+
+                StripState::Charset => {
+                    // Charset designation: consume the one charset byte.
+                    self.state = StripState::Normal;
+                    i += 1;
+                }
+            }
+        }
+
+        out
+    }
+}
+
+/// Strip ANSI escape sequences from bytes, returning visible text.
+///
+/// Convenience wrapper that creates a one-shot [`AnsiStripper`]. For
+/// streaming use (where sequences may be split across chunks), prefer
+/// creating an `AnsiStripper` and calling [`AnsiStripper::feed`] repeatedly.
+#[cfg(test)]
+fn strip_ansi_visible(bytes: &[u8]) -> String {
+    AnsiStripper::new().feed(bytes)
 }
 
 /// Decode a single UTF-8 character from the start of a byte slice.
@@ -1053,6 +1195,101 @@ mod tests {
         );
     }
 
+    // ── Stateful ANSI stripper (split sequences) ─────────────────────────
+
+    #[test]
+    fn split_csi_across_chunks() {
+        // ESC at end of chunk 1, "[0m" at start of chunk 2 → no leaked text.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"hello\x1b");
+        let out2 = stripper.feed(b"[0mworld");
+        assert_eq!(format!("{out1}{out2}"), "helloworld");
+    }
+
+    #[test]
+    fn split_csi_esc_bracket_then_params() {
+        // ESC [ at end of chunk 1, "31m" at start of chunk 2.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"before\x1b[");
+        let out2 = stripper.feed(b"31mafter");
+        assert_eq!(format!("{out1}{out2}"), "beforeafter");
+    }
+
+    #[test]
+    fn split_osc_across_chunks() {
+        // ESC ] at end of chunk 1, OSC body + BEL at start of chunk 2.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"before\x1b]");
+        let out2 = stripper.feed(b"2;My Title\x07after");
+        assert_eq!(format!("{out1}{out2}"), "beforeafter");
+    }
+
+    #[test]
+    fn split_osc_st_across_chunks() {
+        // OSC body continues across chunks, terminated by ST (ESC \).
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"\x1b]633;some data");
+        let out2 = stripper.feed(b" more data\x1b\\visible");
+        assert_eq!(format!("{out1}{out2}"), "visible");
+    }
+
+    #[test]
+    fn split_osc_st_esc_at_boundary() {
+        // OSC body, then ESC at end of chunk, then \ at start of next.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"\x1b]2;title\x1b");
+        let out2 = stripper.feed(b"\\after");
+        assert_eq!(format!("{out1}{out2}"), "after");
+    }
+
+    #[test]
+    fn split_normal_text_across_chunks() {
+        // Normal text split across chunks — all text preserved.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"hello ");
+        let out2 = stripper.feed(b"world");
+        assert_eq!(format!("{out1}{out2}"), "hello world");
+    }
+
+    #[test]
+    fn split_apc_across_chunks() {
+        // APC sequence (ESC _) split across chunks.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"before\x1b_apc body");
+        let out2 = stripper.feed(b" continued\x1b\\after");
+        assert_eq!(format!("{out1}{out2}"), "beforeafter");
+    }
+
+    #[test]
+    fn split_charset_across_chunks() {
+        // Charset designation ESC ( at end of chunk, charset byte at start of next.
+        let mut stripper = AnsiStripper::new();
+        let out1 = stripper.feed(b"before\x1b(");
+        let out2 = stripper.feed(b"Bafter");
+        assert_eq!(format!("{out1}{out2}"), "beforeafter");
+    }
+
+    #[test]
+    fn feed_bytes_split_csi_no_leak() {
+        // Integration test: ESC at end of chunk 1, "[0m" at start of chunk 2
+        // should not leak "[0m" or partial escape chars into lines.
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.feed_bytes(b"clean text\x1b");
+        engine.feed_bytes(b"[0m more text\n");
+        assert_eq!(engine.recent_lines.len(), 1);
+        assert_eq!(engine.recent_lines[0], "clean text more text");
+    }
+
+    #[test]
+    fn feed_bytes_split_osc_no_leak() {
+        // Integration test: OSC split across feed_bytes calls.
+        let mut engine = make_engine(Some(AgentType::Claude));
+        engine.feed_bytes(b"before\x1b]2;title");
+        engine.feed_bytes(b"\x07after\n");
+        assert_eq!(engine.recent_lines.len(), 1);
+        assert_eq!(engine.recent_lines[0], "beforeafter");
+    }
+
     // ── Days to YMD ─────────────────────────────────────────────────────
 
     #[test]
@@ -1065,5 +1302,92 @@ mod tests {
         // 2026-03-30 = day 20542 from epoch
         // Let's verify a simpler one: 2000-01-01 = day 10957
         assert_eq!(days_to_ymd(10957), (2000, 1, 1));
+    }
+
+    // ── Dirty-flag write semantics ─────────────────────────────────────
+
+    #[test]
+    fn model_detection_triggers_write_without_status_change() {
+        // Model detection should set dirty, causing a state file write even
+        // when the inferred status hasn't changed.
+        let mut engine = make_engine(Some(AgentType::Claude));
+        assert!(!engine.dirty);
+
+        // Feed output containing a model identifier.
+        engine.feed_bytes(b"using: claude-sonnet-4-20250514\n");
+        assert_eq!(engine.detected_model.as_deref(), Some("claude-sonnet-4-20250514"));
+
+        // Status is still Idle (unchanged), but dirty should have been set
+        // and then cleared by the write inside feed_bytes.
+        assert!(!engine.dirty, "dirty should be cleared after write");
+        assert_eq!(engine.last_status, InferredStatus::Idle);
+    }
+
+    #[test]
+    fn context_percent_change_triggers_dirty() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+        assert!(!engine.dirty);
+
+        engine.push_line("42% context used".to_string());
+        engine.infer_and_write();
+        // First context_percent detection → dirty set and flushed.
+        assert_eq!(engine.context_percent, Some(42.0));
+        assert!(!engine.dirty);
+
+        // Same value again → no dirty.
+        engine.last_write = Instant::now() - MIN_WRITE_INTERVAL;
+        engine.push_line("42% context used".to_string());
+        engine.infer_and_write();
+        assert!(!engine.dirty);
+
+        // Different value → dirty set and flushed.
+        engine.last_write = Instant::now() - MIN_WRITE_INTERVAL;
+        engine.push_line("58% context remaining".to_string());
+        engine.infer_and_write();
+        assert_eq!(engine.context_percent, Some(58.0));
+        assert!(!engine.dirty);
+    }
+
+    #[test]
+    fn throttled_status_change_flushed_on_next_call() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+
+        // Perform an initial write to set last_write to now.
+        engine.dirty = true;
+        engine.write_state_file();
+        let initial_write_time = engine.last_write;
+
+        // Now simulate a status change while throttled (last_write is very recent).
+        engine.push_line("⠋ Processing...".to_string());
+        engine.infer_and_write();
+        // Status changed to Processing, dirty was set, but throttle blocked the write.
+        assert_eq!(engine.last_status, InferredStatus::Processing);
+        assert!(engine.dirty, "dirty flag should persist when throttled");
+        assert_eq!(engine.last_write, initial_write_time, "last_write unchanged — write was throttled");
+
+        // Fast-forward past the throttle window.
+        engine.last_write = Instant::now() - MIN_WRITE_INTERVAL - Duration::from_millis(1);
+
+        // Next infer_and_write call should flush the pending dirty state.
+        engine.infer_and_write();
+        assert!(!engine.dirty, "dirty should be cleared after deferred flush");
+        assert!(engine.last_write > initial_write_time, "last_write should be updated after flush");
+    }
+
+    #[test]
+    fn no_changes_no_write() {
+        let mut engine = make_engine(Some(AgentType::Claude));
+
+        // Record last_write after construction.
+        let initial_write_time = engine.last_write;
+
+        // Feed innocuous output that doesn't change any exported fields.
+        engine.feed_bytes(b"some random text\n");
+
+        // Status stays Idle (the default), no model/agent/context detected.
+        assert_eq!(engine.last_status, InferredStatus::Idle);
+        assert!(!engine.dirty);
+        // last_write should not have advanced (no write happened).
+        assert_eq!(engine.last_write, initial_write_time);
     }
 }

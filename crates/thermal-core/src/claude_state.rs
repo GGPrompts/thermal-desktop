@@ -46,15 +46,8 @@ pub type ClaudeSessionState = crate::ggl_types::SessionState;
 impl ClaudeSessionState {
     /// Return a short, human-friendly display name derived from the `model` field.
     ///
-    /// Mapping rules (checked in order via substring match):
-    /// - Claude family: "opus" / "sonnet" / "haiku"
-    /// - GPT family: strips "gpt-" prefix and dashes (e.g. "gpt-5.4-mini" → "gpt5.4mini")
-    /// - Gemini family: strips "gemini-" prefix and trailing preview tags
-    ///   (e.g. "gemini-3-pro-preview" → "gemini3pro")
-    /// - o-series (OpenAI reasoning): keeps as-is but strips leading "o" prefix
-    ///   handling (e.g. "o3-pro" → "o3pro", "o4-mini" → "o4mini")
-    /// - Unknown models: returned trimmed as-is
-    /// - `None` model: falls back to `agent_type`, or "unknown"
+    /// Delegates to the free function [`model_display_name`] for the actual
+    /// mapping. Falls back to `agent_type` when no model is set.
     pub fn model_display_name(&self) -> String {
         let Some(raw) = self.model.as_deref() else {
             // No model field — fall back to agent_type
@@ -74,41 +67,144 @@ impl ClaudeSessionState {
                 .to_string();
         }
 
-        // --- Claude family (substring match handles version suffixes) ---
-        if m.contains("opus") {
-            return "opus".to_string();
-        }
-        if m.contains("sonnet") {
-            return "sonnet".to_string();
-        }
-        if m.contains("haiku") {
-            return "haiku".to_string();
-        }
-
-        // --- OpenAI o-series reasoning models (o3, o3-pro, o4-mini, etc.) ---
-        // Must come before GPT to avoid false matches.
-        if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") {
-            return m.replace('-', "");
-        }
-
-        // --- GPT family ---
-        if m.starts_with("gpt-") || m.starts_with("gpt4") || m.starts_with("gpt5") {
-            // Strip "gpt-" prefix, then remove dashes
-            let stripped = m.strip_prefix("gpt-").unwrap_or(m);
-            return format!("gpt{}", stripped.replace('-', ""));
-        }
-
-        // --- Gemini family ---
-        if m.starts_with("gemini") {
-            let stripped = m.strip_prefix("gemini-").unwrap_or(m);
-            // Remove "-preview" suffix and dashes
-            let clean = stripped.replace("-preview", "").replace('-', "");
-            return format!("gemini{}", clean);
-        }
-
-        // --- Unknown: return trimmed raw string ---
-        m.to_string()
+        model_display_name(m)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declarative model registry
+// ---------------------------------------------------------------------------
+
+/// How a model family maps raw model IDs to short display names.
+#[derive(Debug, Clone, Copy)]
+enum ModelTransform {
+    /// Substring match → fixed display name (e.g. "opus" in ID → "opus").
+    Substring,
+    /// Prefix match → strip prefix, remove dashes, prepend family prefix.
+    /// For GPT: "gpt-5.4-mini" → strip "gpt-" → "5.4mini" → prepend "gpt" → "gpt5.4mini".
+    /// Also matches bare prefix without dash (e.g. "gpt4o").
+    StripPrefix,
+    /// Prefix match → strip prefix, remove "-preview" and dashes, prepend family prefix.
+    /// For Gemini: "gemini-3-pro-preview" → strip "gemini-" → "3pro" → prepend "gemini" → "gemini3pro".
+    StripPrefixAndPreview,
+    /// Prefix match → remove all dashes.
+    /// For o-series: "o3-pro" → "o3pro".
+    RemoveDashes,
+}
+
+/// A single entry in the model registry.
+#[derive(Debug, Clone, Copy)]
+struct ModelEntry {
+    /// Pattern to match in the (trimmed, original-case) model ID.
+    /// For `Substring`: checked via `contains()`.
+    /// For `StripPrefix`/`StripPrefixAndPreview`: checked via `starts_with()` on
+    ///   `"{pattern}-"` or `"{pattern}"` (bare, for IDs like "gpt4o").
+    /// For `RemoveDashes`: checked via `starts_with()`.
+    pattern: &'static str,
+    /// The family prefix used in the output (e.g. "gpt", "gemini").
+    /// Only relevant for `StripPrefix` and `StripPrefixAndPreview`.
+    display_prefix: &'static str,
+    /// How to transform matched model IDs.
+    transform: ModelTransform,
+}
+
+/// Canonical model registry. Checked in order — first match wins.
+///
+/// To add a new model family: append an entry here. The `model_display_name()`
+/// function and `state_inference.rs`'s model regex
+/// (`crates/thermal-terminal/src/state_inference.rs`) should both stay in sync.
+const MODEL_REGISTRY: &[ModelEntry] = &[
+    // --- Anthropic Claude (substring match, order doesn't matter) ---
+    ModelEntry { pattern: "opus",   display_prefix: "opus",   transform: ModelTransform::Substring },
+    ModelEntry { pattern: "sonnet", display_prefix: "sonnet", transform: ModelTransform::Substring },
+    ModelEntry { pattern: "haiku",  display_prefix: "haiku",  transform: ModelTransform::Substring },
+    // --- OpenAI o-series reasoning (must come before GPT to avoid false prefix match) ---
+    ModelEntry { pattern: "o1", display_prefix: "", transform: ModelTransform::RemoveDashes },
+    ModelEntry { pattern: "o3", display_prefix: "", transform: ModelTransform::RemoveDashes },
+    ModelEntry { pattern: "o4", display_prefix: "", transform: ModelTransform::RemoveDashes },
+    // --- OpenAI GPT ---
+    ModelEntry { pattern: "gpt", display_prefix: "gpt", transform: ModelTransform::StripPrefix },
+    // --- Google Gemini ---
+    ModelEntry { pattern: "gemini", display_prefix: "gemini", transform: ModelTransform::StripPrefixAndPreview },
+];
+
+/// Map a raw model ID string to a short, human-friendly display name.
+///
+/// This is the canonical mapping used across the thermal ecosystem.
+/// See [`MODEL_REGISTRY`] for the full list of recognized model families.
+///
+/// Mapping rules (checked in order):
+/// - Claude family: substring match → "opus" / "sonnet" / "haiku"
+/// - o-series: prefix match → remove dashes (e.g. "o3-pro" → "o3pro")
+/// - GPT family: prefix match → strip "gpt-" prefix and dashes (e.g. "gpt-5.4-mini" → "gpt5.4mini")
+/// - Gemini family: prefix match → strip "gemini-" prefix, "-preview" suffix, dashes
+///   (e.g. "gemini-3-pro-preview" → "gemini3pro")
+/// - Unknown: returned as-is
+pub fn model_display_name(model_id: &str) -> String {
+    let m = model_id.trim();
+    if m.is_empty() {
+        return "unknown".to_string();
+    }
+
+    for entry in MODEL_REGISTRY {
+        match entry.transform {
+            ModelTransform::Substring => {
+                if m.contains(entry.pattern) {
+                    return entry.display_prefix.to_string();
+                }
+            }
+            ModelTransform::RemoveDashes => {
+                if m.starts_with(entry.pattern) {
+                    return m.replace('-', "");
+                }
+            }
+            ModelTransform::StripPrefix => {
+                // Match "gpt-..." or bare "gpt4o" / "gpt5..."
+                let prefix_dash = format!("{}-", entry.pattern);
+                if m.starts_with(&prefix_dash) || m.starts_with(entry.pattern) {
+                    let stripped = m.strip_prefix(&prefix_dash).unwrap_or(m);
+                    return format!("{}{}", entry.display_prefix, stripped.replace('-', ""));
+                }
+            }
+            ModelTransform::StripPrefixAndPreview => {
+                if m.starts_with(entry.pattern) {
+                    let prefix_dash = format!("{}-", entry.pattern);
+                    let stripped = m.strip_prefix(&prefix_dash).unwrap_or(m);
+                    let clean = stripped.replace("-preview", "").replace('-', "");
+                    return format!("{}{}", entry.display_prefix, clean);
+                }
+            }
+        }
+    }
+
+    // Unknown model — return trimmed as-is
+    m.to_string()
+}
+
+/// Returns `true` if the given model name matches any known family in the
+/// [`MODEL_REGISTRY`].
+///
+/// Useful for validating model strings detected from terminal output.
+pub fn is_known_model(model_id: &str) -> bool {
+    let m = model_id.trim();
+    if m.is_empty() {
+        return false;
+    }
+    for entry in MODEL_REGISTRY {
+        let matched = match entry.transform {
+            ModelTransform::Substring => m.contains(entry.pattern),
+            ModelTransform::RemoveDashes => m.starts_with(entry.pattern),
+            ModelTransform::StripPrefix => {
+                let prefix_dash = format!("{}-", entry.pattern);
+                m.starts_with(&prefix_dash) || m.starts_with(entry.pattern)
+            }
+            ModelTransform::StripPrefixAndPreview => m.starts_with(entry.pattern),
+        };
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -329,8 +425,10 @@ impl ClaudeStatePoller {
     pub fn poll(&mut self) -> Vec<ClaudeSessionState> {
         let mut dirty_paths: Vec<PathBuf> = Vec::new();
         let mut removed_paths: Vec<PathBuf> = Vec::new();
+        let mut event_count: usize = 0;
 
         while let Ok(result) = self.rx.try_recv() {
+            event_count += 1;
             match result {
                 Ok(event) => match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) => {
@@ -353,6 +451,15 @@ impl ClaudeStatePoller {
                     warn!(error = %e, "file watcher error");
                 }
             }
+        }
+
+        if event_count > 0 {
+            debug!(
+                events = event_count,
+                dirty = dirty_paths.len(),
+                removed = removed_paths.len(),
+                "poll drain batch"
+            );
         }
 
         // Remove deleted sessions.
@@ -407,6 +514,7 @@ impl ClaudeStatePoller {
     /// Parse a single JSON state file, setting `agent_type` based on the
     /// parent directory if not already set in the JSON.
     fn read_file(path: &Path) -> Option<ClaudeSessionState> {
+        let start = std::time::Instant::now();
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(e) => {
@@ -421,6 +529,7 @@ impl ClaudeStatePoller {
                 return None;
             }
         };
+        let parse_elapsed = start.elapsed();
         // Set agent_type from directory if not already specified in JSON.
         if state.agent_type.is_none() {
             state.agent_type = agent_type_for_path(path);
@@ -428,7 +537,13 @@ impl ClaudeStatePoller {
         if session_is_dead(&state) {
             return None;
         }
-        trace!(session_id = %state.session_id, status = ?state.status, "loaded session state");
+        trace!(
+            session_id = %state.session_id,
+            status = ?state.status,
+            parse_us = parse_elapsed.as_micros() as u64,
+            path = %path.display(),
+            "read state file"
+        );
         Some(state)
     }
 

@@ -855,7 +855,7 @@ async fn dispatch_planner(msg: &Message) -> Result<Message> {
         .arg(&msg.content)
         .arg("--output-format")
         .arg("json")
-        .arg("--system")
+        .arg("--system-prompt")
         .arg(concat!(
             "You are a planning agent. Break down tasks, create structured plans, ",
             "and coordinate work across agents. Be concise and actionable."

@@ -501,14 +501,17 @@ fn socket_path() -> PathBuf {
 
 const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
 
-/// Returns true if thermal-voice is actively listening or processing (PTT/VAD),
-/// so we can suppress TTS announcements that would interfere with recording.
+/// Returns true if thermal-voice is actively listening, processing, or monitoring
+/// (PTT/VAD), so we can suppress TTS announcements that would interfere with
+/// recording or be picked up by the microphone.
 fn is_voice_active() -> bool {
     let Ok(data) = std::fs::read_to_string(VOICE_STATE_PATH) else {
         return false;
     };
     // Quick check without full deserialization
-    data.contains("\"listening\"") || data.contains("\"processing\"")
+    data.contains("\"listening\"")
+        || data.contains("\"processing\"")
+        || data.contains("\"monitoring\"")
 }
 
 // ---------------------------------------------------------------------------

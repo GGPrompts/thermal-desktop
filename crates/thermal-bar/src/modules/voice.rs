@@ -148,7 +148,7 @@ impl VoiceModule {
 
         let (icon, label, color) = match state.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "listening", ThermalPalette::WARM),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::WARM),
             VoiceState::Listening => (MIC_LISTENING, "recording", ThermalPalette::ACCENT_WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::HOT),
         };
@@ -249,7 +249,7 @@ mod tests {
     fn render_from_state(state_file: VoiceStateFile) -> ModuleOutput {
         let (icon, label, color) = match state_file.state {
             VoiceState::Muted => (MIC_MUTED, "muted", ThermalPalette::ACCENT_COLD),
-            VoiceState::Monitoring => (MIC_MONITORING, "listening", ThermalPalette::WARM),
+            VoiceState::Monitoring => (MIC_MONITORING, "monitoring", ThermalPalette::WARM),
             VoiceState::Listening => (MIC_LISTENING, "recording", ThermalPalette::ACCENT_WARM),
             VoiceState::Processing => (MIC_PROCESSING, "processing", ThermalPalette::HOT),
         };
@@ -330,14 +330,14 @@ mod tests {
     }
 
     #[test]
-    fn monitoring_output_contains_listening_label() {
+    fn monitoring_output_contains_monitoring_label() {
         let f = VoiceStateFile {
             state: VoiceState::Monitoring,
             label: None,
             level: None,
         };
         let m = render_from_state(f);
-        assert!(m.text.contains("listening"), "text='{}'", m.text);
+        assert!(m.text.contains("monitoring"), "text='{}'", m.text);
     }
 
     #[test]
@@ -435,8 +435,8 @@ mod tests {
         };
         let m = render_from_state(f);
         // Should contain block chars between icon and label
-        assert!(m.text.contains("listening"));
-        assert!(m.text.len() > "🔎 listening".len());
+        assert!(m.text.contains("monitoring"));
+        assert!(m.text.len() > "🔎 monitoring".len());
     }
 
     #[test]

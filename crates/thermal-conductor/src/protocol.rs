@@ -101,10 +101,12 @@ pub enum Response {
         /// Row-major flat list of cells, length = cols * rows.
         cells: Vec<CellData>,
         cursor: CursorData,
-        /// Current terminal mode bitflags (`alacritty_terminal::term::TermMode`).
-        mode: u32,
         /// Current window title.
         title: String,
+        /// Current terminal mode bitflags (`alacritty_terminal::term::TermMode`).
+        /// Absent in messages from older daemons — defaults to zero.
+        #[serde(default)]
+        mode: u32,
     },
 
     /// Incremental screen update (streamed to attached clients).
@@ -115,6 +117,8 @@ pub enum Response {
         dirty_cells: Vec<DirtyCellData>,
         cursor: CursorData,
         /// Current terminal mode bitflags (`alacritty_terminal::term::TermMode`).
+        /// Absent in messages from older daemons — defaults to zero.
+        #[serde(default)]
         mode: u32,
     },
 
@@ -1048,6 +1052,104 @@ mod tests {
         match decoded {
             Request::SpawnSession { name, .. } => {
                 assert!(name.is_none());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn session_state_deserializes_without_mode_field() {
+        #[allow(dead_code)]
+        #[derive(Serialize)]
+        enum OldResponse {
+            SessionSpawned,
+            SessionList,
+            SessionState {
+                id: String,
+                cols: u16,
+                rows: u16,
+                cells: Vec<CellData>,
+                cursor: CursorData,
+                title: String,
+            },
+        }
+
+        let old = OldResponse::SessionState {
+            id: "old-ss".into(),
+            cols: 80,
+            rows: 24,
+            cells: vec![CellData {
+                ch: 'A',
+                fg: ColorData { r: 1, g: 2, b: 3 },
+                bg: ColorData { r: 4, g: 5, b: 6 },
+                flags: 0,
+            }],
+            cursor: CursorData {
+                col: 0,
+                row: 0,
+                visible: true,
+            },
+            title: "term".into(),
+        };
+
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Response::SessionState { id, mode, .. } => {
+                assert_eq!(id, "old-ss");
+                assert_eq!(mode, 0);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn screen_update_deserializes_without_mode_field() {
+        #[allow(dead_code)]
+        #[derive(Serialize)]
+        enum OldResponse {
+            SessionSpawned,
+            SessionList,
+            SessionState,
+            ScreenUpdate {
+                id: String,
+                seq: u64,
+                dirty_cells: Vec<DirtyCellData>,
+                cursor: CursorData,
+            },
+        }
+
+        let old = OldResponse::ScreenUpdate {
+            id: "old-su".into(),
+            seq: 7,
+            dirty_cells: vec![DirtyCellData {
+                col: 1,
+                row: 2,
+                cell: CellData {
+                    ch: 'Z',
+                    fg: ColorData { r: 7, g: 8, b: 9 },
+                    bg: ColorData {
+                        r: 10,
+                        g: 11,
+                        b: 12,
+                    },
+                    flags: 1,
+                },
+            }],
+            cursor: CursorData {
+                col: 1,
+                row: 2,
+                visible: false,
+            },
+        };
+
+        let bytes = rmp_serde::to_vec(&old).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        match decoded {
+            Response::ScreenUpdate { id, seq, mode, .. } => {
+                assert_eq!(id, "old-su");
+                assert_eq!(seq, 7);
+                assert_eq!(mode, 0);
             }
             other => panic!("unexpected: {:?}", other),
         }

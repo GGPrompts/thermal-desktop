@@ -5,8 +5,8 @@
 //! - **Edit**: Create, modify, clone, delete profiles (with icon picker)
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ratatui::{
     Frame,
@@ -830,13 +830,14 @@ impl TuiPage for ProfilesPage {
             .enumerate()
             .map(|(i, p)| {
                 let icon = p.icon.as_deref().unwrap_or(" ");
-                let dirty_mark =
-                    if self.mode == Mode::Edit && self.dirty && self.list_state.selected() == Some(i)
-                    {
-                        "*"
-                    } else {
-                        ""
-                    };
+                let dirty_mark = if self.mode == Mode::Edit
+                    && self.dirty
+                    && self.list_state.selected() == Some(i)
+                {
+                    "*"
+                } else {
+                    ""
+                };
                 let text = format!("{} {}{}", icon, p.name, dirty_mark);
                 ListItem::new(text)
             })
@@ -986,7 +987,6 @@ impl TuiPage for ProfilesPage {
             ),
         }
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,7 +1008,7 @@ impl ProfilesPage {
                 Constraint::Length(1), // spacer
                 Constraint::Length(1), // hint
                 Constraint::Length(2), // status
-                Constraint::Min(0),   // rest
+                Constraint::Min(0),    // rest
             ])
             .split(area);
 
@@ -1132,7 +1132,7 @@ impl ProfilesPage {
                 Constraint::Length(1), // spacer
                 Constraint::Length(2), // hints
                 Constraint::Length(2), // status
-                Constraint::Min(0),   // rest
+                Constraint::Min(0),    // rest
             ])
             .split(area);
 
@@ -1701,10 +1701,7 @@ cwd = "~/code"
         assert_eq!(Focus::CwdField.prev(Mode::Launch), Focus::ProfileList);
         assert_eq!(Focus::CommandField.prev(Mode::Launch), Focus::CwdField);
         assert_eq!(Focus::CountField.prev(Mode::Launch), Focus::CommandField);
-        assert_eq!(
-            Focus::WorktreeToggle.prev(Mode::Launch),
-            Focus::CountField
-        );
+        assert_eq!(Focus::WorktreeToggle.prev(Mode::Launch), Focus::CountField);
     }
 
     #[test]
@@ -1811,8 +1808,10 @@ cwd = "~/code"
             icon_picker_index: 0,
             dirty: false,
             spawning: Arc::new(AtomicBool::new(false)),
+            last_spawn_time: std::time::Instant::now() - std::time::Duration::from_secs(10),
             launch_cwd: launch_cwd.to_string(),
             backend_pref: BackendPreference::Auto,
+            spawn_result: Arc::new(Mutex::new(None)),
             status_msg: None,
         }
     }

@@ -19,15 +19,16 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::kitty::{
-    SidecarEntry, next_unique_name, sidecar_locked_update, sidecar_remove as sidecar_remove_entry, now_epoch,
+    SidecarEntry, next_unique_name, now_epoch, sidecar_locked_update,
+    sidecar_remove as sidecar_remove_entry,
 };
-use thermal_terminal::state_inference::{AgentType, InferenceConfig};
 use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
     self, CellData, ColorData, CursorData, DirtyCellData, Request, Response, SessionInfo,
 };
 use crate::pty::PtySession;
 use crate::terminal::Terminal;
+use thermal_terminal::state_inference::{AgentType, InferenceConfig};
 
 // ── Session ──────────────────────────────────────────────────────────────────
 
@@ -137,7 +138,10 @@ impl Daemon {
 
         // Attach per-session JSONL event log for structured diagnostics.
         {
-            match thermal_terminal::EventLog::for_session(&id, thermal_terminal::event_log::DEFAULT_MAX_ENTRIES) {
+            match thermal_terminal::EventLog::for_session(
+                &id,
+                thermal_terminal::event_log::DEFAULT_MAX_ENTRIES,
+            ) {
                 Ok(mut event_log) => {
                     event_log.log(&thermal_terminal::SessionEvent::Spawn {
                         command: shell_path.clone(),
@@ -188,10 +192,8 @@ impl Daemon {
                 _ => generate_name_from_shell(&shell_path, id_num),
             };
             let sessions = self.sessions.lock();
-            let existing_names: Vec<String> = sessions
-                .values()
-                .map(|s| s.lock().name.clone())
-                .collect();
+            let existing_names: Vec<String> =
+                sessions.values().map(|s| s.lock().name.clone()).collect();
             assign_unique_name(&base, &existing_names)
         };
 
@@ -272,6 +274,7 @@ impl Daemon {
                 };
                 // Keep the OwnedFd alive for the duration of the task.
                 let _wakeup_owner = wakeup_read;
+                let mut last_mode: Option<u32> = None;
 
                 loop {
                     // Wait a bit before checking dirty flag.
@@ -285,6 +288,40 @@ impl Daemon {
                         let mut buf = [0u8; 64];
                         let _ = f.read(&mut buf);
                         std::mem::forget(f);
+                    }
+
+                    // A clean PTY exit does not necessarily produce one last
+                    // damaged frame, so check for child exit before bailing
+                    // out on an idle dirty flag.
+                    {
+                        let session = session_ref.lock();
+                        if session.pty.has_exited() {
+                            let exit_reason = session.pty.exit_reason();
+                            let (exit_code, reason_str) = match &exit_reason {
+                                Some(thermal_terminal::ExitReason::PtyEof { exit_code }) => {
+                                    (*exit_code, exit_reason.as_ref().unwrap().to_string())
+                                }
+                                Some(thermal_terminal::ExitReason::Signal(sig)) => {
+                                    (None, format!("killed by signal {sig}"))
+                                }
+                                Some(reason) => (None, reason.to_string()),
+                                None => (None, String::new()),
+                            };
+                            if let Some(si) = session.terminal.state_inference() {
+                                let mut guard = si.lock();
+                                if let Some(log) = guard.event_log_mut() {
+                                    log.log(&thermal_terminal::SessionEvent::PtyEof {
+                                        reason: reason_str.clone(),
+                                    });
+                                }
+                            }
+                            let _ = update_tx.send(Response::SessionExited {
+                                id: session_id.clone(),
+                                exit_code,
+                                reason: reason_str,
+                            });
+                            break;
+                        }
                     }
 
                     if !pty_dirty_ref.swap(false, Ordering::AcqRel) {
@@ -310,6 +347,7 @@ impl Daemon {
                     let dirty_cells: Vec<DirtyCellData>;
                     let full_redraw;
                     let cursor: CursorData;
+                    let mode: u32;
 
                     match term.damage() {
                         TermDamage::Full => {
@@ -324,6 +362,7 @@ impl Daemon {
                                 visible: content.cursor.shape
                                     != alacritty_terminal::vte::ansi::CursorShape::Hidden,
                             };
+                            mode = content.mode.bits();
                         }
                         TermDamage::Partial(iter) => {
                             full_redraw = false;
@@ -331,9 +370,35 @@ impl Daemon {
                                 iter.filter(|b| b.is_damaged()).map(|b| b.line).collect();
 
                             if damaged_rows.is_empty() {
+                                let content = term.renderable_content();
+                                let current_mode = content.mode.bits();
+                                if last_mode == Some(current_mode) {
+                                    term.reset_damage();
+                                    drop(term);
+                                    drop(session);
+                                    continue;
+                                }
+
+                                cursor = CursorData {
+                                    col: content.cursor.point.column.0 as u16,
+                                    row: content.cursor.point.line.0.max(0) as u16,
+                                    visible: content.cursor.shape
+                                        != alacritty_terminal::vte::ansi::CursorShape::Hidden,
+                                };
+                                mode = current_mode;
+                                dirty_cells = Vec::new();
                                 term.reset_damage();
                                 drop(term);
                                 drop(session);
+                                let s = seq_ref.fetch_add(1, Ordering::Relaxed);
+                                let _ = update_tx.send(Response::ScreenUpdate {
+                                    id: session_id.clone(),
+                                    seq: s,
+                                    dirty_cells,
+                                    cursor,
+                                    mode,
+                                });
+                                last_mode = Some(mode);
                                 continue;
                             }
 
@@ -347,6 +412,7 @@ impl Daemon {
                                 visible: content.cursor.shape
                                     != alacritty_terminal::vte::ansi::CursorShape::Hidden,
                             };
+                            mode = content.mode.bits();
                             dirty_cells = content
                                 .display_iter
                                 .filter_map(|indexed| {
@@ -388,8 +454,10 @@ impl Daemon {
                             rows: screen_lines as u16,
                             cells,
                             cursor,
+                            mode,
                             title,
                         });
+                        last_mode = Some(mode);
                     } else {
                         let s = seq_ref.fetch_add(1, Ordering::Relaxed);
                         let _ = update_tx.send(Response::ScreenUpdate {
@@ -397,40 +465,9 @@ impl Daemon {
                             seq: s,
                             dirty_cells,
                             cursor,
+                            mode,
                         });
-                    }
-
-                    // Check if the PTY child exited.
-                    {
-                        let session = session_ref.lock();
-                        if session.pty.has_exited() {
-                            let exit_reason = session.pty.exit_reason();
-                            let (exit_code, reason_str) = match &exit_reason {
-                                Some(thermal_terminal::ExitReason::PtyEof { exit_code }) => {
-                                    (*exit_code, exit_reason.as_ref().unwrap().to_string())
-                                }
-                                Some(thermal_terminal::ExitReason::Signal(sig)) => {
-                                    (None, format!("killed by signal {sig}"))
-                                }
-                                Some(reason) => (None, reason.to_string()),
-                                None => (None, String::new()),
-                            };
-                            // Log PtyEof to the session event log.
-                            if let Some(si) = session.terminal.state_inference() {
-                                let mut guard = si.lock();
-                                if let Some(log) = guard.event_log_mut() {
-                                    log.log(&thermal_terminal::SessionEvent::PtyEof {
-                                        reason: reason_str.clone(),
-                                    });
-                                }
-                            }
-                            let _ = update_tx.send(Response::SessionExited {
-                                id: session_id.clone(),
-                                exit_code,
-                                reason: reason_str,
-                            });
-                            break;
-                        }
+                        last_mode = Some(mode);
                     }
                 }
 
@@ -589,6 +626,7 @@ impl Daemon {
             row: content.cursor.point.line.0.max(0) as u16,
             visible: content.cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden,
         };
+        let mode = content.mode.bits();
         drop(term);
 
         let cells = snapshot_cells(&session.terminal, screen_lines, cols);
@@ -600,6 +638,7 @@ impl Daemon {
             rows: screen_lines as u16,
             cells,
             cursor,
+            mode,
             title,
         })
     }
@@ -1061,7 +1100,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
             }
         };
 
-        // Handle attach specially — subscribe to the session's broadcast.
+        // Handle attach specially so the explicit SessionState snapshot is
+        // always delivered before streamed broadcasts.
         if let Request::Attach { ref id, .. } = request {
             // If already attached to a session, detach from it first.
             if let Some(ref prev_id) = attached_session {
@@ -1077,31 +1117,53 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
                 }
             }
 
-            // Subscribe to the session's broadcast channel. Only one
-            // subscription is created and moved into the forwarder task.
-            if let Some(mut rx) = daemon.subscribe(id) {
-                attached_session = Some(id.clone());
+            let response = daemon.handle_request(&request);
+            let attach_ok = !matches!(response, Response::Error { .. });
+            if client_tx.send(response).await.is_err() {
+                break;
+            }
 
-                // Spawn a task to forward broadcasts to the client channel.
-                let client_tx_clone = client_tx.clone();
-                forwarder_handle = Some(tokio::spawn(async move {
-                    loop {
-                        match rx.recv().await {
-                            Ok(response) => {
-                                if client_tx_clone.send(response).await.is_err() {
+            if attach_ok {
+                if let Some(mut rx) = daemon.subscribe(id) {
+                    attached_session = Some(id.clone());
+
+                    // Spawn a task to forward broadcasts to the client
+                    // channel. If the receiver lags, fall back to a full
+                    // snapshot so the client can resynchronize.
+                    let client_tx_clone = client_tx.clone();
+                    let daemon_clone = Arc::clone(&daemon);
+                    let session_id = id.clone();
+                    forwarder_handle = Some(tokio::spawn(async move {
+                        loop {
+                            match rx.recv().await {
+                                Ok(response) => {
+                                    if client_tx_clone.send(response).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    warn!(session = %session_id, skipped = n, "Client lagged; sending full session snapshot");
+                                    match daemon_clone.get_session_state(&session_id) {
+                                        Some(state) => {
+                                            if client_tx_clone.send(state).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                        None => break,
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Closed) => {
                                     break;
                                 }
                             }
-                            Err(broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Client lagged, skipped {n} updates");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
                         }
-                    }
-                }));
+                    }));
+                } else {
+                    warn!(session = %id, "Attach succeeded but broadcast subscription failed");
+                }
             }
+
+            continue;
         }
 
         // Handle detach — clean up forwarder and attached count.
@@ -1386,11 +1448,7 @@ mod tests {
     }
 
     /// Helper: spin up a daemon on a temp socket, return (shutdown_tx, sock_path, _dir).
-    async fn setup_daemon() -> (
-        tokio::sync::mpsc::Sender<()>,
-        PathBuf,
-        tempfile::TempDir,
-    ) {
+    async fn setup_daemon() -> (tokio::sync::mpsc::Sender<()>, PathBuf, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let sock_path = dir.path().join("test.sock");
         let listener = UnixListener::bind(&sock_path).expect("Failed to bind test socket");
@@ -1440,6 +1498,54 @@ mod tests {
             other => panic!("Expected SessionState, got: {other:?}"),
         }
 
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Regression test for the attach handshake ordering: even if another
+    /// client starts producing output while attach is in flight, the first
+    /// response to the attaching client must still be the authoritative
+    /// SessionState snapshot.
+    #[tokio::test]
+    async fn attach_returns_snapshot_before_streamed_updates() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut attaching_client = connect_client(&sock_path).await;
+        let output_client = connect_client(&sock_path).await;
+
+        let session_id = attaching_client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        let send_tx = output_client.request_tx_clone();
+        let output_session = session_id.clone();
+        let flood = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            for _ in 0..8 {
+                let _ = send_tx
+                    .send(Request::SendInput {
+                        id: output_session.clone(),
+                        data: b"yes race | head -n 64\n".to_vec(),
+                    })
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+
+        let resp = attaching_client
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("attach failed");
+
+        match resp {
+            Response::SessionState { id, cols, rows, .. } => {
+                assert_eq!(id, session_id);
+                assert_eq!(cols, 80);
+                assert_eq!(rows, 24);
+            }
+            other => panic!("Expected SessionState, got: {other:?}"),
+        }
+
+        let _ = flood.await;
         let _ = shutdown_tx.send(()).await;
     }
 
@@ -1499,7 +1605,65 @@ mod tests {
                 Err(_timeout) => continue,
             }
         }
-        assert!(got_update, "Expected to receive a screen update after sending input");
+        assert!(
+            got_update,
+            "Expected to receive a screen update after sending input"
+        );
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Verify that attached clients receive `SessionExited` when the shell
+    /// exits cleanly, even if no final damaged frame is produced.
+    #[tokio::test]
+    async fn attach_receives_session_exited_after_clean_shell_exit() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(Some("/bin/sh".to_string()), None, false)
+            .await
+            .expect("spawn_session failed");
+
+        let _ = client
+            .attach(&session_id, Some((80, 24)))
+            .await
+            .expect("attach failed");
+
+        let mut rx = client.take_response_rx();
+        let tx = client.request_tx_clone();
+        tx.send(Request::SendInput {
+            id: session_id.clone(),
+            data: b"exit\n".to_vec(),
+        })
+        .await
+        .expect("send input");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut got_exit = None;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(Response::SessionExited {
+                    id,
+                    exit_code,
+                    reason,
+                })) => {
+                    got_exit = Some((id, exit_code, reason));
+                    break;
+                }
+                Ok(Some(Response::Ok)) => continue,
+                Ok(Some(Response::ScreenUpdate { .. })) => continue,
+                Ok(Some(Response::SessionState { .. })) => continue,
+                Ok(Some(Response::TitleChanged { .. })) => continue,
+                Ok(Some(other)) => panic!("Unexpected response while waiting for exit: {other:?}"),
+                Ok(None) => break,
+                Err(_timeout) => continue,
+            }
+        }
+
+        let (id, exit_code, _reason) = got_exit.expect("Expected SessionExited after exit");
+        assert_eq!(id, session_id);
+        assert_eq!(exit_code, Some(0));
 
         let _ = shutdown_tx.send(()).await;
     }
@@ -1531,7 +1695,10 @@ mod tests {
         client.detach(&session_id).await.expect("detach failed");
 
         // Verify attached count went back to 0.
-        let sessions = client2.list_sessions().await.expect("list after detach failed");
+        let sessions = client2
+            .list_sessions()
+            .await
+            .expect("list after detach failed");
         assert_eq!(sessions[0].connected_client_count, 0);
 
         let _ = shutdown_tx.send(()).await;

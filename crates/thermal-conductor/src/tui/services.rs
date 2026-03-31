@@ -179,8 +179,10 @@ fn runtime_dir() -> PathBuf {
     }
 }
 
-const CODEX_ADAPTER_SCRIPT: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/codex-state-adapter.sh");
+const CODEX_ADAPTER_SCRIPT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/codex-state-adapter.sh"
+);
 
 fn read_pid_from_file(filename: &str) -> Option<u32> {
     let path = runtime_dir().join(filename);
@@ -202,7 +204,11 @@ fn pgrep_pid(binary: &str) -> Option<u32> {
     } else {
         ("-x", binary.to_string())
     };
-    let output = Command::new("pgrep").arg(flag).arg(&pattern).output().ok()?;
+    let output = Command::new("pgrep")
+        .arg(flag)
+        .arg(&pattern)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -249,7 +255,7 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
 
 /// Check if the running process is using an older binary than what's on disk.
 /// Compares /proc/<pid>/exe mtime against the installed binary mtime.
-fn is_stale_binary(pid: u32, def: &ServiceDef) -> bool {
+fn is_stale_binary(pid: u32, _def: &ServiceDef) -> bool {
     let exe_link = format!("/proc/{pid}/exe");
     // Resolve the actual binary path the process is running.
     let Ok(exe_path) = std::fs::read_link(&exe_link) else {
@@ -337,8 +343,8 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
     // Capture stderr to a temp file so we can report early crashes.
     let program = def.command.unwrap_or(def.binary);
 
-    let stderr_file = tempfile::NamedTempFile::new()
-        .map_err(|e| format!("Failed to create temp file: {e}"))?;
+    let stderr_file =
+        tempfile::NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
     let stderr_fd = stderr_file
         .as_file()
         .try_clone()
@@ -379,7 +385,10 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
                 Err(hint)
             }
         }
-        Err(e) => Err(format!("Failed to start {} ({}): {}", def.binary, program, e)),
+        Err(e) => Err(format!(
+            "Failed to start {} ({}): {}",
+            def.binary, program, e
+        )),
     }
 }
 
@@ -638,8 +647,7 @@ impl ServicesPage {
             }
             Ok(false) => {
                 self.settings = settings::load_settings();
-                self.status_msg =
-                    Some(("Editor exited with error".into(), true, Instant::now()));
+                self.status_msg = Some(("Editor exited with error".into(), true, Instant::now()));
             }
             Err(e) => {
                 self.status_msg = Some((e, true, Instant::now()));
@@ -682,8 +690,11 @@ impl ServicesPage {
                 self.status_msg = Some((msg, false, Instant::now()));
             }
             Ok(_) => {
-                self.status_msg =
-                    Some((format!("{} already gone", def.binary), false, Instant::now()));
+                self.status_msg = Some((
+                    format!("{} already gone", def.binary),
+                    false,
+                    Instant::now(),
+                ));
             }
             Err(e) => {
                 self.status_msg = Some((format!("pkill -9 failed: {e}"), true, Instant::now()));
@@ -779,13 +790,20 @@ impl TuiPage for ServicesPage {
         f.render_widget(title, chunks[0]);
 
         // Service table
-        let header = Row::new(vec!["", "Service", "Description", "Status", "PID", "Config"])
-            .style(
-                Style::default()
-                    .fg(ACCENT_COLD)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .bottom_margin(1);
+        let header = Row::new(vec![
+            "",
+            "Service",
+            "Description",
+            "Status",
+            "PID",
+            "Config",
+        ])
+        .style(
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        )
+        .bottom_margin(1);
 
         let rows: Vec<Row> = SERVICES
             .iter()
@@ -858,7 +876,7 @@ impl TuiPage for ServicesPage {
                 Constraint::Length(22), // description
                 Constraint::Length(9),  // status
                 Constraint::Length(8),  // PID
-                Constraint::Min(20),   // config summary
+                Constraint::Min(20),    // config summary
             ],
         )
         .header(header)
@@ -1024,7 +1042,6 @@ impl TuiPage for ServicesPage {
             _ => {}
         }
     }
-
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1035,7 +1052,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 9);
+        assert_eq!(SERVICES.len(), 10);
     }
 
     #[test]
@@ -1153,10 +1170,7 @@ fn ensure_path() -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/builder".to_string());
     let current = std::env::var("PATH").unwrap_or_default();
     let mut path = current.clone();
-    let extra_dirs = [
-        format!("{home}/.local/bin"),
-        format!("{home}/.cargo/bin"),
-    ];
+    let extra_dirs = [format!("{home}/.local/bin"), format!("{home}/.cargo/bin")];
     for dir in &extra_dirs {
         if !current.split(':').any(|p| p == dir) {
             path = format!("{dir}:{path}");

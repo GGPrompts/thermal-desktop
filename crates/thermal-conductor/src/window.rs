@@ -27,7 +27,9 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler,
+        },
     },
     shell::{
         WaylandSurface,
@@ -54,7 +56,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use std::time::{Duration, Instant};
 use thermal_core::claude_state::{ClaudeSessionState, ClaudeStatePoller};
@@ -88,7 +90,9 @@ use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
 use crate::font_config::FontConfig;
-use crate::grid_renderer::{self, ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell};
+use crate::grid_renderer::{
+    self, ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell,
+};
 use crate::inject::{self, InjectWatcher};
 use crate::input;
 use crate::protocol::Response;
@@ -130,7 +134,6 @@ pub fn run() -> anyhow::Result<()> {
     // ── Bind globals ──────────────────────────────────────────────────────────
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg_wm_base is not available");
-
 
     // ── Create xdg toplevel window ────────────────────────────────────────────
     let surface = compositor.create_surface(&qh);
@@ -185,7 +188,12 @@ pub fn run() -> anyhow::Result<()> {
         .iter()
         .copied()
         .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
-        .or_else(|| caps.formats.iter().copied().find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb))
+        .or_else(|| {
+            caps.formats
+                .iter()
+                .copied()
+                .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
+        })
         .unwrap_or(caps.formats[0]);
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -253,6 +261,12 @@ pub fn run() -> anyhow::Result<()> {
 
     // Shared flag for the daemon reader task to signal session exit.
     let daemon_exit_requested = Arc::new(AtomicBool::new(false));
+    // Daemon-fed client updates mutate the local Term directly, so force a
+    // full render on the next frame instead of trusting alacritty damage.
+    let force_full_redraw = Arc::new(AtomicBool::new(false));
+    // Client mode also needs the daemon's terminal mode bits for mouse,
+    // bracketed paste, focus reporting, and kitty keyboard handling.
+    let synced_term_mode = Arc::new(AtomicU32::new(TermMode::default().bits()));
 
     // Shared slot for the daemon reader task to deliver title updates.
     // The render loop drains this each iteration and calls window.set_title().
@@ -294,11 +308,17 @@ pub fn run() -> anyhow::Result<()> {
                     }
                 };
 
-                // Pick an existing live session or spawn a new one.
-                let session_id = if let Some(session) = sessions.iter().find(|s| s.is_alive) {
-                    tracing::info!(id = %session.id, "Attaching to existing session");
-                    session.id.clone()
-                } else {
+                // Always spawn a fresh session. Reusing orphaned sessions from
+                // previous windows leads to stale shells with wrong terminal
+                // size and leftover state. Orphaned sessions (alive but 0
+                // connected clients) are cleaned up below.
+                for orphan in sessions.iter().filter(|s| s.is_alive && s.connected_client_count == 0) {
+                    tracing::info!(id = %orphan.id, "Killing orphaned daemon session");
+                    let _ = client.send(crate::protocol::Request::KillSession {
+                        id: orphan.id.clone(),
+                    }).await;
+                }
+                let session_id = {
                     let shell =
                         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                     match client.spawn_session(Some(shell), None, false).await {
@@ -346,6 +366,7 @@ pub fn run() -> anyhow::Result<()> {
                 if let Response::SessionState {
                     cols,
                     rows,
+                    mode,
                     cells: ref _cells,
                     ..
                 } = attach_response
@@ -355,6 +376,7 @@ pub fn run() -> anyhow::Result<()> {
                         rows,
                         "Received initial session state from daemon"
                     );
+                    synced_term_mode.store(mode, Ordering::Release);
                     apply_session_state_to_term(&terminal, &attach_response);
                 }
 
@@ -383,6 +405,8 @@ pub fn run() -> anyhow::Result<()> {
                     &terminal,
                     response_rx,
                     Arc::clone(&pty_dirty),
+                    Arc::clone(&force_full_redraw),
+                    Arc::clone(&synced_term_mode),
                     Arc::clone(&daemon_exit_requested),
                     Arc::clone(&pending_title),
                     task_wakeup_fd,
@@ -425,7 +449,10 @@ pub fn run() -> anyhow::Result<()> {
     {
         let initial_title = match &session_mode {
             SessionMode::Client { session_id, .. } => {
-                format!("thermal \u{2014} session {}", &session_id[..session_id.len().min(8)])
+                format!(
+                    "thermal \u{2014} session {}",
+                    &session_id[..session_id.len().min(8)]
+                )
             }
             SessionMode::Standalone { .. } => {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
@@ -490,6 +517,8 @@ pub fn run() -> anyhow::Result<()> {
         height: DEFAULT_HEIGHT,
         exit: false,
         daemon_exit_requested,
+        force_full_redraw,
+        synced_term_mode,
         pending_title,
         keyboard: None,
         seat: None,
@@ -602,8 +631,7 @@ pub fn run() -> anyhow::Result<()> {
                 }
                 TermEvent::Bell => {
                     if state.bell_mode == BellMode::Visual {
-                        state.bell_flash_until =
-                            Some(Instant::now() + BELL_FLASH_DURATION);
+                        state.bell_flash_until = Some(Instant::now() + BELL_FLASH_DURATION);
                         state.dirty = true;
                     }
                 }
@@ -639,10 +667,9 @@ pub fn run() -> anyhow::Result<()> {
 
         // ── Update agent communication graph ─────────────────────────────
         if state.agent_graph.visible {
-            state.agent_graph.set_layout_size(
-                state.width as f32,
-                GRAPH_OVERLAY_HEIGHT as f32,
-            );
+            state
+                .agent_graph
+                .set_layout_size(state.width as f32, GRAPH_OVERLAY_HEIGHT as f32);
             state.agent_graph.update_from_sessions(&all_sessions);
             state.agent_graph.tick_layout();
         }
@@ -711,6 +738,22 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
+    // ── Cleanup: kill daemon session on window close ─────────────────────
+    // In client mode, the window spawned (or attached to) a daemon session.
+    // If we don't kill it, the shell keeps running in the background and the
+    // next `thc window` will reattach to the stale session instead of getting
+    // a fresh one.
+    if let SessionMode::Client { client, session_id } = &state.session_mode {
+        tracing::info!(session = %session_id, "Killing daemon session on window close");
+        let client_tx = client.request_tx_clone();
+        let id = session_id.clone();
+        let _ = state._tokio_rt.block_on(async {
+            let _ = client_tx
+                .send(crate::protocol::Request::KillSession { id })
+                .await;
+        });
+    }
+
     Ok(())
 }
 
@@ -762,6 +805,8 @@ fn spawn_daemon_reader_task(
     terminal: &Terminal,
     mut response_rx: tokio::sync::mpsc::Receiver<Response>,
     pty_dirty: Arc<AtomicBool>,
+    force_full_redraw: Arc<AtomicBool>,
+    synced_term_mode: Arc<AtomicU32>,
     exit_requested: Arc<AtomicBool>,
     pending_title: Arc<Mutex<Option<String>>>,
     wakeup_write: std::os::fd::OwnedFd,
@@ -780,6 +825,7 @@ fn spawn_daemon_reader_task(
                 Response::ScreenUpdate {
                     dirty_cells,
                     cursor,
+                    mode,
                     ..
                 } => {
                     // Apply dirty cells incrementally to the local term.
@@ -795,10 +841,8 @@ fn spawn_daemon_reader_task(
                         if row >= screen_lines || col >= screen_cols {
                             continue;
                         }
-                        let point = Point::new(
-                            alacritty_terminal::index::Line(row as i32),
-                            Column(col),
-                        );
+                        let point =
+                            Point::new(alacritty_terminal::index::Line(row as i32), Column(col));
                         let grid_cell = &mut term.grid_mut()[point];
                         grid_cell.c = dc.cell.ch;
                         grid_cell.flags = Flags::from_bits_truncate(dc.cell.flags);
@@ -829,6 +873,8 @@ fn spawn_daemon_reader_task(
                     drop(term);
 
                     // Signal render loop: new content available.
+                    synced_term_mode.store(mode, Ordering::Release);
+                    force_full_redraw.store(true, Ordering::Release);
                     pty_dirty.store(true, Ordering::Release);
                     wake_render_loop(wakeup_write_fd);
 
@@ -843,6 +889,7 @@ fn spawn_daemon_reader_task(
                     rows,
                     ref cells,
                     ref cursor,
+                    mode,
                     ..
                 } => {
                     // Full redraw — the daemon sends this when damage is too
@@ -907,6 +954,8 @@ fn spawn_daemon_reader_task(
 
                     drop(term);
 
+                    synced_term_mode.store(mode, Ordering::Release);
+                    force_full_redraw.store(true, Ordering::Release);
                     pty_dirty.store(true, Ordering::Release);
                     wake_render_loop(wakeup_write_fd);
 
@@ -972,7 +1021,10 @@ fn spawn_daemon_reader_task(
 /// Write a single byte to the wakeup pipe to unblock the poll() in the
 /// render loop. Errors are silently ignored (pipe full is harmless).
 fn wake_render_loop(wakeup_write_fd: i32) {
-    let _ = nix::unistd::write(unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_write_fd) }, &[1u8]);
+    let _ = nix::unistd::write(
+        unsafe { std::os::fd::BorrowedFd::borrow_raw(wakeup_write_fd) },
+        &[1u8],
+    );
 }
 
 // ── Apply daemon session state to local term ──────────────────────────────────
@@ -1083,6 +1135,10 @@ struct ConductorWindow {
     /// terminal output has been processed; cleared each time the render loop
     /// checks it.
     pty_dirty: Arc<AtomicBool>,
+    /// Force a full grid snapshot on the next render.
+    force_full_redraw: Arc<AtomicBool>,
+    /// Mirrored terminal mode bits from the daemon in client mode.
+    synced_term_mode: Arc<AtomicU32>,
     width: u32,
     height: u32,
     exit: bool,
@@ -1142,27 +1198,52 @@ struct ConductorWindow {
 }
 
 impl ConductorWindow {
+    fn current_term_mode(&self) -> TermMode {
+        match &self.session_mode {
+            SessionMode::Client { .. } => {
+                TermMode::from_bits_retain(self.synced_term_mode.load(Ordering::Acquire))
+            }
+            SessionMode::Standalone { .. } => {
+                let th = self.terminal.term_handle();
+                let t = th.lock();
+                *t.mode()
+            }
+        }
+    }
+
     // ── Kitty keyboard protocol helpers ──────────────────────────────────
 
     /// Query the alacritty_terminal mode flags and return the active kitty
     /// keyboard protocol flags.  Returns `KittyFlags::NONE` when kitty
     /// keyboard mode is not active.
     fn kitty_flags(&self) -> input::KittyFlags {
-        let th = self.terminal.term_handle();
-        let t = th.lock();
-        let mode = t.mode();
+        let mode = self.current_term_mode();
         let mut flags: u8 = 0;
-        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) { flags |= 1; }
-        if mode.contains(TermMode::REPORT_EVENT_TYPES)     { flags |= 2; }
-        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS)  { flags |= 4; }
-        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) { flags |= 8; }
-        if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT)  { flags |= 16; }
+        if mode.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+            flags |= 1;
+        }
+        if mode.contains(TermMode::REPORT_EVENT_TYPES) {
+            flags |= 2;
+        }
+        if mode.contains(TermMode::REPORT_ALTERNATE_KEYS) {
+            flags |= 4;
+        }
+        if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            flags |= 8;
+        }
+        if mode.contains(TermMode::REPORT_ASSOCIATED_TEXT) {
+            flags |= 16;
+        }
         input::KittyFlags(flags)
     }
 
     /// Encode a key event, choosing kitty or legacy encoding based on the
     /// terminal's active mode.
-    fn encode_key_event(&self, event: &KeyEvent, event_type: input::KeyEventType) -> Option<Vec<u8>> {
+    fn encode_key_event(
+        &self,
+        event: &KeyEvent,
+        event_type: input::KeyEventType,
+    ) -> Option<Vec<u8>> {
         let flags = self.kitty_flags();
         if flags.contains(input::KittyFlags::DISAMBIGUATE) {
             input::encode_key_kitty(event, &self.modifiers, flags, event_type)
@@ -1316,143 +1397,148 @@ impl ConductorWindow {
         let mut term = term_handle.lock();
 
         // Query damage BEFORE reading content — damage() requires &mut self.
-        let damaged_rows: Option<HashSet<usize>> = match term.damage() {
-            TermDamage::Full => None, // None means "full redraw"
-            TermDamage::Partial(iter) => {
-                let set: HashSet<usize> = iter
-                    .filter(|bounds| bounds.is_damaged())
-                    .map(|bounds| bounds.line)
-                    .collect();
-                if set.is_empty() {
-                    // Nothing damaged — reuse entire cache, skip cell collection.
-                    let screen_lines = term.screen_lines();
-                    let content = term.renderable_content();
-                    let display_offset = content.display_offset;
-                    let cursor = content.cursor;
-                    let selection_range = content.selection;
-                    term.reset_damage();
-                    drop(term);
+        let damaged_rows: Option<HashSet<usize>> =
+            if self.force_full_redraw.swap(false, Ordering::AcqRel) {
+                None
+            } else {
+                match term.damage() {
+                    TermDamage::Full => None, // None means "full redraw"
+                    TermDamage::Partial(iter) => {
+                        let set: HashSet<usize> = iter
+                            .filter(|bounds| bounds.is_damaged())
+                            .map(|bounds| bounds.line)
+                            .collect();
+                        if set.is_empty() {
+                            // Nothing damaged — reuse entire cache, skip cell collection.
+                            let screen_lines = term.screen_lines();
+                            let content = term.renderable_content();
+                            let display_offset = content.display_offset;
+                            let cursor = content.cursor;
+                            let selection_range = content.selection;
+                            term.reset_damage();
+                            drop(term);
 
-                    self.grid_renderer.render_cached(
-                        &cursor,
-                        screen_lines,
-                        selection_range.as_ref(),
-                        display_offset,
-                        &self.wgpu.device,
-                        &self.wgpu.queue,
-                        &mut encoder,
-                        &view,
-                        self.width,
-                        self.height,
-                    );
+                            self.grid_renderer.render_cached(
+                                &cursor,
+                                screen_lines,
+                                selection_range.as_ref(),
+                                display_offset,
+                                &self.wgpu.device,
+                                &self.wgpu.queue,
+                                &mut encoder,
+                                &view,
+                                self.width,
+                                self.height,
+                            );
 
-                    // ── Kitty graphics inline images ─────────────────────────
-                    {
-                        let store = self.terminal.image_store();
-                        let mut store_guard = store.lock();
-                        self.grid_renderer.render_images(
-                            &store_guard,
-                            &self.wgpu.device,
-                            &self.wgpu.queue,
-                            &mut encoder,
-                            &view,
-                            self.width,
-                            self.height,
-                        );
-                        self.grid_renderer
-                            .periodic_image_cleanup(&mut store_guard, screen_lines);
+                            // ── Kitty graphics inline images ─────────────────────────
+                            {
+                                let store = self.terminal.image_store();
+                                let mut store_guard = store.lock();
+                                self.grid_renderer.render_images(
+                                    &store_guard,
+                                    &self.wgpu.device,
+                                    &self.wgpu.queue,
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
+                                self.grid_renderer
+                                    .periodic_image_cleanup(&mut store_guard, screen_lines);
+                            }
+
+                            // ── Command block overlays ──────────────────────────────
+                            {
+                                let tracker = self.terminal.command_tracker();
+                                let blocks = tracker.lock().blocks.clone();
+                                self.grid_renderer.render_command_blocks(
+                                    &blocks,
+                                    display_offset,
+                                    screen_lines,
+                                    &self.wgpu.device,
+                                    &self.wgpu.queue,
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
+                            }
+
+                            // ── Scroll indicator overlay ─────────────────────────────
+                            self.grid_renderer.render_scroll_indicator(
+                                display_offset,
+                                &self.wgpu.device,
+                                &self.wgpu.queue,
+                                &mut encoder,
+                                &view,
+                                self.width,
+                                self.height,
+                            );
+
+                            // Claude HUD overlay disabled — redundant with Claude's
+                            // built-in statusline and thermal-monitor dashboard.
+
+                            // ── Context saturation warning overlay ─────────────────
+                            if self.context_warning_active {
+                                let ctx_pct =
+                                    self.claude_session
+                                        .as_ref()
+                                        .and_then(|s| s.context_percent)
+                                        .unwrap_or(0.0) as f32;
+                                self.grid_renderer.render_context_warning(
+                                    ctx_pct,
+                                    &self.wgpu.device,
+                                    &self.wgpu.queue,
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
+                            }
+
+                            // ── Agent timeline overlay ─────────────────────────────
+                            self.grid_renderer.render_agent_timeline(
+                                &self.agent_timeline,
+                                &self.wgpu.device,
+                                &self.wgpu.queue,
+                                &mut encoder,
+                                &view,
+                                self.width,
+                                self.height,
+                            );
+
+                            // ── Agent graph overlay ────────────────────────────────
+                            self.grid_renderer.render_agent_graph(
+                                &self.agent_graph,
+                                &self.wgpu.device,
+                                &self.wgpu.queue,
+                                &mut encoder,
+                                &view,
+                                self.width,
+                                self.height,
+                            );
+
+                            // ── Bell flash overlay ─────────────────────────────────
+                            if self.bell_flash_until.is_some() {
+                                self.grid_renderer.render_bell_flash(
+                                    &self.wgpu.device,
+                                    &self.wgpu.queue,
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
+                            }
+
+                            self.wgpu.queue.submit(std::iter::once(encoder.finish()));
+                            output.present();
+                            return;
+                        }
+                        Some(set)
                     }
-
-                    // ── Command block overlays ──────────────────────────────
-                    {
-                        let tracker = self.terminal.command_tracker();
-                        let blocks = tracker.lock().blocks.clone();
-                        self.grid_renderer.render_command_blocks(
-                            &blocks,
-                            display_offset,
-                            screen_lines,
-                            &self.wgpu.device,
-                            &self.wgpu.queue,
-                            &mut encoder,
-                            &view,
-                            self.width,
-                            self.height,
-                        );
-                    }
-
-                    // ── Scroll indicator overlay ─────────────────────────────
-                    self.grid_renderer.render_scroll_indicator(
-                        display_offset,
-                        &self.wgpu.device,
-                        &self.wgpu.queue,
-                        &mut encoder,
-                        &view,
-                        self.width,
-                        self.height,
-                    );
-
-                    // Claude HUD overlay disabled — redundant with Claude's
-                    // built-in statusline and thermal-monitor dashboard.
-
-                    // ── Context saturation warning overlay ─────────────────
-                    if self.context_warning_active {
-                        let ctx_pct = self
-                            .claude_session
-                            .as_ref()
-                            .and_then(|s| s.context_percent)
-                            .unwrap_or(0.0) as f32;
-                        self.grid_renderer.render_context_warning(
-                            ctx_pct,
-                            &self.wgpu.device,
-                            &self.wgpu.queue,
-                            &mut encoder,
-                            &view,
-                            self.width,
-                            self.height,
-                        );
-                    }
-
-                    // ── Agent timeline overlay ─────────────────────────────
-                    self.grid_renderer.render_agent_timeline(
-                        &self.agent_timeline,
-                        &self.wgpu.device,
-                        &self.wgpu.queue,
-                        &mut encoder,
-                        &view,
-                        self.width,
-                        self.height,
-                    );
-
-                    // ── Agent graph overlay ────────────────────────────────
-                    self.grid_renderer.render_agent_graph(
-                        &self.agent_graph,
-                        &self.wgpu.device,
-                        &self.wgpu.queue,
-                        &mut encoder,
-                        &view,
-                        self.width,
-                        self.height,
-                    );
-
-                    // ── Bell flash overlay ─────────────────────────────────
-                    if self.bell_flash_until.is_some() {
-                        self.grid_renderer.render_bell_flash(
-                            &self.wgpu.device,
-                            &self.wgpu.queue,
-                            &mut encoder,
-                            &view,
-                            self.width,
-                            self.height,
-                        );
-                    }
-
-                    self.wgpu.queue.submit(std::iter::once(encoder.finish()));
-                    output.present();
-                    return;
                 }
-                Some(set)
-            }
-        };
+            };
 
         let content = term.renderable_content();
 
@@ -1838,11 +1924,7 @@ impl ConductorWindow {
         }
 
         // Check if the terminal has bracketed paste mode enabled.
-        let bracketed = {
-            let term_handle = self.terminal.term_handle();
-            let term = term_handle.lock();
-            term.mode().contains(TermMode::BRACKETED_PASTE)
-        };
+        let bracketed = self.current_term_mode().contains(TermMode::BRACKETED_PASTE);
 
         if bracketed {
             let mut payload = Vec::with_capacity(text.len() + 12);
@@ -1887,11 +1969,7 @@ impl ConductorWindow {
         }
 
         // Check if the terminal has bracketed paste mode enabled (DECSET 2004).
-        let bracketed = {
-            let term_handle = self.terminal.term_handle();
-            let term = term_handle.lock();
-            term.mode().contains(TermMode::BRACKETED_PASTE)
-        };
+        let bracketed = self.current_term_mode().contains(TermMode::BRACKETED_PASTE);
 
         if bracketed {
             // Wrap paste in bracketed paste escape sequences:
@@ -1971,11 +2049,7 @@ impl ConductorWindow {
             }
 
             // Check if the terminal has bracketed paste mode enabled.
-            let bracketed = {
-                let term_handle = self.terminal.term_handle();
-                let term = term_handle.lock();
-                term.mode().contains(TermMode::BRACKETED_PASTE)
-            };
+            let bracketed = self.current_term_mode().contains(TermMode::BRACKETED_PASTE);
 
             if bracketed {
                 let mut payload = Vec::with_capacity(text.len() + 12);
@@ -2385,12 +2459,8 @@ impl KeyboardHandler for ConductorWindow {
         _keysyms: &[Keysym],
     ) {
         // DECSET 1004 focus reporting: send CSI I (focus in)
-        {
-            let handle = self.terminal.term_handle();
-            let term = handle.lock();
-            if term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                self.write_session(b"\x1b[I");
-            }
+        if self.current_term_mode().contains(TermMode::FOCUS_IN_OUT) {
+            self.write_session(b"\x1b[I");
         }
     }
 
@@ -2403,12 +2473,8 @@ impl KeyboardHandler for ConductorWindow {
         _: u32,
     ) {
         // DECSET 1004 focus reporting: send CSI O (focus out)
-        {
-            let handle = self.terminal.term_handle();
-            let term = handle.lock();
-            if term.mode().contains(TermMode::FOCUS_IN_OUT) {
-                self.write_session(b"\x1b[O");
-            }
+        if self.current_term_mode().contains(TermMode::FOCUS_IN_OUT) {
+            self.write_session(b"\x1b[O");
         }
     }
 
@@ -2421,7 +2487,8 @@ impl KeyboardHandler for ConductorWindow {
         event: KeyEvent,
     ) {
         // ── Window close: Ctrl+Shift+Q ─────────────────────────────────
-        if self.modifiers.ctrl && self.modifiers.shift
+        if self.modifiers.ctrl
+            && self.modifiers.shift
             && matches!(event.keysym, Keysym::Q | Keysym::q)
         {
             tracing::info!("Ctrl+Shift+Q: closing window");
@@ -2447,7 +2514,8 @@ impl KeyboardHandler for ConductorWindow {
         }
 
         // ── Agent timeline toggle: Ctrl+Shift+T ────────────────────────
-        if self.modifiers.ctrl && self.modifiers.shift
+        if self.modifiers.ctrl
+            && self.modifiers.shift
             && matches!(event.keysym, Keysym::T | Keysym::t)
         {
             self.agent_timeline.toggle();
@@ -2500,7 +2568,8 @@ impl KeyboardHandler for ConductorWindow {
 
         // ── Cross-pane inject: Ctrl+Shift+Enter ─────────────────────────
         // Sends the current selection to all other thermal-conductor windows.
-        if self.modifiers.ctrl && self.modifiers.shift
+        if self.modifiers.ctrl
+            && self.modifiers.shift
             && matches!(event.keysym, Keysym::Return | Keysym::KP_Enter)
         {
             self.inject_selection();
@@ -2509,7 +2578,8 @@ impl KeyboardHandler for ConductorWindow {
 
         // ── Context continuation: Ctrl+Shift+N ──────────────────────────
         // Spawns a new continuation session when the context window is saturated.
-        if self.modifiers.ctrl && self.modifiers.shift
+        if self.modifiers.ctrl
+            && self.modifiers.shift
             && matches!(event.keysym, Keysym::N | Keysym::n)
         {
             self.spawn_continuation();
@@ -2522,12 +2592,8 @@ impl KeyboardHandler for ConductorWindow {
                 Keysym::plus | Keysym::equal | Keysym::KP_Add => {
                     self.grid_renderer.font_config.increase()
                 }
-                Keysym::minus | Keysym::KP_Subtract => {
-                    self.grid_renderer.font_config.decrease()
-                }
-                Keysym::_0 | Keysym::KP_0 => {
-                    self.grid_renderer.font_config.reset()
-                }
+                Keysym::minus | Keysym::KP_Subtract => self.grid_renderer.font_config.decrease(),
+                Keysym::_0 | Keysym::KP_0 => self.grid_renderer.font_config.reset(),
                 _ => false,
             };
             if font_changed {
@@ -2583,7 +2649,10 @@ impl KeyboardHandler for ConductorWindow {
         }
 
         // Start key repeat for this key. Modifier-only keys don't repeat.
-        if self.encode_key_event(&event, input::KeyEventType::Press).is_some() {
+        if self
+            .encode_key_event(&event, input::KeyEventType::Press)
+            .is_some()
+        {
             self.repeat_key = Some(event);
             self.repeat_next = Some(std::time::Instant::now() + self.repeat_delay);
         }
@@ -2609,7 +2678,12 @@ impl KeyboardHandler for ConductorWindow {
         // a release event to the terminal application.
         let flags = self.kitty_flags();
         if flags.contains(input::KittyFlags::REPORT_EVENTS) {
-            if let Some(bytes) = input::encode_key_kitty(&event, &self.modifiers, flags, input::KeyEventType::Release) {
+            if let Some(bytes) = input::encode_key_kitty(
+                &event,
+                &self.modifiers,
+                flags,
+                input::KeyEventType::Release,
+            ) {
                 self.write_session(&bytes);
             }
         }
@@ -2639,16 +2713,10 @@ impl PointerHandler for ConductorWindow {
         events: &[PointerEvent],
     ) {
         // Check if the terminal program wants mouse events (SGR mouse mode).
-        let mouse_mode = {
-            let th = self.terminal.term_handle();
-            let t = th.lock();
-            let mode = t.mode();
-            // Any of: MOUSE_REPORT_CLICK (1000), MOUSE_DRAG (1002),
-            // MOUSE_MOTION (1003), or SGR_MOUSE (1006)
-            mode.contains(TermMode::MOUSE_REPORT_CLICK)
-                || mode.contains(TermMode::MOUSE_DRAG)
-                || mode.contains(TermMode::MOUSE_MOTION)
-        };
+        let mode = self.current_term_mode();
+        let mouse_mode = mode.contains(TermMode::MOUSE_REPORT_CLICK)
+            || mode.contains(TermMode::MOUSE_DRAG)
+            || mode.contains(TermMode::MOUSE_MOTION);
 
         for event in events {
             let (px, py) = event.position;
@@ -2698,9 +2766,7 @@ impl PointerHandler for ConductorWindow {
                         if self.mouse_left_held {
                             Some(format!("\x1b[<32;{cx};{cy}M"))
                         } else {
-                            let th = self.terminal.term_handle();
-                            let t = th.lock();
-                            if t.mode().contains(TermMode::MOUSE_MOTION) {
+                            if mode.contains(TermMode::MOUSE_MOTION) {
                                 Some(format!("\x1b[<35;{cx};{cy}M"))
                             } else {
                                 None
@@ -2803,9 +2869,8 @@ use std::sync::LazyLock;
 
 /// Compiled regex for detecting URLs in visible terminal text.
 /// Matches http:// and https:// URLs, stopping at common terminal delimiters.
-static URL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r#"https?://[^\s<>\x00-\x1f\x7f)\]}>\"'`]+"#).unwrap()
-});
+static URL_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"https?://[^\s<>\x00-\x1f\x7f)\]}>\"'`]+"#).unwrap());
 
 /// Detect URLs via regex in the visible cell grid and annotate cells that
 /// don't already have an OSC 8 hyperlink. Groups cells by row, reconstructs
@@ -2825,11 +2890,7 @@ fn detect_urls_in_cells(cells: &mut [RenderCell], screen_lines: usize) {
         }
 
         // Find max column to size the row text buffer.
-        let max_col = row_idxs
-            .iter()
-            .map(|&i| cells[i].col)
-            .max()
-            .unwrap_or(0);
+        let max_col = row_idxs.iter().map(|&i| cells[i].col).max().unwrap_or(0);
 
         // Build the row text string and a byte-offset-to-column mapping.
         // Each char in row_text corresponds to one terminal column.
@@ -2849,7 +2910,8 @@ fn detect_urls_in_cells(cells: &mut [RenderCell], screen_lines: usize) {
             let url = mat.as_str();
 
             // Strip common trailing punctuation that's not part of the URL.
-            let url = url.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+            let url =
+                url.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
             if url.len() < 10 {
                 // Too short to be a real URL (at minimum "http://x.y")
                 continue;

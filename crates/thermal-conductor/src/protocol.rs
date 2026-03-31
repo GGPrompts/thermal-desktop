@@ -101,6 +101,8 @@ pub enum Response {
         /// Row-major flat list of cells, length = cols * rows.
         cells: Vec<CellData>,
         cursor: CursorData,
+        /// Current terminal mode bitflags (`alacritty_terminal::term::TermMode`).
+        mode: u32,
         /// Current window title.
         title: String,
     },
@@ -112,6 +114,8 @@ pub enum Response {
         seq: u64,
         dirty_cells: Vec<DirtyCellData>,
         cursor: CursorData,
+        /// Current terminal mode bitflags (`alacritty_terminal::term::TermMode`).
+        mode: u32,
     },
 
     /// Terminal title changed.
@@ -672,6 +676,7 @@ mod tests {
             rows: 24,
             cells: vec![cell],
             cursor: cursor.clone(),
+            mode: 0x1234,
             title: "term".into(),
         };
         let decoded = rt_response(&resp);
@@ -682,6 +687,7 @@ mod tests {
                 rows,
                 cells,
                 cursor: c,
+                mode,
                 title,
             } => {
                 assert_eq!(id, "ss1");
@@ -695,6 +701,7 @@ mod tests {
                 assert_eq!(c.col, 5);
                 assert_eq!(c.row, 3);
                 assert!(c.visible);
+                assert_eq!(mode, 0x1234);
                 assert_eq!(title, "term");
             }
             other => panic!("unexpected: {:?}", other),
@@ -722,6 +729,7 @@ mod tests {
                 row: 2,
                 visible: false,
             },
+            mode: 0x4321,
         };
         let decoded = rt_response(&resp);
         match decoded {
@@ -730,6 +738,7 @@ mod tests {
                 seq,
                 dirty_cells,
                 cursor,
+                mode,
             } => {
                 assert_eq!(id, "su1");
                 assert_eq!(seq, 42);
@@ -739,6 +748,7 @@ mod tests {
                 assert_eq!(dirty_cells[0].cell.ch, 'z');
                 assert_eq!(dirty_cells[0].cell.flags, 1);
                 assert!(!cursor.visible);
+                assert_eq!(mode, 0x4321);
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -871,10 +881,7 @@ mod tests {
         let mut cursor = std::io::Cursor::new(frames);
 
         // Read first frame.
-        let payload1 = read_frame(&mut cursor)
-            .await
-            .unwrap()
-            .expect("first frame");
+        let payload1 = read_frame(&mut cursor).await.unwrap().expect("first frame");
         let decoded1: Request = decode_payload(&payload1).unwrap();
         assert!(matches!(decoded1, Request::Ping));
 
@@ -894,9 +901,7 @@ mod tests {
     #[tokio::test]
     async fn read_frame_truncated_payload_errors() {
         // Encode a frame but truncate the payload.
-        let req = Request::KillSession {
-            id: "test".into(),
-        };
+        let req = Request::KillSession { id: "test".into() };
         let frame = encode_frame(&req).unwrap();
         // Keep the length prefix but only half the payload.
         let truncated = &frame[..4 + (frame.len() - 4) / 2];
@@ -919,11 +924,7 @@ mod tests {
                 row: 10,
                 cell: CellData {
                     ch: 'X',
-                    fg: ColorData {
-                        r: 255,
-                        g: 0,
-                        b: 0,
-                    },
+                    fg: ColorData { r: 255, g: 0, b: 0 },
                     bg: ColorData { r: 0, g: 0, b: 0 },
                     flags: 0,
                 },
@@ -933,6 +934,7 @@ mod tests {
                 row: 10,
                 visible: true,
             },
+            mode: 0x55aa,
         };
 
         let frame = encode_frame(&resp).expect("encode");
@@ -949,6 +951,7 @@ mod tests {
                 seq,
                 dirty_cells,
                 cursor,
+                mode,
             } => {
                 assert_eq!(id, "sess-1");
                 assert_eq!(seq, 42);
@@ -958,6 +961,7 @@ mod tests {
                 assert_eq!(dirty_cells[0].cell.ch, 'X');
                 assert!(cursor.visible);
                 assert_eq!(cursor.col, 6);
+                assert_eq!(mode, 0x55aa);
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -988,6 +992,7 @@ mod tests {
                 row: 0,
                 visible: true,
             },
+            mode: 0,
             title: "test".into(),
         };
         let frame = encode_frame(&resp).expect("should encode large SessionState");

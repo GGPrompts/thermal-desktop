@@ -63,6 +63,10 @@ enum PidSource {
     Pidfile(&'static str),
     /// Fall back to `pgrep -x <binary>`.
     Pgrep,
+    /// Use `pgrep -f <pattern>` with a custom full-cmdline pattern.
+    /// Useful when the binary name alone is ambiguous (e.g. `thc` runs
+    /// as tui, daemon, or window — we need to match `thc daemon`).
+    PgrepPattern(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +161,7 @@ const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         binary: "thermal-conductor",
         description: "Session daemon",
-        pid_source: PidSource::Pgrep,
+        pid_source: PidSource::PgrepPattern("thc daemon"),
         command: Some("thc"),
         args: &["daemon"],
     },
@@ -212,16 +216,24 @@ fn is_pid_alive(pid: u32) -> bool {
     signal::kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
+fn pgrep_pid_pattern(pattern: &str) -> Option<u32> {
+    let output = Command::new("pgrep").args(["-f", pattern]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().next()?.trim().parse().ok()
+}
+
 fn get_service_status(def: &ServiceDef) -> ServiceStatus {
     let pid = match &def.pid_source {
         PidSource::Pidfile(filename) => read_pid_from_file(filename),
         PidSource::Pgrep => pgrep_pid(def.binary).or_else(|| {
-            // If the binary was launched via a different command name (e.g.
-            // `thc` symlink for `thermal-conductor`), also search for that.
             def.command
                 .filter(|cmd| *cmd != def.binary)
                 .and_then(|cmd| pgrep_pid(cmd))
         }),
+        PidSource::PgrepPattern(pattern) => pgrep_pid_pattern(pattern),
     };
 
     let stale_binary = pid.map_or(false, |p| is_stale_binary(p, def));
@@ -283,11 +295,24 @@ fn count_instances(def: &ServiceDef) -> u32 {
             })
             .unwrap_or(0)
     }
+    if let PidSource::PgrepPattern(pattern) = &def.pid_source {
+        return Command::new("pgrep")
+            .args(["-cf", pattern])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+    }
     let count = pgrep_count(def.binary);
     if count > 0 {
         return count;
     }
-    // Also check the command name if it differs (e.g. `thc` symlink).
     def.command
         .filter(|cmd| *cmd != def.binary)
         .map(pgrep_count)

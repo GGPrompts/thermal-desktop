@@ -193,6 +193,7 @@ pub struct ProfilesPage {
 
     // Launch-only state
     spawning: Arc<AtomicBool>,
+    last_spawn_time: std::time::Instant,
     launch_cwd: String,
     backend_pref: BackendPreference,
 
@@ -253,6 +254,7 @@ impl ProfilesPage {
             icon_picker_index: 0,
             dirty: false,
             spawning: Arc::new(AtomicBool::new(false)),
+            last_spawn_time: std::time::Instant::now() - std::time::Duration::from_secs(10),
             launch_cwd,
             backend_pref,
             spawn_result: Arc::new(Mutex::new(None)),
@@ -378,6 +380,10 @@ impl ProfilesPage {
         if self.spawning.load(Ordering::SeqCst) {
             return;
         }
+        // Cooldown: ignore rapid-fire Enter (key repeat) after a recent spawn.
+        if self.last_spawn_time.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
 
         let count: u32 = match self.count_input.parse() {
             Ok(n) if (1..=16).contains(&n) => n,
@@ -425,6 +431,7 @@ impl ProfilesPage {
         };
 
         self.spawning.store(true, Ordering::SeqCst);
+        self.last_spawn_time = std::time::Instant::now();
 
         let spawning_flag = Arc::clone(&self.spawning);
         let result_slot = Arc::clone(&self.spawn_result);

@@ -291,7 +291,11 @@ impl Terminal {
                             // Feed latest command state to the inference engine.
                             if let Some(ref inf) = inference {
                                 if let Some(block) = t.current_block() {
-                                    inf.lock().update_command_state(block.state.clone());
+                                    inf.lock().update_command_state(
+                                        block.state.clone(),
+                                        block.command.as_deref(),
+                                        block.exit_code,
+                                    );
                                 }
                             }
                             drop(t);

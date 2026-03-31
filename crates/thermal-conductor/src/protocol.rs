@@ -118,7 +118,14 @@ pub enum Response {
     TitleChanged { id: String, title: String },
 
     /// Session's child process exited.
-    SessionExited { id: String, exit_code: Option<i32> },
+    SessionExited {
+        id: String,
+        exit_code: Option<i32>,
+        /// Serialized `ExitReason` (e.g. "PtyEof", "Signal(9)").
+        /// Absent in messages from older daemons — defaults to empty string.
+        #[serde(default)]
+        reason: String,
+    },
 
     /// Generic success acknowledgment.
     Ok,
@@ -531,12 +538,18 @@ mod tests {
         let resp = Response::SessionExited {
             id: "ex1".into(),
             exit_code: Some(0),
+            reason: "exited with code 0".into(),
         };
         let decoded = rt_response(&resp);
         match decoded {
-            Response::SessionExited { id, exit_code } => {
+            Response::SessionExited {
+                id,
+                exit_code,
+                reason,
+            } => {
                 assert_eq!(id, "ex1");
                 assert_eq!(exit_code, Some(0));
+                assert_eq!(reason, "exited with code 0");
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -547,12 +560,40 @@ mod tests {
         let resp = Response::SessionExited {
             id: "ex2".into(),
             exit_code: None,
+            reason: String::new(),
         };
         let decoded = rt_response(&resp);
         match decoded {
-            Response::SessionExited { id, exit_code } => {
+            Response::SessionExited {
+                id,
+                exit_code,
+                reason,
+            } => {
                 assert_eq!(id, "ex2");
                 assert!(exit_code.is_none());
+                assert!(reason.is_empty());
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_session_exited_with_signal_reason_round_trip() {
+        let resp = Response::SessionExited {
+            id: "ex3".into(),
+            exit_code: None,
+            reason: "killed by signal 9".into(),
+        };
+        let decoded = rt_response(&resp);
+        match decoded {
+            Response::SessionExited {
+                id,
+                exit_code,
+                reason,
+            } => {
+                assert_eq!(id, "ex3");
+                assert!(exit_code.is_none());
+                assert_eq!(reason, "killed by signal 9");
             }
             other => panic!("unexpected: {:?}", other),
         }

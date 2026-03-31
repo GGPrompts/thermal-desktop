@@ -7,18 +7,56 @@
 
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::fmt;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use nix::libc;
 use nix::pty::openpty;
 use nix::sys::signal::{self, Signal};
-use nix::sys::wait::{WaitPidFlag, waitpid};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{self, ForkResult, Pid};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info};
+
+/// Structured reason why a PTY session exited.
+///
+/// Replaces the bare boolean `has_exited()` with machine-readable exit
+/// information for the per-session event log and daemon protocol.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExitReason {
+    /// The PTY slave side closed (EOF or EIO on master read).
+    /// `exit_code` is populated from `waitpid` when available.
+    PtyEof { exit_code: Option<i32> },
+
+    /// The child process was terminated by a signal.
+    Signal(i32),
+
+    /// The child process could not be spawned.
+    SpawnFailed(String),
+
+    /// A frontend explicitly closed the session.
+    FrontendClose,
+
+    /// The daemon is shutting down and tearing down all sessions.
+    DaemonShutdown,
+}
+
+impl fmt::Display for ExitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExitReason::PtyEof { exit_code: Some(c) } => write!(f, "exited with code {c}"),
+            ExitReason::PtyEof { exit_code: None } => write!(f, "PTY EOF (no exit code)"),
+            ExitReason::Signal(sig) => write!(f, "killed by signal {sig}"),
+            ExitReason::SpawnFailed(msg) => write!(f, "spawn failed: {msg}"),
+            ExitReason::FrontendClose => write!(f, "closed by frontend"),
+            ExitReason::DaemonShutdown => write!(f, "daemon shutdown"),
+        }
+    }
+}
 
 /// A PTY session that owns a child process and provides async I/O channels.
 ///
@@ -35,7 +73,11 @@ pub struct PtySession {
     output_rx: mpsc::Receiver<Vec<u8>>,
 
     /// Set to true when the child process exits (reader thread detects EOF/EIO).
+    /// Kept for fast lock-free `has_exited()` checks.
     exited: Arc<AtomicBool>,
+
+    /// Structured exit reason, populated by the reader thread or Drop impl.
+    exit_reason: Arc<Mutex<Option<ExitReason>>>,
 }
 
 #[allow(dead_code)]
@@ -198,6 +240,12 @@ impl PtySession {
                 let exited = Arc::new(AtomicBool::new(false));
                 let exited_clone = Arc::clone(&exited);
 
+                // Structured exit reason, populated by reader thread on EOF/EIO.
+                let exit_reason: Arc<Mutex<Option<ExitReason>>> =
+                    Arc::new(Mutex::new(None));
+                let exit_reason_clone = Arc::clone(&exit_reason);
+                let child_pid_for_reader = child;
+
                 // Spawn a dedicated OS thread for blocking PTY reads.
                 // This avoids all tokio AsyncFd complexity and reliably reads
                 // from the PTY master fd using standard blocking I/O.
@@ -205,6 +253,17 @@ impl PtySession {
                     .name("pty-reader".to_string())
                     .spawn(move || {
                         Self::reader_thread(reader_fd, output_tx);
+
+                        // Reap the child to determine exit status before
+                        // setting the exit reason.
+                        let reason = Self::reap_exit_reason(child_pid_for_reader);
+                        if let Ok(mut guard) = exit_reason_clone.lock() {
+                            // Only set if not already set (e.g. by set_exit_reason).
+                            if guard.is_none() {
+                                *guard = Some(reason);
+                            }
+                        }
+
                         exited_clone.store(true, Ordering::Release);
                     })
                     .context("Failed to spawn PTY reader thread")?;
@@ -214,6 +273,7 @@ impl PtySession {
                     child_pid: child,
                     output_rx,
                     exited,
+                    exit_reason,
                 })
             }
         }
@@ -325,6 +385,47 @@ impl PtySession {
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::Acquire)
     }
+
+    /// Returns the structured exit reason, if the session has exited.
+    ///
+    /// Returns `None` if the session is still running or if the exit reason
+    /// hasn't been determined yet.
+    pub fn exit_reason(&self) -> Option<ExitReason> {
+        self.exit_reason.lock().ok()?.clone()
+    }
+
+    /// Explicitly set the exit reason (e.g. for `FrontendClose` or
+    /// `DaemonShutdown`). Only takes effect if no reason has been set yet.
+    pub fn set_exit_reason(&self, reason: ExitReason) {
+        if let Ok(mut guard) = self.exit_reason.lock() {
+            if guard.is_none() {
+                *guard = Some(reason);
+            }
+        }
+    }
+
+    /// Reap the child process via `waitpid` and translate the wait status
+    /// into an `ExitReason`.
+    fn reap_exit_reason(pid: Pid) -> ExitReason {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(_, code)) => ExitReason::PtyEof {
+                exit_code: Some(code),
+            },
+            Ok(WaitStatus::Signaled(_, sig, _)) => ExitReason::Signal(sig as i32),
+            Ok(WaitStatus::StillAlive) => {
+                // Child hasn't exited yet despite PTY EOF — give it a moment.
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::Exited(_, code)) => ExitReason::PtyEof {
+                        exit_code: Some(code),
+                    },
+                    Ok(WaitStatus::Signaled(_, sig, _)) => ExitReason::Signal(sig as i32),
+                    _ => ExitReason::PtyEof { exit_code: None },
+                }
+            }
+            _ => ExitReason::PtyEof { exit_code: None },
+        }
+    }
 }
 
 impl Drop for PtySession {
@@ -333,8 +434,30 @@ impl Drop for PtySession {
         // The child may already be dead, so ignore errors.
         let _ = signal::kill(self.child_pid, Signal::SIGHUP);
 
-        // Reap the child to avoid zombie accumulation in long-lived daemons.
-        let _ = waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG));
+        // Reap the child to avoid zombie accumulation in long-lived daemons,
+        // and capture the exit status for the structured exit reason.
+        match waitpid(self.child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(status) => {
+                if let Ok(mut guard) = self.exit_reason.lock() {
+                    if guard.is_none() {
+                        *guard = Some(match status {
+                            WaitStatus::Exited(_, code) => ExitReason::PtyEof {
+                                exit_code: Some(code),
+                            },
+                            WaitStatus::Signaled(_, sig, _) => ExitReason::Signal(sig as i32),
+                            _ => ExitReason::PtyEof { exit_code: None },
+                        });
+                    }
+                }
+            }
+            Err(_) => {
+                // waitpid failed — child may have already been reaped by the
+                // reader thread, which is fine.
+            }
+        }
+
+        // Mark as exited in case the reader thread hasn't done so yet.
+        self.exited.store(true, Ordering::Release);
 
         info!(
             pid = self.child_pid.as_raw(),

@@ -185,6 +185,8 @@ pub struct WindowInfo {
 pub struct KittyController {
     /// Cached availability result (set once on first check).
     available: OnceLock<bool>,
+    /// Discovered socket path for `--to` (set during availability check).
+    socket_path: OnceLock<String>,
 }
 
 impl KittyController {
@@ -193,20 +195,68 @@ impl KittyController {
     pub fn new() -> Self {
         Self {
             available: OnceLock::new(),
+            socket_path: OnceLock::new(),
         }
+    }
+
+    /// Build a `kitty @` command, injecting `--to` if we discovered a socket.
+    fn kitty_cmd(&self) -> Command {
+        let mut cmd = Command::new("kitty");
+        cmd.arg("@");
+        if let Some(socket) = self.socket_path.get() {
+            cmd.args(["--to", socket]);
+        }
+        cmd
     }
 
     // ── Availability ────────────────────────────────────────────────────────
 
     /// Check whether kitty remote control is reachable.
     ///
-    /// Runs `kitty @ ls` and caches the result. Subsequent calls return the
-    /// cached value without spawning a process.
+    /// Tries `KITTY_LISTEN_ON` first, then globs `/tmp/kitty-thc-*` to find
+    /// the socket even when running outside kitty (e.g., from the GPU terminal).
+    /// Caches the result on success.
     pub async fn is_available(&self) -> bool {
         if let Some(&cached) = self.available.get() {
             return cached;
         }
 
+        // Try KITTY_LISTEN_ON first (works when running inside kitty).
+        if let Ok(listen) = std::env::var("KITTY_LISTEN_ON") {
+            if self.try_socket(&listen).await {
+                let _ = self.socket_path.set(listen);
+                let _ = self.available.set(true);
+                return true;
+            }
+        }
+
+        // Discover socket by globbing /tmp/kitty-thc-* (works from any terminal).
+        if let Ok(entries) = std::fs::read_dir("/tmp") {
+            let mut sockets: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("kitty-thc-"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            // Sort by modified time (newest first) to prefer the most recent kitty.
+            sockets.sort_by(|a, b| {
+                let mt = |e: &std::fs::DirEntry| e.metadata().ok().and_then(|m| m.modified().ok());
+                mt(b).cmp(&mt(a))
+            });
+            for entry in sockets {
+                let sock = format!("unix:{}", entry.path().display());
+                if self.try_socket(&sock).await {
+                    let _ = self.socket_path.set(sock);
+                    let _ = self.available.set(true);
+                    return true;
+                }
+            }
+        }
+
+        // Bare `kitty @ ls` as final fallback (maybe kitty uses a default socket).
         let result = Command::new("kitty")
             .args(["@", "ls"])
             .stdout(std::process::Stdio::null())
@@ -216,12 +266,22 @@ impl KittyController {
             .map(|s| s.success())
             .unwrap_or(false);
 
-        // Only cache positive results — if kitty is not available now it may
-        // become available later (user starts kitty, enables remote control).
         if result {
             let _ = self.available.set(true);
         }
         result
+    }
+
+    /// Test if a specific socket path works for `kitty @ ls`.
+    async fn try_socket(&self, socket: &str) -> bool {
+        Command::new("kitty")
+            .args(["@", "--to", socket, "ls"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
 
     // ── Spawn ───────────────────────────────────────────────────────────────
@@ -260,9 +320,9 @@ impl KittyController {
     ) -> Result<()> {
         let title = format!("{TITLE_PREFIX}{id}");
 
-        let output = Command::new("kitty")
+        let output = self
+            .kitty_cmd()
             .args([
-                "@",
                 "launch",
                 "--type=window",
                 &format!("--title={title}"),
@@ -314,7 +374,7 @@ impl KittyController {
     /// List all kitty windows whose title starts with `thermal-`, merged with
     /// sidecar metadata.
     pub async fn list_windows(&self) -> Result<Vec<WindowInfo>> {
-        let raw = run_kitty_ls().await?;
+        let raw = self.run_kitty_ls().await?;
         let os_windows: Vec<KittyOsWindow> =
             serde_json::from_str(&raw).context("failed to parse kitty @ ls JSON")?;
 
@@ -360,8 +420,9 @@ impl KittyController {
         validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
-        let output = Command::new("kitty")
-            .args(["@", "close-window", "--match", &match_arg])
+        let output = self
+            .kitty_cmd()
+            .args(["close-window", "--match", &match_arg])
             .output()
             .await
             .context("failed to run kitty @ close-window")?;
@@ -383,8 +444,9 @@ impl KittyController {
         validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
-        let output = Command::new("kitty")
-            .args(["@", "send-text", "--match", &match_arg, "--"])
+        let output = self
+            .kitty_cmd()
+            .args(["send-text", "--match", &match_arg, "--"])
             .arg(text)
             .output()
             .await
@@ -406,8 +468,9 @@ impl KittyController {
         validate_session_id(id)?;
         let match_arg = format!("title:^{TITLE_PREFIX}{id}$");
 
-        let output = Command::new("kitty")
-            .args(["@", "focus-window", "--match", &match_arg])
+        let output = self
+            .kitty_cmd()
+            .args(["focus-window", "--match", &match_arg])
             .output()
             .await
             .context("failed to run kitty @ focus-window")?;
@@ -418,6 +481,25 @@ impl KittyController {
         }
 
         Ok(())
+    }
+
+    // ── Kitty ls ───────────────────────────────────────────────────────────
+
+    /// Run `kitty @ ls` and return the raw JSON string.
+    async fn run_kitty_ls(&self) -> Result<String> {
+        let output = self
+            .kitty_cmd()
+            .arg("ls")
+            .output()
+            .await
+            .context("failed to run kitty @ ls")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("kitty @ ls failed: {stderr}");
+        }
+
+        String::from_utf8(output.stdout).context("kitty @ ls output is not valid UTF-8")
     }
 }
 
@@ -504,21 +586,7 @@ pub async fn sidecar_remove(id: &str) -> Result<()> {
 
 // ── Kitty ls helper ─────────────────────────────────────────────────────────
 
-/// Run `kitty @ ls` and return the raw JSON string.
-async fn run_kitty_ls() -> Result<String> {
-    let output = Command::new("kitty")
-        .args(["@", "ls"])
-        .output()
-        .await
-        .context("failed to run kitty @ ls")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("kitty @ ls failed: {stderr}");
-    }
-
-    String::from_utf8(output.stdout).context("kitty @ ls output is not valid UTF-8")
-}
+// (Moved to KittyController::run_kitty_ls method)
 
 // ── Utilities ───────────────────────────────────────────────────────────────
 

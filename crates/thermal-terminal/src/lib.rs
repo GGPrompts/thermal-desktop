@@ -15,3 +15,6 @@ pub mod osc633;
 pub mod pty;
 pub mod state_inference;
 pub mod terminal;
+
+// Re-export key types for convenience.
+pub use pty::ExitReason;

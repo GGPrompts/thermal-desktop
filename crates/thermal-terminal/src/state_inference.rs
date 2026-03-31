@@ -131,6 +131,16 @@ struct StateFile {
     context_percent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_exit_code: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_command_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_command_duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    consecutive_failures: Option<i64>,
 }
 
 // ── Pattern matchers (compiled once) ────────────────────────────────────────
@@ -225,6 +235,19 @@ pub struct AgentStateInference {
     /// Persists across `infer_and_write()` calls so throttled writes are
     /// retried instead of lost.
     dirty: bool,
+    // ── Command telemetry (populated from CommandTracker) ─────────────
+    /// The most recent command string (from OSC 633;E).
+    last_command: Option<String>,
+    /// Exit code of the most recent finished command (from OSC 633;D).
+    last_exit_code: Option<i32>,
+    /// Wall-clock instant when the current command started executing.
+    command_started_at: Option<Instant>,
+    /// ISO 8601 timestamp string when the current command started executing.
+    command_started_at_iso: Option<String>,
+    /// Duration in milliseconds from start to finish of the last command.
+    last_command_duration_ms: Option<i64>,
+    /// Count of consecutive non-zero exit codes.
+    consecutive_failures: i64,
 }
 
 /// Maximum number of recent lines to keep in the ring buffer.
@@ -254,6 +277,12 @@ impl AgentStateInference {
             patterns: Patterns::new(),
             ansi_stripper: AnsiStripper::new(),
             dirty: false,
+            last_command: None,
+            last_exit_code: None,
+            command_started_at: None,
+            command_started_at_iso: None,
+            last_command_duration_ms: None,
+            consecutive_failures: 0,
         }
     }
 
@@ -293,10 +322,79 @@ impl AgentStateInference {
         self.infer_and_write();
     }
 
-    /// Update with the latest OSC 633 command state.
+    /// Update with the latest OSC 633 command state and telemetry from
+    /// the [`CommandBlock`].
     ///
-    /// Should be called after the command tracker processes marks.
-    pub fn update_command_state(&mut self, state: CommandState) {
+    /// Should be called after the command tracker processes marks.  The
+    /// `command` and `exit_code` are extracted from the current
+    /// [`crate::osc633::CommandBlock`] at the call site.
+    pub fn update_command_state(
+        &mut self,
+        state: CommandState,
+        command: Option<&str>,
+        exit_code: Option<i32>,
+    ) {
+        // Track command telemetry on state transitions.
+        match state {
+            CommandState::Executing => {
+                // Command just started executing — record the start time.
+                if self.command_started_at.is_none() {
+                    self.command_started_at = Some(Instant::now());
+                    self.command_started_at_iso = Some(now_rfc3339());
+                    // Capture the command text (may have arrived via OSC 633;E
+                    // before the 633;C mark).
+                    if let Some(cmd) = command {
+                        if self.last_command.as_deref() != Some(cmd) {
+                            self.last_command = Some(cmd.to_string());
+                            self.dirty = true;
+                        }
+                    }
+                }
+            }
+            CommandState::Finished => {
+                // Command finished — compute duration, update exit code and
+                // consecutive failure count.
+                if let Some(started) = self.command_started_at.take() {
+                    let dur = started.elapsed().as_millis() as i64;
+                    self.last_command_duration_ms = Some(dur);
+                    self.dirty = true;
+                }
+                // Capture command text if we didn't get it during Executing
+                // (the E mark can arrive at any point before D).
+                if let Some(cmd) = command {
+                    if self.last_command.as_deref() != Some(cmd) {
+                        self.last_command = Some(cmd.to_string());
+                        self.dirty = true;
+                    }
+                }
+                if let Some(ec) = exit_code {
+                    if self.last_exit_code != Some(ec) {
+                        self.last_exit_code = Some(ec);
+                        self.dirty = true;
+                    }
+                    if ec != 0 {
+                        self.consecutive_failures += 1;
+                    } else {
+                        self.consecutive_failures = 0;
+                    }
+                } else {
+                    // No exit code provided — treat as unknown, don't reset
+                    // the failure counter.
+                    self.last_exit_code = None;
+                    self.dirty = true;
+                }
+            }
+            CommandState::PromptStart => {
+                // New prompt cycle — clear the command-started timestamp so
+                // the next Executing transition records a fresh start.
+                self.command_started_at = None;
+                self.command_started_at_iso = None;
+            }
+            CommandState::Input => {
+                // Nothing special for Input.
+            }
+        }
+
         if self.last_command_state.as_ref() != Some(&state) {
             self.last_command_state = Some(state);
             self.infer_and_write();
@@ -572,6 +670,15 @@ impl AgentStateInference {
             model: self.detected_model.clone(),
             context_percent: self.context_percent.map(|v| v as f64),
             source: Some("terminal_inference".to_string()),
+            last_command: self.last_command.clone(),
+            last_exit_code: self.last_exit_code.map(|c| c as i64),
+            last_command_started_at: self.command_started_at_iso.clone(),
+            last_command_duration_ms: self.last_command_duration_ms,
+            consecutive_failures: if self.consecutive_failures > 0 {
+                Some(self.consecutive_failures)
+            } else {
+                None
+            },
         };
 
         let file_path = state_dir.join(format!("{}.json", self.config.session_id));

@@ -914,10 +914,15 @@ fn spawn_daemon_reader_task(
                     );
                 }
 
-                Response::SessionExited { id, exit_code } => {
+                Response::SessionExited {
+                    id,
+                    exit_code,
+                    reason,
+                } => {
                     tracing::info!(
                         session_id = %id,
                         ?exit_code,
+                        %reason,
                         "Daemon reports session exited"
                     );
                     exit_requested.store(true, Ordering::Release);

@@ -73,6 +73,11 @@ impl Default for SessionState {
             pid: None,
             workspace: None,
             source: None,
+            last_command: None,
+            last_exit_code: None,
+            last_command_started_at: None,
+            last_command_duration_ms: None,
+            consecutive_failures: None,
         }
     }
 }

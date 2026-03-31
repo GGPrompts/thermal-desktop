@@ -386,9 +386,21 @@ impl Daemon {
                     {
                         let session = session_ref.lock();
                         if session.pty.has_exited() {
+                            let exit_reason = session.pty.exit_reason();
+                            let (exit_code, reason_str) = match &exit_reason {
+                                Some(thermal_terminal::ExitReason::PtyEof { exit_code }) => {
+                                    (*exit_code, exit_reason.as_ref().unwrap().to_string())
+                                }
+                                Some(thermal_terminal::ExitReason::Signal(sig)) => {
+                                    (None, format!("killed by signal {sig}"))
+                                }
+                                Some(reason) => (None, reason.to_string()),
+                                None => (None, String::new()),
+                            };
                             let _ = update_tx.send(Response::SessionExited {
                                 id: session_id.clone(),
-                                exit_code: None,
+                                exit_code,
+                                reason: reason_str,
                             });
                             break;
                         }

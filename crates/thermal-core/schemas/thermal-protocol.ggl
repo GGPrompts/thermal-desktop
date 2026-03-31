@@ -72,6 +72,11 @@ type SessionState {
         pid: Option<Int>,
         workspace: Option<Int>,
         source: Option<String>,
+        last_command: Option<String>,
+        last_exit_code: Option<Int>,
+        last_command_started_at: Option<String>,
+        last_command_duration_ms: Option<Int>,
+        consecutive_failures: Option<Int>,
     }
 }
 

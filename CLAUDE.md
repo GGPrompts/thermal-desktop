@@ -15,17 +15,18 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **File watching**: notify 7
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio, messages)
 - **Agent message bus**: thermal-messages daemon — JSONL over Unix socket, ring buffer with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends
-- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components; `/tmp/thermal-voice-state.json` for voice state + audio level
-- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (local Ollama qwen3:8b) → speak/read/route (delegates actions to agents)
+- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components. In daemon mode, state files are written natively by the PTY-based state inference engine (thermal-terminal); in kitty mode, legacy hook scripts write them. `/tmp/thermal-voice-state.json` for voice state + audio level
+- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (Claude CLI / Copilot CLI / Ollama fallback) → speak/read/route (delegates actions to agents)
 - **Voice Activity Detection**: Energy-based VAD with hysteresis (silero-vad-rust planned)
-- **LLM dispatch**: Local Ollama (qwen3:8b) — no API key required. Model configurable via `THERMAL_DISPATCHER_MODEL` env var
+- **LLM dispatch**: Claude CLI primary (`--json-schema` structured output), Copilot CLI secondary, Ollama (qwen3:8b) offline fallback. Backend configurable via `THERMAL_DISPATCHER_BACKEND` env var (claude/copilot/ollama). Model configurable via `THERMAL_DISPATCHER_MODEL` env var
+- **Observability**: tracing crate with env-filter for structured logging (`RUST_LOG=debug thc tui 2>thc.log`)
 
 ### Current Architecture (thermal-conductor)
 thermal-conductor has two primary modes and one optional backend:
 
-1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 4 tabs — Sessions (3-panel: agent list + live kitty preview + @-mention chat with bus routing), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management with auto-conflict resolution for shared-binary services), Messages (read-only message bus log).
+1. **TUI hub** (`thc` / `thc tui`): Tabbed ratatui dashboard with 4 tabs — Sessions (3-panel: agent list + live kitty preview + @-mention chat with bus routing), Profiles (Launch/Edit sub-modes for spawning and editing spawn profiles), Services (daemon management with auto-conflict resolution + integrated settings UI for `~/.config/thermal/settings.toml`, 'e' hotkey to edit), Messages (read-only message bus log).
 2. **GPU terminal** (`thermal-conductor window`): wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from session daemon). Agent overlay HUD (badge + timeline bar).
-3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Not required when kitty is available.
+3. **Session daemon** (`thc daemon`): Optional background daemon that owns PTY sessions, providing Unix socket API at `/run/user/$UID/thermal/conductor.sock`. Native PTY-based agent state detection via state_inference engine (no hook scripts needed). Not required when kitty is available.
 
 The TUI hub uses a pluggable backend layer to manage terminal sessions:
 
@@ -59,7 +60,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | Crate | Status | Description |
 |-------|--------|-------------|
 | **thermal-core** | Production | Shared palette, GPU context factory, multi-agent StatePoller (Claude/Codex/Copilot), text rendering, PTY session mgmt |
-| **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size (used by thermal-conductor and thermobile) |
+| **thermal-terminal** | Production | Shared terminal primitives — OSC 633 parser, input encoding, PTY session, terminal size, native agent state inference from PTY output (used by thermal-conductor and thermobile) |
 | **thermal-conductor** | Production | Tabbed TUI hub (Sessions/Profiles/Services/Messages) + GPU terminal window. Sessions tab: 3-panel layout with agent list, live kitty preview, @-mention chat with bus routing. Named agents (opus, sonnet, gpt5.4mini). Orchestrates kitty windows via `kitty @` API (primary) or optional PTY session daemon (fallback). |
 | **thermal-bar** | Production | GPU-rendered Wayland layer-shell status bar (CPU/GPU/mem/net + workspace map + agent sessions + voice level meter). Mouse click support: workspace switch, voice mute toggle, session focus |
 | **thermal-lock** | Production | GPU lock screen with WGSL heatmap shader + PAM auth (disabled on NVIDIA due to GPU context clash) |
@@ -68,7 +69,7 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 | **thermal-audio** | Production | TTS daemon — 12-voice pool, per-agent voices, state transition alerts (edge-tts + Unix socket API) |
 | **thermal-monitor** | Production | Standalone ratatui TUI dashboard showing all agent sessions (Claude/Codex/Copilot) with color-coded status |
 | **thermal-voice** | Production | Voice input daemon — always-listening VAD mode with PTT override, cpal audio capture, RMS level export, local Whisper STT, Unix socket API |
-| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via local Ollama (qwen3:8b) with 3-tool schema (speak/read/route), delegates all actions to agents, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
+| **thermal-dispatcher** | Production | AI voice command router — receives transcripts from thermal-voice, dispatches via Claude CLI (primary) / Copilot CLI (secondary) / Ollama (fallback) with 3-tool schema (speak/read/route), delegates all actions to agents, multi-turn conversational context (8-turn rolling window, 2min session timeout) |
 | **thermal-messages** | Production | Agent message bus daemon — JSONL over Unix socket, ring buffer (500 msgs) with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends, optional JSONL persistence, kitty live-session routing with one-shot fallback |
 | **thermal-commander** | Production | MCP server for Wayland/Hyprland desktop control — pane capture (kitty @ get-text), click, type, window mgmt, system metrics (JSON-RPC 2.0 over stdio) |
 | **thermal-face** | Prototype | GPU-rendered SDF avatar with thermal palette — animated face in layer-shell overlay, auto-blink, audio-driven mouth sync (planned) |
@@ -86,6 +87,8 @@ Evolving toward a fully integrated GPU terminal with native agent orchestration:
 - **Spawn profiles** (`config/profiles.toml` or `~/.config/thermal/profiles.toml`): Project definitions loaded by the TUI Profiles tab (Launch/Edit sub-modes). Sessions can be saved as profiles via 's' hotkey.
 - **Trust tiers** (`config/trust-tiers.toml`): AUTO/CONFIRM/BLOCK classification for voice-triggered tool execution. Used by thermal-messages routing (dispatcher delegates all actions to agents via route).
 - **Display name registry** (`sessions.json` sidecar): Maps session_id → display_name (opus, sonnet-2, gpt5.4mini). Dedup numbering for multiple sessions with same model. Used by TUI, HUD, and message bus for @-mention routing.
+- **AgentStateInference** (`thermal-terminal/src/state_inference.rs`): Native PTY-based agent state detection. Combines OSC 633 CommandTracker transitions with output heuristics (spinners, tool blocks, prompts) to infer agent status. Writes state files atomically to `/tmp/*-state/` directories. Used by thermal-conductor daemon mode; replaces hook scripts.
+- **Settings** (`~/.config/thermal/settings.toml`): Unified per-component config file. Read by the TUI Services tab (inline summary + 'e' hotkey to edit in `$EDITOR`). Auto-created with documented defaults on first access.
 
 ## Color Palette
 All colors defined in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.
@@ -147,9 +150,9 @@ cargo run -p thermal-lock             # Run lock screen (caution: NVIDIA GPU cla
 ### Architecture
 ```
 thermal-voice (cpal + whisper-cpp STT)
-    ├─ VAD mode: speech → dispatcher socket → Ollama qwen3:8b → tool execution
+    ├─ VAD mode: speech → dispatcher socket → LLM → tool execution
     └─ PTT mode: speech → wtype at cursor + clipboard + dispatcher
-thermal-dispatcher (Ollama qwen3:8b, local, no API key, 3 tools only)
+thermal-dispatcher (Claude CLI primary → Copilot CLI → Ollama fallback, 3 tools)
     ├─ speak(text) → thermal-audio socket → TTS
     ├─ read() → thermal-commander capture_pane → LLM summarizes
     └─ route(to, msg) → thermal-messages bus → @claude/@codex/@planner/@system
@@ -171,7 +174,7 @@ thermal-audio (TTS responses, suppressed during voice input)
 
 ### Dependencies
 - **whisper-cpp**: Local STT with CUDA. Install via `thermal-os-dotfiles/bin/install-whisper-cpp`.
-- **Ollama**: Local LLM server at localhost:11434. Model: `qwen3:8b` (configurable via `THERMAL_DISPATCHER_MODEL`).
+- **Ollama**: Local LLM server at localhost:11434, offline fallback. Model: `qwen3:8b` (configurable via `THERMAL_DISPATCHER_MODEL`). Backend selectable via `THERMAL_DISPATCHER_BACKEND` (claude/copilot/ollama; default: auto-detect in priority order).
 - **wtype**: Wayland text input for PTT dictation mode.
 - **wl-copy**: Clipboard for PTT transcripts.
 

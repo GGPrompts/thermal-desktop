@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Row, Table},
+    widgets::{Block, Borders, Clear, Paragraph, Row, Table, Wrap},
 };
 
 use thermal_core::{ClaudeStatePoller, palette::ThermalPalette};
@@ -81,6 +81,8 @@ struct ServiceDef {
     command: Option<&'static str>,
     /// Extra args passed to the command.
     args: &'static [&'static str],
+    /// Embedded daemon documentation (from docs/daemons/*.md), if available.
+    doc_content: Option<&'static str>,
 }
 
 /// Runtime status of a service.
@@ -101,6 +103,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pidfile("audio.pid"),
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-audio.md")),
     },
     ServiceDef {
         binary: "thermal-bar",
@@ -108,6 +111,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-bar.md")),
     },
     ServiceDef {
         binary: "thermal-hud",
@@ -115,6 +119,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-hud.md")),
     },
     ServiceDef {
         binary: "thermal-lock",
@@ -122,6 +127,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        doc_content: None,
     },
     ServiceDef {
         binary: "thermal-notify",
@@ -129,6 +135,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-notify.md")),
     },
     ServiceDef {
         binary: "codex-state-adapter",
@@ -136,6 +143,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pidfile("codex-state-adapter.pid"),
         command: Some(CODEX_ADAPTER_SCRIPT),
         args: &["--daemon"],
+        doc_content: None,
     },
     ServiceDef {
         binary: "thermal-voice",
@@ -143,6 +151,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pidfile("voice.pid"),
         command: None,
         args: &["listen"],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-voice.md")),
     },
     ServiceDef {
         binary: "thermal-dispatcher",
@@ -150,6 +159,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-dispatcher.md")),
     },
     ServiceDef {
         binary: "thermal-messages",
@@ -157,6 +167,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pidfile("messages.pid"),
         command: None,
         args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-messages.md")),
     },
     ServiceDef {
         binary: "thermal-conductor",
@@ -164,6 +175,7 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::PgrepPattern("thc daemon"),
         command: Some("thc"),
         args: &["daemon"],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-conductor.md")),
     },
 ];
 
@@ -476,6 +488,10 @@ pub struct ServicesPage {
     audio_state: AudioControlState,
     /// Parsed settings.toml data for inline config summaries.
     settings: ServiceSettings,
+    /// Whether the help overlay is visible for the selected daemon.
+    show_help: bool,
+    /// Scroll offset for the help overlay content.
+    help_scroll: u16,
 }
 
 impl ServicesPage {
@@ -490,6 +506,8 @@ impl ServicesPage {
             last_refresh: Instant::now(),
             audio_state: AudioControlState::default(),
             settings,
+            show_help: false,
+            help_scroll: 0,
         }
     }
 
@@ -921,7 +939,14 @@ impl TuiPage for ServicesPage {
                     .fg(ACCENT_COLD)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(": navigate", Style::default().fg(TEXT_MUTED)),
+            Span::styled(": navigate  ", Style::default().fg(TEXT_MUTED)),
+            Span::styled(
+                "?",
+                Style::default()
+                    .fg(ACCENT_COLD)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": help", Style::default().fg(TEXT_MUTED)),
         ];
         if self.selected_is_audio() {
             hints.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
@@ -947,6 +972,37 @@ impl TuiPage for ServicesPage {
                 .style(Style::default().fg(color));
             f.render_widget(status, chunks[3]);
         }
+
+        // Help overlay (rendered last so it draws on top).
+        if self.show_help {
+            if let Some(doc) = SERVICES[self.selected].doc_content {
+                let popup = centered_rect(80, 80, area);
+                f.render_widget(Clear, popup);
+
+                let title = format!(" {} ", SERVICES[self.selected].binary);
+                let lines: Vec<Line> = doc.lines().map(|l| Line::from(l.to_string())).collect();
+                let total_lines = lines.len() as u16;
+                // Clamp scroll so we don't scroll past the content.
+                let visible_height = popup.height.saturating_sub(2); // borders
+                if total_lines > visible_height {
+                    self.help_scroll = self.help_scroll.min(total_lines - visible_height);
+                } else {
+                    self.help_scroll = 0;
+                }
+                let help = Paragraph::new(lines)
+                    .block(
+                        Block::default()
+                            .title(title)
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(ACCENT_COLD))
+                            .style(Style::default().bg(BG_SURFACE)),
+                    )
+                    .style(Style::default().fg(TEXT))
+                    .wrap(Wrap { trim: false })
+                    .scroll((self.help_scroll, 0));
+                f.render_widget(help, popup);
+            }
+        }
     }
 
     fn handle_key(
@@ -956,7 +1012,43 @@ impl TuiPage for ServicesPage {
     ) -> bool {
         use crossterm::event::KeyCode;
 
+        // When the help overlay is visible, only allow dismiss and scroll.
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.help_scroll = self.help_scroll.saturating_add(1);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(10);
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         match key.code {
+            KeyCode::Char('?') => {
+                if SERVICES[self.selected].doc_content.is_some() {
+                    self.show_help = true;
+                    self.help_scroll = 0;
+                } else {
+                    self.status_msg = Some((
+                        format!("No docs available for {}", SERVICES[self.selected].binary),
+                        true,
+                        Instant::now(),
+                    ));
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.selected + 1 < SERVICES.len() {
                     self.selected += 1;
@@ -1042,6 +1134,30 @@ impl TuiPage for ServicesPage {
             _ => {}
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Layout helpers
+// ---------------------------------------------------------------------------
+
+/// Return a centered rectangle that occupies `percent_x` x `percent_y` of `r`.
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

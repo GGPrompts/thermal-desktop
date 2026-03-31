@@ -21,6 +21,244 @@ pub fn socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/run/user/{uid}/thermal/conductor.sock"))
 }
 
+// ── Semantic event stream types ──────────────────────────────────────────────
+//
+// These types define the semantic session event protocol from therm-4w00.
+// They are the wire contract for daemon-owned agent state subscriptions.
+// Implementation of the subscription handler is deferred to therm-6yqa.
+
+/// Scope filter for event subscriptions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum EventScope {
+    /// Receive events for all sessions.
+    All,
+    /// Receive events for a single session.
+    Session(String),
+    /// Receive events matching specific categories.
+    Categories(Vec<EventCategory>),
+}
+
+/// Event category for filtering subscriptions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EventCategory {
+    SessionLifecycle,
+    AgentRuntime,
+    Tool,
+    Context,
+    Compatibility,
+}
+
+/// Detected agent runtime family.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentRuntime {
+    Claude,
+    Codex,
+    Copilot,
+    Unknown,
+}
+
+impl Default for AgentRuntime {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// High-level agent activity state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AgentActivity {
+    Idle,
+    Prompting,
+    Thinking,
+    ToolRunning,
+    WaitingInput,
+    StreamingOutput,
+    Exited,
+}
+
+impl Default for AgentActivity {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+/// Context/token usage state for a session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ContextState {
+    /// Estimated token usage (if available).
+    #[serde(default)]
+    pub tokens_used: Option<u64>,
+    /// Estimated token limit (if available).
+    #[serde(default)]
+    pub tokens_limit: Option<u64>,
+    /// Saturation ratio 0.0..1.0 (if computable).
+    #[serde(default)]
+    pub saturation: Option<f64>,
+}
+
+/// Threshold level for context warnings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ContextThreshold {
+    Warning,
+    Critical,
+}
+
+/// Canonical session snapshot — rich enough that HUD/TUI/audio need no side channels.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticSessionSnapshot {
+    pub session_id: String,
+    /// Backend that owns this session (e.g. "daemon").
+    #[serde(default)]
+    pub backend: String,
+    /// Detected agent runtime.
+    #[serde(default)]
+    pub runtime: AgentRuntime,
+    /// Human-readable display name (e.g. "opus", "sonnet-2").
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Terminal title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Current working directory.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Workspace root (git repo root or project root).
+    #[serde(default)]
+    pub workspace_root: Option<String>,
+    /// PID of the shell/agent process.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// ISO 8601 timestamp when the session was spawned.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// ISO 8601 timestamp of last activity.
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
+    /// Exit code if the session has exited.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// Whether the session process is still alive.
+    #[serde(default)]
+    pub is_alive: bool,
+    /// Current high-level agent activity.
+    #[serde(default)]
+    pub agent_activity: AgentActivity,
+    /// Name of the currently running tool (if any).
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    /// Context/token usage state.
+    #[serde(default)]
+    pub context_state: ContextState,
+}
+
+/// A semantic session event with per-session sequencing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticEvent {
+    /// Session this event pertains to.
+    pub session_id: String,
+    /// Monotonically increasing per-session sequence number.
+    pub seq: u64,
+    /// The event payload.
+    pub kind: SemanticEventKind,
+}
+
+/// Semantic event variants covering the 5 categories from the daemon event model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SemanticEventKind {
+    // ── Session lifecycle ────────────────────────────────────────────────────
+    /// A new session was spawned.
+    SessionSpawned {
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// Session process exited.
+    SessionExited {
+        #[serde(default)]
+        exit_code: Option<i32>,
+        #[serde(default)]
+        reason: String,
+    },
+    /// Terminal title changed.
+    SessionRetitled {
+        title: String,
+    },
+    /// Working directory changed.
+    SessionCwdChanged {
+        cwd: String,
+    },
+
+    // ── Agent/runtime ────────────────────────────────────────────────────────
+    /// Agent runtime was identified.
+    RuntimeDetected {
+        runtime: AgentRuntime,
+    },
+    /// Agent activity state changed.
+    AgentActivityChanged {
+        activity: AgentActivity,
+        #[serde(default)]
+        previous: Option<AgentActivity>,
+    },
+    /// Agent started waiting for user input (prompt appeared).
+    PromptStarted,
+    /// Agent finished generating a response.
+    ResponseCompleted,
+
+    // ── Tool ─────────────────────────────────────────────────────────────────
+    /// A tool invocation started.
+    ToolStarted {
+        tool_name: String,
+    },
+    /// A tool invocation completed successfully.
+    ToolCompleted {
+        tool_name: String,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    /// A tool invocation failed.
+    ToolFailed {
+        tool_name: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
+
+    // ── Context ──────────────────────────────────────────────────────────────
+    /// Context/token usage was updated.
+    ContextUpdated {
+        state: ContextState,
+    },
+    /// Context saturation crossed a warning or critical threshold.
+    ContextThresholdCrossed {
+        level: ContextThreshold,
+        #[serde(default)]
+        saturation: Option<f64>,
+    },
+
+    // ── Compatibility ────────────────────────────────────────────────────────
+    /// State imported from external source (hook scripts, file watchers).
+    ExternalStateImported {
+        /// Source description (e.g. "/tmp/claude-code-state/sess-abc.json").
+        #[serde(default)]
+        source: String,
+    },
+}
+
+/// Initial delivery when a client subscribes: full snapshot plus the current
+/// sequence number so the client knows which events it has already seen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotSync {
+    pub snapshot: SemanticSessionSnapshot,
+    /// The sequence number of the last event applied to this snapshot.
+    /// Subsequent events will have `seq > this`.
+    pub seq: u64,
+}
+
+/// A batch of semantic events delivered to a subscriber.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EventBatch {
+    pub events: Vec<SemanticEvent>,
+}
+
 // ── Client → Daemon ──────────────────────────────────────────────────────────
 
 /// A request sent from a frontend client to the session daemon.
@@ -73,6 +311,15 @@ pub enum Request {
 
     /// Notify the daemon of a window resize.
     Resize { id: String, cols: u16, rows: u16 },
+
+    /// Subscribe to semantic session events.
+    ///
+    /// The daemon responds with `SnapshotSync` for each in-scope session,
+    /// then streams `EventBatch` messages as events occur.
+    /// Implementation deferred to therm-6yqa.
+    SubscribeEvents {
+        scope: EventScope,
+    },
 
     /// Connection health check — daemon responds with `Pong`.
     Ping,
@@ -134,6 +381,13 @@ pub enum Response {
         #[serde(default)]
         reason: String,
     },
+
+    /// Initial snapshot delivery for a subscribed session.
+    /// Sent once per in-scope session when a client sends `SubscribeEvents`.
+    SnapshotSync(SnapshotSync),
+
+    /// A batch of semantic events for subscribed sessions.
+    EventStream(EventBatch),
 
     /// Generic success acknowledgment.
     Ok,
@@ -1101,6 +1355,515 @@ mod tests {
             }
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    // ── Semantic event types ────────────────────────────────────────────────
+
+    /// Round-trip a SemanticEvent through MessagePack.
+    fn rt_semantic_event(evt: &SemanticEvent) -> SemanticEvent {
+        let payload = rmp_serde::to_vec(evt).expect("encode should succeed");
+        rmp_serde::from_slice(&payload).expect("decode should succeed")
+    }
+
+    #[test]
+    fn semantic_session_snapshot_round_trip() {
+        let snap = SemanticSessionSnapshot {
+            session_id: "sess-1".into(),
+            backend: "daemon".into(),
+            runtime: AgentRuntime::Claude,
+            display_name: Some("opus".into()),
+            title: Some("my terminal".into()),
+            cwd: Some("/home/builder/projects".into()),
+            workspace_root: Some("/home/builder/projects/thermal-desktop".into()),
+            pid: Some(12345),
+            started_at: Some("2026-03-31T10:00:00Z".into()),
+            last_activity_at: Some("2026-03-31T10:05:00Z".into()),
+            exit_code: None,
+            is_alive: true,
+            agent_activity: AgentActivity::Thinking,
+            current_tool: Some("Read".into()),
+            context_state: ContextState {
+                tokens_used: Some(50000),
+                tokens_limit: Some(200000),
+                saturation: Some(0.25),
+            },
+        };
+        let bytes = rmp_serde::to_vec(&snap).unwrap();
+        let decoded: SemanticSessionSnapshot = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.session_id, "sess-1");
+        assert_eq!(decoded.runtime, AgentRuntime::Claude);
+        assert_eq!(decoded.display_name.as_deref(), Some("opus"));
+        assert_eq!(decoded.agent_activity, AgentActivity::Thinking);
+        assert_eq!(decoded.current_tool.as_deref(), Some("Read"));
+        assert_eq!(decoded.context_state.tokens_used, Some(50000));
+        assert_eq!(decoded.context_state.saturation, Some(0.25));
+        assert!(decoded.is_alive);
+    }
+
+    #[test]
+    fn semantic_snapshot_defaults_for_minimal_fields() {
+        // Simulate a snapshot with only required fields, rest defaulted.
+        let snap = SemanticSessionSnapshot {
+            session_id: "minimal".into(),
+            backend: String::new(),
+            runtime: AgentRuntime::Unknown,
+            display_name: None,
+            title: None,
+            cwd: None,
+            workspace_root: None,
+            pid: None,
+            started_at: None,
+            last_activity_at: None,
+            exit_code: None,
+            is_alive: false,
+            agent_activity: AgentActivity::Idle,
+            current_tool: None,
+            context_state: ContextState::default(),
+        };
+        let bytes = rmp_serde::to_vec(&snap).unwrap();
+        let decoded: SemanticSessionSnapshot = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.session_id, "minimal");
+        assert_eq!(decoded.runtime, AgentRuntime::Unknown);
+        assert_eq!(decoded.agent_activity, AgentActivity::Idle);
+        assert!(decoded.context_state.tokens_used.is_none());
+    }
+
+    #[test]
+    fn semantic_event_session_spawned_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s1".into(),
+            seq: 1,
+            kind: SemanticEventKind::SessionSpawned {
+                display_name: Some("opus".into()),
+                cwd: Some("/tmp".into()),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        assert_eq!(decoded.session_id, "s1");
+        assert_eq!(decoded.seq, 1);
+        match decoded.kind {
+            SemanticEventKind::SessionSpawned { display_name, cwd } => {
+                assert_eq!(display_name.as_deref(), Some("opus"));
+                assert_eq!(cwd.as_deref(), Some("/tmp"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_session_exited_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s2".into(),
+            seq: 10,
+            kind: SemanticEventKind::SessionExited {
+                exit_code: Some(0),
+                reason: "PtyEof".into(),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        assert_eq!(decoded.seq, 10);
+        match decoded.kind {
+            SemanticEventKind::SessionExited { exit_code, reason } => {
+                assert_eq!(exit_code, Some(0));
+                assert_eq!(reason, "PtyEof");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_agent_activity_changed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s3".into(),
+            seq: 5,
+            kind: SemanticEventKind::AgentActivityChanged {
+                activity: AgentActivity::ToolRunning,
+                previous: Some(AgentActivity::Thinking),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::AgentActivityChanged { activity, previous } => {
+                assert_eq!(activity, AgentActivity::ToolRunning);
+                assert_eq!(previous, Some(AgentActivity::Thinking));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_tool_started_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s4".into(),
+            seq: 7,
+            kind: SemanticEventKind::ToolStarted {
+                tool_name: "Edit".into(),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ToolStarted { tool_name } => {
+                assert_eq!(tool_name, "Edit");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_tool_completed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s4".into(),
+            seq: 8,
+            kind: SemanticEventKind::ToolCompleted {
+                tool_name: "Edit".into(),
+                duration_ms: Some(150),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ToolCompleted {
+                tool_name,
+                duration_ms,
+            } => {
+                assert_eq!(tool_name, "Edit");
+                assert_eq!(duration_ms, Some(150));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_tool_failed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s4".into(),
+            seq: 9,
+            kind: SemanticEventKind::ToolFailed {
+                tool_name: "Bash".into(),
+                error: Some("permission denied".into()),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ToolFailed { tool_name, error } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(error.as_deref(), Some("permission denied"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_context_updated_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s5".into(),
+            seq: 3,
+            kind: SemanticEventKind::ContextUpdated {
+                state: ContextState {
+                    tokens_used: Some(80000),
+                    tokens_limit: Some(200000),
+                    saturation: Some(0.4),
+                },
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ContextUpdated { state } => {
+                assert_eq!(state.tokens_used, Some(80000));
+                assert_eq!(state.saturation, Some(0.4));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_context_threshold_crossed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s5".into(),
+            seq: 4,
+            kind: SemanticEventKind::ContextThresholdCrossed {
+                level: ContextThreshold::Critical,
+                saturation: Some(0.95),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ContextThresholdCrossed { level, saturation } => {
+                assert_eq!(level, ContextThreshold::Critical);
+                assert_eq!(saturation, Some(0.95));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_external_state_imported_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s6".into(),
+            seq: 1,
+            kind: SemanticEventKind::ExternalStateImported {
+                source: "/tmp/claude-code-state/sess-abc.json".into(),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::ExternalStateImported { source } => {
+                assert!(source.contains("claude-code-state"));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_runtime_detected_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s7".into(),
+            seq: 2,
+            kind: SemanticEventKind::RuntimeDetected {
+                runtime: AgentRuntime::Codex,
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::RuntimeDetected { runtime } => {
+                assert_eq!(runtime, AgentRuntime::Codex);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_prompt_started_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s8".into(),
+            seq: 6,
+            kind: SemanticEventKind::PromptStarted,
+        };
+        let decoded = rt_semantic_event(&evt);
+        assert!(matches!(decoded.kind, SemanticEventKind::PromptStarted));
+    }
+
+    #[test]
+    fn semantic_event_response_completed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s8".into(),
+            seq: 7,
+            kind: SemanticEventKind::ResponseCompleted,
+        };
+        let decoded = rt_semantic_event(&evt);
+        assert!(matches!(decoded.kind, SemanticEventKind::ResponseCompleted));
+    }
+
+    #[test]
+    fn semantic_event_session_retitled_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s9".into(),
+            seq: 3,
+            kind: SemanticEventKind::SessionRetitled {
+                title: "new title".into(),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::SessionRetitled { title } => {
+                assert_eq!(title, "new title");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn semantic_event_cwd_changed_round_trip() {
+        let evt = SemanticEvent {
+            session_id: "s9".into(),
+            seq: 4,
+            kind: SemanticEventKind::SessionCwdChanged {
+                cwd: "/home/builder/new-project".into(),
+            },
+        };
+        let decoded = rt_semantic_event(&evt);
+        match decoded.kind {
+            SemanticEventKind::SessionCwdChanged { cwd } => {
+                assert_eq!(cwd, "/home/builder/new-project");
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn snapshot_sync_round_trip() {
+        let sync = SnapshotSync {
+            snapshot: SemanticSessionSnapshot {
+                session_id: "sync-1".into(),
+                backend: "daemon".into(),
+                runtime: AgentRuntime::Claude,
+                display_name: Some("opus".into()),
+                title: None,
+                cwd: None,
+                workspace_root: None,
+                pid: None,
+                started_at: None,
+                last_activity_at: None,
+                exit_code: None,
+                is_alive: true,
+                agent_activity: AgentActivity::Idle,
+                current_tool: None,
+                context_state: ContextState::default(),
+            },
+            seq: 42,
+        };
+        let bytes = rmp_serde::to_vec(&sync).unwrap();
+        let decoded: SnapshotSync = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.seq, 42);
+        assert_eq!(decoded.snapshot.session_id, "sync-1");
+        assert_eq!(decoded.snapshot.runtime, AgentRuntime::Claude);
+    }
+
+    #[test]
+    fn event_batch_round_trip() {
+        let batch = EventBatch {
+            events: vec![
+                SemanticEvent {
+                    session_id: "b1".into(),
+                    seq: 1,
+                    kind: SemanticEventKind::PromptStarted,
+                },
+                SemanticEvent {
+                    session_id: "b1".into(),
+                    seq: 2,
+                    kind: SemanticEventKind::ResponseCompleted,
+                },
+            ],
+        };
+        let bytes = rmp_serde::to_vec(&batch).unwrap();
+        let decoded: EventBatch = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.events.len(), 2);
+        assert_eq!(decoded.events[0].seq, 1);
+        assert_eq!(decoded.events[1].seq, 2);
+    }
+
+    #[test]
+    fn event_scope_variants_round_trip() {
+        let scopes = vec![
+            EventScope::All,
+            EventScope::Session("sess-1".into()),
+            EventScope::Categories(vec![EventCategory::Tool, EventCategory::Context]),
+        ];
+        for scope in &scopes {
+            let bytes = rmp_serde::to_vec(scope).unwrap();
+            let decoded: EventScope = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(&decoded, scope);
+        }
+    }
+
+    #[test]
+    fn request_subscribe_events_round_trip() {
+        let req = Request::SubscribeEvents {
+            scope: EventScope::All,
+        };
+        let decoded = rt_request(&req);
+        match decoded {
+            Request::SubscribeEvents { scope } => {
+                assert_eq!(scope, EventScope::All);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn request_subscribe_events_session_scope_round_trip() {
+        let req = Request::SubscribeEvents {
+            scope: EventScope::Session("my-sess".into()),
+        };
+        let decoded = rt_request(&req);
+        match decoded {
+            Request::SubscribeEvents { scope } => {
+                assert_eq!(scope, EventScope::Session("my-sess".into()));
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_snapshot_sync_round_trip() {
+        let resp = Response::SnapshotSync(SnapshotSync {
+            snapshot: SemanticSessionSnapshot {
+                session_id: "snap-resp".into(),
+                backend: "daemon".into(),
+                runtime: AgentRuntime::Copilot,
+                display_name: Some("gpt5.4mini".into()),
+                title: None,
+                cwd: Some("/tmp".into()),
+                workspace_root: None,
+                pid: Some(9999),
+                started_at: None,
+                last_activity_at: None,
+                exit_code: None,
+                is_alive: true,
+                agent_activity: AgentActivity::StreamingOutput,
+                current_tool: None,
+                context_state: ContextState::default(),
+            },
+            seq: 100,
+        });
+        let decoded = rt_response(&resp);
+        match decoded {
+            Response::SnapshotSync(sync) => {
+                assert_eq!(sync.seq, 100);
+                assert_eq!(sync.snapshot.session_id, "snap-resp");
+                assert_eq!(sync.snapshot.runtime, AgentRuntime::Copilot);
+                assert_eq!(sync.snapshot.agent_activity, AgentActivity::StreamingOutput);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_event_stream_round_trip() {
+        let resp = Response::EventStream(EventBatch {
+            events: vec![SemanticEvent {
+                session_id: "ev-resp".into(),
+                seq: 7,
+                kind: SemanticEventKind::ToolStarted {
+                    tool_name: "Bash".into(),
+                },
+            }],
+        });
+        let decoded = rt_response(&resp);
+        match decoded {
+            Response::EventStream(batch) => {
+                assert_eq!(batch.events.len(), 1);
+                assert_eq!(batch.events[0].session_id, "ev-resp");
+                assert_eq!(batch.events[0].seq, 7);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // ── Backward compatibility (semantic types) ─────────────────────────────
+
+    #[test]
+    fn old_client_request_still_deserializes_without_subscribe_events() {
+        // Old clients won't send SubscribeEvents, but existing request variants
+        // must still deserialize correctly.
+        let req = Request::Ping;
+        let bytes = rmp_serde::to_vec(&req).unwrap();
+        let decoded: Request = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(decoded, Request::Ping));
+    }
+
+    #[test]
+    fn old_response_variants_unaffected_by_new_variants() {
+        // Verify existing Response variants still round-trip after adding
+        // SnapshotSync and EventStream.
+        let resp = Response::Ok;
+        let bytes = rmp_serde::to_vec(&resp).unwrap();
+        let decoded: Response = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(matches!(decoded, Response::Ok));
+
+        let resp2 = Response::Pong;
+        let bytes2 = rmp_serde::to_vec(&resp2).unwrap();
+        let decoded2: Response = rmp_serde::from_slice(&bytes2).unwrap();
+        assert!(matches!(decoded2, Response::Pong));
     }
 
     #[test]

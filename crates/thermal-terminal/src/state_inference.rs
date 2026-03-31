@@ -1556,9 +1556,9 @@ mod tests {
     fn throttled_status_change_flushed_on_next_call() {
         let mut engine = make_engine(Some(AgentType::Claude));
 
-        // Perform an initial write to set last_write to now.
-        engine.dirty = true;
-        engine.write_state_file();
+        // Set last_write to now to simulate a recent write (don't rely on
+        // write_state_file() succeeding — it touches the filesystem).
+        engine.last_write = Instant::now();
         let initial_write_time = engine.last_write;
 
         // Now simulate a status change while throttled (last_write is very recent).

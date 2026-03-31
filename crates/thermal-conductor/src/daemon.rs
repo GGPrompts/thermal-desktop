@@ -811,6 +811,12 @@ impl Daemon {
             }
 
             Request::Ping => Response::Pong,
+
+            // SubscribeEvents is handled at the connection level, not here.
+            // The subscription handler will be implemented in therm-6yqa.
+            Request::SubscribeEvents { .. } => Response::Error {
+                message: "SubscribeEvents not yet implemented".into(),
+            },
         }
     }
 

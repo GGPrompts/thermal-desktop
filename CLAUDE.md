@@ -19,9 +19,9 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio, messages)
 - **Agent message bus**: thermal-messages daemon — JSONL over Unix socket, ring buffer with subscriber replay, route table dispatching to @claude/@codex/@planner/@system/@user/@dispatcher backends
 - **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files read by multiple components. In daemon mode, state files are written natively by the PTY-based state inference engine (thermal-terminal); in kitty mode, legacy hook scripts write them. `/tmp/thermal-voice-state.json` for voice state + audio level
-- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (Claude CLI / Copilot CLI / Ollama fallback) → speak/read/route (delegates actions to agents)
+- **Voice pipeline**: cpal + faster-whisper (STT) → thermal-dispatcher (Copilot CLI / Claude CLI) → speak/read/route (delegates actions to agents). Dispatcher vs direct voice-to-terminal approach still being evaluated.
 - **Voice Activity Detection**: Energy-based VAD with hysteresis (silero-vad-rust planned)
-- **LLM dispatch**: Claude CLI primary (`--json-schema` structured output), Copilot CLI secondary, Ollama (qwen3:8b) offline fallback. Backend configurable via `THERMAL_DISPATCHER_BACKEND` env var (claude/copilot/ollama). Model configurable via `THERMAL_DISPATCHER_MODEL` env var
+- **LLM dispatch**: Copilot CLI primary (gpt4.1/gpt5-mini, unlimited via $10/mo GitHub Copilot plan), Claude CLI secondary (for complex routing). Ollama removed (poor quality). Backend configurable via `THERMAL_DISPATCHER_BACKEND` env var (copilot/claude). Model configurable via `THERMAL_DISPATCHER_MODEL` env var
 - **Observability**: tracing crate with env-filter for structured logging (`RUST_LOG=debug thc tui 2>thc.log`)
 
 ### Current Architecture (thermal-conductor)

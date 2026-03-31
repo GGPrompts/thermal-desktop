@@ -853,6 +853,8 @@ async fn dispatch_planner(msg: &Message) -> Result<Message> {
     let mut cmd = Command::new(resolve_binary("claude"));
     cmd.arg("-p")
         .arg(&msg.content)
+        .arg("--model")
+        .arg("haiku")
         .arg("--output-format")
         .arg("json")
         .arg("--system-prompt")

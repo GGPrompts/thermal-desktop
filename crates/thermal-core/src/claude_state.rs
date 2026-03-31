@@ -221,7 +221,7 @@ fn pid_is_alive(pid: i64) -> bool {
     use nix::sys::signal;
     use nix::unistd::Pid;
     // kill(pid, 0) checks existence without sending a signal.
-    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+    i32::try_from(pid).map_or(false, |p| signal::kill(Pid::from_raw(p), None).is_ok())
 }
 
 /// A session is considered dead if:

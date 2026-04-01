@@ -133,6 +133,13 @@ enum Commands {
 
     /// Launch the interactive TUI dashboard (default when no subcommand given)
     Tui,
+
+    /// Check health of all thermal daemons (PID liveness, socket connectivity)
+    Doctor {
+        /// Auto-fix: clean stale PID/socket files and restart dead core daemons
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,9 +167,12 @@ fn main() -> Result<()> {
         .add_directive("thermal_conductor=info".parse().unwrap())
         .add_directive("thermal_core=info".parse().unwrap());
 
+    // Doctor is a quick diagnostic — suppress tracing noise.
+    if matches!(command, Commands::Doctor { .. }) {
+        // No tracing init — just run silently.
+    } else if matches!(command, Commands::Tui) {
     // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
     // alternate screen. Other modes log to stderr as normal.
-    if matches!(command, Commands::Tui) {
         let log_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let log_path = std::path::PathBuf::from(log_dir)
             .join("thermal")
@@ -244,6 +254,7 @@ fn main() -> Result<()> {
                 Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Say { text, voice } => cmd_say(text.join(" "), voice).await,
+                Commands::Doctor { fix } => cmd_doctor(fix).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
@@ -673,6 +684,253 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// thc doctor — daemon health checker
+// ---------------------------------------------------------------------------
+
+struct DaemonSpec {
+    name: &'static str,
+    pid_file: Option<&'static str>,
+    socket_file: Option<&'static str>,
+    restart_cmd: Option<&'static [&'static str]>,
+}
+
+static DAEMONS: &[DaemonSpec] = &[
+    DaemonSpec {
+        name: "thermal-messages",
+        pid_file: Some("messages.pid"),
+        socket_file: Some("messages.sock"),
+        restart_cmd: Some(&["thermal-messages"]),
+    },
+    DaemonSpec {
+        name: "thermal-audio",
+        pid_file: Some("audio.pid"),
+        socket_file: Some("audio.sock"),
+        restart_cmd: Some(&["thermal-audio"]),
+    },
+    DaemonSpec {
+        name: "thermal-voice",
+        pid_file: Some("voice.pid"),
+        socket_file: Some("voice.sock"),
+        restart_cmd: Some(&["thermal-voice", "listen"]),
+    },
+    DaemonSpec {
+        name: "thermal-dispatcher",
+        pid_file: Some("dispatcher.pid"),
+        socket_file: None,
+        restart_cmd: Some(&["thermal-dispatcher"]),
+    },
+    DaemonSpec {
+        name: "thermal-bar",
+        pid_file: Some("bar.pid"),
+        socket_file: None,
+        restart_cmd: None,
+    },
+    DaemonSpec {
+        name: "thermal-conductor",
+        pid_file: None,
+        socket_file: Some("conductor.sock"),
+        restart_cmd: None,
+    },
+    DaemonSpec {
+        name: "thermal-hud",
+        pid_file: Some("hud.pid"),
+        socket_file: None,
+        restart_cmd: None,
+    },
+    DaemonSpec {
+        name: "thermal-notify",
+        pid_file: Some("notify.pid"),
+        socket_file: None,
+        restart_cmd: None,
+    },
+    DaemonSpec {
+        name: "thermal-wallpaper",
+        pid_file: Some("wallpaper.pid"),
+        socket_file: None,
+        restart_cmd: None,
+    },
+];
+
+#[derive(PartialEq)]
+enum DaemonHealth {
+    Running,
+    Dead,
+    NotRunning,
+}
+
+async fn cmd_doctor(fix: bool) -> Result<()> {
+    let uid = nix::unistd::getuid().as_raw();
+    let run_dir = std::path::PathBuf::from(format!("/run/user/{uid}/thermal"));
+
+    let mut healthy = 0u32;
+    let mut dead = 0u32;
+    let mut not_running = 0u32;
+
+    println!();
+    for spec in DAEMONS {
+        let (health, detail) = check_daemon(spec, &run_dir).await;
+
+        let icon = match health {
+            DaemonHealth::Running => "\x1b[32m✓\x1b[0m",
+            DaemonHealth::Dead => "\x1b[31m✗\x1b[0m",
+            DaemonHealth::NotRunning => "\x1b[90m-\x1b[0m",
+        };
+
+        println!("  {icon} {:<24} {detail}", spec.name);
+
+        match health {
+            DaemonHealth::Running => healthy += 1,
+            DaemonHealth::Dead => {
+                dead += 1;
+                if fix {
+                    fix_daemon(spec, &run_dir).await;
+                }
+            }
+            DaemonHealth::NotRunning => not_running += 1,
+        }
+    }
+
+    println!();
+    let mut parts = Vec::new();
+    if healthy > 0 {
+        parts.push(format!("\x1b[32m{healthy} healthy\x1b[0m"));
+    }
+    if dead > 0 {
+        parts.push(format!("\x1b[31m{dead} dead\x1b[0m"));
+    }
+    if not_running > 0 {
+        parts.push(format!("\x1b[90m{not_running} not running\x1b[0m"));
+    }
+    println!("  {}", parts.join(", "));
+    println!();
+
+    if dead > 0 && !fix {
+        println!("  Run \x1b[1mthc doctor --fix\x1b[0m to clean stale files and restart core daemons.");
+        println!();
+    }
+
+    Ok(())
+}
+
+async fn check_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) -> (DaemonHealth, String) {
+    let mut pid_alive = None; // None = no pidfile, Some(true/false)
+    let mut pid_val: Option<u32> = None;
+
+    if let Some(pf) = spec.pid_file {
+        let path = run_dir.join(pf);
+        if path.exists() {
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = contents.trim().parse::<u32>() {
+                    pid_val = Some(pid);
+                    pid_alive = Some(std::path::Path::new(&format!("/proc/{pid}")).exists());
+                }
+            }
+        }
+    }
+
+    let mut sock_ok = None; // None = no socket expected
+    if let Some(sf) = spec.socket_file {
+        let path = run_dir.join(sf);
+        if path.exists() {
+            let connect_result = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                tokio::net::UnixStream::connect(&path),
+            )
+            .await;
+            sock_ok = Some(matches!(connect_result, Ok(Ok(_))));
+        } else {
+            sock_ok = Some(false);
+        }
+    }
+
+    // Determine overall health
+    match (pid_alive, sock_ok) {
+        // PID alive
+        (Some(true), Some(true)) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Running, format!("running (pid {pid})  sock \x1b[32m✓\x1b[0m"))
+        }
+        (Some(true), Some(false)) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Running, format!("running (pid {pid})  sock \x1b[33m✗\x1b[0m"))
+        }
+        (Some(true), None) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Running, format!("running (pid {pid})"))
+        }
+        // PID dead (stale)
+        (Some(false), Some(true)) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m  sock responding (zombie?)"))
+        }
+        (Some(false), Some(false)) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m  sock stale"))
+        }
+        (Some(false), None) => {
+            let pid = pid_val.unwrap();
+            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m"))
+        }
+        // No PID file
+        (None, Some(true)) => {
+            (DaemonHealth::Running, "no pidfile  sock \x1b[32m✓\x1b[0m".to_string())
+        }
+        (None, Some(false)) => {
+            (DaemonHealth::Dead, "no pidfile  sock \x1b[31mstale\x1b[0m".to_string())
+        }
+        (None, None) => {
+            (DaemonHealth::NotRunning, "not running".to_string())
+        }
+    }
+}
+
+async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
+    // Clean stale PID file
+    if let Some(pf) = spec.pid_file {
+        let path = run_dir.join(pf);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("    \x1b[33m! could not remove {}: {e}\x1b[0m", path.display());
+            } else {
+                println!("    \x1b[90mcleaned {pf}\x1b[0m");
+            }
+        }
+    }
+
+    // Clean stale socket file
+    if let Some(sf) = spec.socket_file {
+        let path = run_dir.join(sf);
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                eprintln!("    \x1b[33m! could not remove {}: {e}\x1b[0m", path.display());
+            } else {
+                println!("    \x1b[90mcleaned {sf}\x1b[0m");
+            }
+        }
+    }
+
+    // Restart if this is a core service daemon
+    if let Some(cmd) = spec.restart_cmd {
+        let program = cmd[0];
+        let args = &cmd[1..];
+        match tokio::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => {
+                println!("    \x1b[32m↻ restarted {}\x1b[0m", spec.name);
+            }
+            Err(e) => {
+                eprintln!("    \x1b[31m! failed to restart {}: {e}\x1b[0m", spec.name);
+            }
+        }
+    }
 }
 
 /// Format a ClaudeStatus for display.

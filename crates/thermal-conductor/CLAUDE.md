@@ -14,6 +14,8 @@ thc --backend=daemon                   # Force daemon backend
 thc --backend=auto                     # Try kitty first, then daemon (default)
 thc daemon                             # Start the optional PTY session daemon
 thc window                             # Launch the standalone GPU terminal window
+thc doctor                             # Check health of all thermal daemons
+thc doctor --fix                       # Clean stale files + restart dead core daemons
 ```
 
 ## Architecture
@@ -62,9 +64,15 @@ Designed as a command center for a vertical monitor:
 - Phase 3 (done): Session daemon streaming to GPU terminal
 - Phase 4: AI-native features (semantic scrollback, context heatmaps)
 
+## State File Watcher
+The daemon owns a **single `ClaudeStatePoller`** (inotify) that watches `/tmp/{claude-code,codex,copilot}-state/` and imports external sessions into the semantic event bus. This replaces the old pattern where every consumer ran its own poller. External sessions get the same granular events (activity, tool start/stop, context threshold) as daemon-owned PTY sessions. Sessions are tagged `backend: "external"` vs `"daemon"`.
+
+## Health Checks
+`thc doctor` checks PID liveness and socket connectivity for all thermal daemons. `thc doctor --fix` cleans stale PID/socket files and restarts core service daemons.
+
 ## Known Issues
-- **Stale socket hazard**: if `conductor.sock` lingers after daemon crash, `thc window` enters client mode against dead socket — clean up with `rm /run/user/$UID/thermal/conductor.sock`
+- **Stale socket hazard**: if `conductor.sock` lingers after daemon crash, `thc window` enters client mode against dead socket — use `thc doctor --fix` or `rm /run/user/$UID/thermal/conductor.sock`
 
 ## Dependencies
-- `thermal-core` for `ClaudeStatePoller` (Sessions tab) and shared palette
+- `thermal-core` for `ClaudeStatePoller` (daemon-owned, single instance) and shared palette
 - kitty with `allow_remote_control socket-only` (or `thc daemon` as fallback)

@@ -6,7 +6,7 @@ Shared library for the thermal desktop suite.
 - **ThermalPalette** (`src/palette.rs`): 18 thermal color constants with gradient interpolation. Used everywhere.
 - **WgpuContext** (`src/wgpu_ctx.rs`): Shared GPU device/queue factory (queries surface capabilities for format selection).
 - **ThermalTextRenderer** (`src/text.rs`): glyphon wrapper with cached font system.
-- **ClaudeStatePoller** (`src/claude_state.rs`): File-watches `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` for agent session JSON files. Infers `agent_type` from directory. `model_display_name()` maps model IDs to short names (opus, sonnet, haiku, gpt5.4mini). Used by thermal-conductor, thermal-bar, thermal-monitor, thermal-audio.
+- **ClaudeStatePoller** (`src/claude_state.rs`): File-watches `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` for agent session JSON files. Infers `agent_type` from directory. `model_display_name()` maps model IDs to short names (opus, sonnet, haiku, gpt5.4mini). **Owned by the conductor daemon** — a single poller instance broadcasts state changes as semantic events to all subscribers. Other components (bar, audio, HUD, monitor) should subscribe to the daemon event bus rather than creating their own poller.
 - **ggl codegen types** (`src/ggl_types.rs`): Wire protocol types generated from `schemas/thermal-protocol.ggl`. `ClaudeStatus` and `SessionState` (aliased as `ClaudeSessionState`) are ggl-generated.
 
 ## Display Name Registry

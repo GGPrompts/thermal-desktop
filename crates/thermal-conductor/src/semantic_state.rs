@@ -18,8 +18,9 @@
 //!     → SemanticSessionState (this module)
 //!       → SemanticEvent
 //!
-//! External file watchers (/tmp/*-state/)
-//!   → ExternalStateImported event (non-authoritative)
+//! External state files (/tmp/*-state/) — single daemon-owned poller
+//!   → import_external_session() (this module)
+//!     → granular SemanticEvents (activity, tool, context — same as daemon-owned)
 //! ```
 
 use std::collections::HashMap;
@@ -34,6 +35,7 @@ use crate::protocol::{
     AgentActivity, AgentRuntime, ContextState, ContextThreshold, EventScope, SemanticEvent,
     SemanticEventKind, SemanticSessionSnapshot, SnapshotSync,
 };
+use thermal_core::{ClaudeSessionState, ClaudeStatus};
 use thermal_terminal::state_inference::{AgentType, InferredStatus};
 use thermal_terminal::StateChangeNotification;
 
@@ -46,6 +48,7 @@ use thermal_terminal::StateChangeNotification;
 #[derive(Debug)]
 pub(crate) struct SemanticSessionState {
     pub session_id: String,
+    pub backend: String,
     pub display_name: Option<String>,
     pub runtime: AgentRuntime,
     pub activity: AgentActivity,
@@ -68,6 +71,7 @@ impl SemanticSessionState {
     pub fn new(session_id: String, display_name: Option<String>, cwd: Option<String>, pid: Option<u32>) -> Self {
         Self {
             session_id,
+            backend: "daemon".to_string(),
             display_name,
             runtime: AgentRuntime::Unknown,
             activity: AgentActivity::Idle,
@@ -89,7 +93,7 @@ impl SemanticSessionState {
     pub fn snapshot(&self) -> SemanticSessionSnapshot {
         SemanticSessionSnapshot {
             session_id: self.session_id.clone(),
-            backend: "daemon".to_string(),
+            backend: self.backend.clone(),
             runtime: self.runtime.clone(),
             display_name: self.display_name.clone(),
             title: self.title.clone(),
@@ -488,35 +492,199 @@ impl SemanticEventBus {
         }
     }
 
-    // ── External state import ────────────────────────────────────────────
+    // ── External state file watcher ─────────────────────────────────────
 
-    /// Record that state was imported from an external file watcher.
+    /// Check whether a session is managed by the daemon's own PTY inference
+    /// (as opposed to imported from external state files).
+    pub fn is_daemon_owned(&self, session_id: &str) -> bool {
+        let states = self.states.lock();
+        states
+            .get(session_id)
+            .map(|s| s.backend == "daemon")
+            .unwrap_or(false)
+    }
+
+    /// Import or update a session from an external state file (e.g. kitty-managed).
     ///
-    /// This is non-authoritative — the daemon's own inference is canonical.
-    pub fn external_state_imported(&self, session_id: &str, source: String) {
-        let seq = {
-            let mut states = self.states.lock();
-            if let Some(state) = states.get_mut(session_id) {
-                state.touch();
-                state.next_seq()
-            } else {
-                // External state for an unknown session — create a placeholder.
-                let mut state = SemanticSessionState::new(
-                    session_id.to_string(),
-                    None,
-                    None,
-                    None,
-                );
+    /// Emits granular semantic events for each detected change so that
+    /// subscribers (audio, HUD, etc.) receive the same event stream as
+    /// daemon-owned sessions.
+    pub fn import_external_session(&self, session: &ClaudeSessionState) {
+        let sid = &session.session_id;
+        let new_activity = claude_status_to_activity(&session.status);
+        let new_tool = session.current_tool.clone();
+        let new_context_pct = session.context_percent;
+
+        let mut states = self.states.lock();
+
+        if let Some(state) = states.get_mut(sid) {
+            // Existing external session — emit events for changes.
+            state.touch();
+
+            // Activity change
+            if state.activity != new_activity {
+                let previous = state.activity.clone();
+                state.activity = new_activity.clone();
                 let seq = state.next_seq();
-                states.insert(session_id.to_string(), state);
-                seq
+                drop(states);
+                self.emit(SemanticEvent {
+                    session_id: sid.clone(),
+                    seq,
+                    kind: SemanticEventKind::AgentActivityChanged {
+                        activity: new_activity,
+                        previous: Some(previous),
+                    },
+                });
+                states = self.states.lock();
+                // Re-borrow after re-lock — session may have been removed
+                // (extremely unlikely but safe).
+                if states.get_mut(sid).is_none() { return; }
             }
-        };
-        self.emit(SemanticEvent {
-            session_id: session_id.to_string(),
-            seq,
-            kind: SemanticEventKind::ExternalStateImported { source },
-        });
+
+            let state = states.get_mut(sid).unwrap();
+
+            // Tool change
+            if state.current_tool != new_tool {
+                let old_tool = state.current_tool.take();
+                state.current_tool = new_tool.clone();
+
+                let events: Vec<SemanticEvent> = {
+                    let mut evts = Vec::new();
+                    if let Some(ref t) = old_tool {
+                        let seq = state.next_seq();
+                        evts.push(SemanticEvent {
+                            session_id: sid.clone(),
+                            seq,
+                            kind: SemanticEventKind::ToolCompleted {
+                                tool_name: t.clone(),
+                                duration_ms: None,
+                            },
+                        });
+                    }
+                    if let Some(ref t) = new_tool {
+                        let seq = state.next_seq();
+                        evts.push(SemanticEvent {
+                            session_id: sid.clone(),
+                            seq,
+                            kind: SemanticEventKind::ToolStarted {
+                                tool_name: t.clone(),
+                            },
+                        });
+                    }
+                    evts
+                };
+                drop(states);
+                for e in events {
+                    self.emit(e);
+                }
+                states = self.states.lock();
+                if states.get_mut(sid).is_none() { return; }
+            }
+
+            let state = states.get_mut(sid).unwrap();
+
+            // Context change
+            if let Some(pct) = new_context_pct {
+                let old_pct = state.context_state.saturation;
+                state.context_state.saturation = Some(pct);
+                let seq = state.next_seq();
+
+                // Check threshold crossings
+                let old_level = old_pct.map(threshold_level);
+                let new_level = Some(threshold_level(pct));
+                if old_level != new_level {
+                    if let Some(level) = new_level.flatten() {
+                        let crossing = SemanticEvent {
+                            session_id: sid.clone(),
+                            seq,
+                            kind: SemanticEventKind::ContextThresholdCrossed {
+                                level,
+                                saturation: Some(pct),
+                            },
+                        };
+                        drop(states);
+                        self.emit(crossing);
+                        // Context is the last field checked — safe to return early.
+                        // If more fields are added below, restructure to avoid skipping them.
+                        return;
+                    }
+                }
+            }
+        } else {
+            // New external session — create state and emit SessionSpawned.
+            let display_name = session.model_display_name();
+            let runtime = session
+                .agent_type
+                .as_deref()
+                .map(|t| match t {
+                    "claude" => AgentRuntime::Claude,
+                    "codex" => AgentRuntime::Codex,
+                    "copilot" => AgentRuntime::Copilot,
+                    _ => AgentRuntime::Unknown,
+                })
+                .unwrap_or(AgentRuntime::Unknown);
+
+            let mut state = SemanticSessionState::new(
+                sid.clone(),
+                Some(display_name.clone()),
+                session.working_dir.clone(),
+                session.pid.map(|p| p as u32),
+            );
+            state.backend = "external".to_string();
+            state.runtime = runtime.clone();
+            state.activity = new_activity.clone();
+            state.current_tool = new_tool;
+            if let Some(pct) = new_context_pct {
+                state.context_state.saturation = Some(pct);
+            }
+
+            let seq = state.next_seq();
+            states.insert(sid.clone(), state);
+            drop(states);
+
+            self.emit(SemanticEvent {
+                session_id: sid.clone(),
+                seq,
+                kind: SemanticEventKind::SessionSpawned {
+                    display_name: Some(display_name),
+                    cwd: session.working_dir.clone(),
+                },
+            });
+
+            // Also emit the initial activity if not idle
+            if new_activity != AgentActivity::Idle {
+                let mut states = self.states.lock();
+                if let Some(state) = states.get_mut(sid) {
+                    let seq = state.next_seq();
+                    drop(states);
+                    self.emit(SemanticEvent {
+                        session_id: sid.clone(),
+                        seq,
+                        kind: SemanticEventKind::AgentActivityChanged {
+                            activity: new_activity,
+                            previous: Some(AgentActivity::Idle),
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    /// Remove an external session that is no longer present in state files.
+    pub fn remove_external_session(&self, session_id: &str) {
+        let mut states = self.states.lock();
+        if let Some(mut state) = states.remove(session_id) {
+            let seq = state.next_seq();
+            drop(states);
+            self.emit(SemanticEvent {
+                session_id: session_id.to_string(),
+                seq,
+                kind: SemanticEventKind::SessionExited {
+                    exit_code: None,
+                    reason: "state file removed".to_string(),
+                },
+            });
+        }
     }
 
     // ── Internal ─────────────────────────────────────────────────────────
@@ -567,6 +735,27 @@ fn now_rfc3339() -> String {
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
         year, month, day, hour, minute, second, millis
     )
+}
+
+/// Map `ClaudeStatus` (from state files) to `AgentActivity`.
+fn claude_status_to_activity(status: &ClaudeStatus) -> AgentActivity {
+    match status {
+        ClaudeStatus::Idle => AgentActivity::Idle,
+        ClaudeStatus::Processing => AgentActivity::Thinking,
+        ClaudeStatus::ToolUse => AgentActivity::ToolRunning,
+        ClaudeStatus::AwaitingInput => AgentActivity::WaitingInput,
+    }
+}
+
+/// Return the threshold level for a given context percentage, if any.
+fn threshold_level(pct: f64) -> Option<ContextThreshold> {
+    if pct >= 0.90 {
+        Some(ContextThreshold::Critical)
+    } else if pct >= 0.75 {
+        Some(ContextThreshold::Warning)
+    } else {
+        None
+    }
 }
 
 /// Map `InferredStatus` to `AgentActivity`.

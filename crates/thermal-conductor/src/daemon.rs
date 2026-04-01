@@ -1382,6 +1382,71 @@ pub async fn run_daemon_on(
     Ok(daemon)
 }
 
+// ── State file watcher ───────────────────────────────────────────────────────
+
+/// Spawn a background task that watches `/tmp/{claude-code,codex,copilot}-state/`
+/// via a single `ClaudeStatePoller` (inotify) and relays changes as semantic
+/// events through the daemon's event bus.
+///
+/// This collapses the N separate inotify watchers that consumers (bar, audio,
+/// HUD, TUI, monitor) would each create into a single watcher owned by the
+/// daemon.  Consumers subscribe to the daemon's event stream instead.
+fn spawn_state_file_watcher(daemon: Arc<Daemon>) {
+    use std::collections::HashSet;
+    use thermal_core::ClaudeStatePoller;
+
+    tokio::spawn(async move {
+        let mut poller = match ClaudeStatePoller::new() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("State file watcher failed to start: {e}");
+                return;
+            }
+        };
+
+        info!("State file watcher started (single inotify for all consumers)");
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        // Track which external session IDs we've seen, so we can detect removals.
+        let mut known_external: HashSet<String> = HashSet::new();
+
+        loop {
+            interval.tick().await;
+
+            let sessions = poller.poll();
+            let mut current_ids: HashSet<String> = HashSet::new();
+
+            for session in &sessions {
+                let sid = &session.session_id;
+
+                // Skip sessions the daemon owns via its inference engine.
+                if daemon.event_bus.is_daemon_owned(sid) {
+                    continue;
+                }
+
+                current_ids.insert(sid.clone());
+                daemon.event_bus.import_external_session(session);
+            }
+
+            // Detect removed external sessions.
+            let removed: Vec<String> = known_external
+                .difference(&current_ids)
+                .cloned()
+                .collect();
+            for sid in &removed {
+                // Only remove if it's still external (not daemon-owned).
+                if !daemon.event_bus.is_daemon_owned(sid) {
+                    daemon.event_bus.remove_external_session(sid);
+                }
+            }
+
+            known_external = current_ids;
+        }
+    });
+}
+
 /// Run the session daemon.
 ///
 /// This is an async function that runs until interrupted (SIGTERM/SIGINT).
@@ -1487,6 +1552,9 @@ pub async fn run_daemon() -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
         let _ = shutdown_tx.send(()).await;
     });
+
+    // ── State file watcher — single inotify for all consumers ──────────
+    spawn_state_file_watcher(Arc::clone(&daemon));
 
     // Delegate to the shared accept loop.
     let daemon = run_daemon_on(listener, shutdown_rx, Some(daemon)).await?;

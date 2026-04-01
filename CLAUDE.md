@@ -17,7 +17,7 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **D-Bus**: zbus 5 (async, tokio, 100% Rust)
 - **File watching**: notify 7
 - **IPC**: Unix sockets in `/run/user/$UID/thermal/` (conductor, voice, dispatcher, audio, messages)
-- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files. `/tmp/thermal-voice-state.json` for voice state + audio level
+- **State exchange**: `/tmp/claude-code-state/`, `/tmp/codex-state/`, `/tmp/copilot-state/` JSON files written by hooks/adapters. The conductor daemon owns a single `ClaudeStatePoller` (inotify) and broadcasts changes as semantic events — other components subscribe to the daemon instead of watching files directly. `/tmp/thermal-voice-state.json` for voice state + audio level
 - **Observability**: tracing crate with env-filter (`RUST_LOG=debug thc tui 2>thc.log`)
 
 ### Color Palette

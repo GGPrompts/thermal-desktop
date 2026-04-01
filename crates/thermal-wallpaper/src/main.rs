@@ -4,6 +4,7 @@
 /// modulated by real-time system metrics (CPU, GPU, memory). Low system load
 /// produces cool/blue drifting noise; high load produces hot/red turbulence.
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -129,6 +130,8 @@ fn read_mem_load() -> f32 {
 }
 
 /// Read GPU usage as a fraction 0.0 - 1.0.
+/// Only uses sysfs reads (non-blocking). NVIDIA nvidia-smi is avoided because
+/// it blocks for seconds under load and can freeze the render thread.
 fn read_gpu_load() -> f32 {
     // AMD: /sys/class/drm/card0/device/gpu_busy_percent
     if let Ok(raw) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
@@ -136,19 +139,28 @@ fn read_gpu_load() -> f32 {
     {
         return (pct / 100.0).clamp(0.0, 1.0);
     }
-    // NVIDIA: nvidia-smi
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        && let Ok(text) = String::from_utf8(output.stdout)
-        && let Ok(pct) = text.trim().parse::<f32>()
+    // NVIDIA: read from sysfs instead of nvidia-smi to avoid blocking
+    if let Ok(raw) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
+        .or_else(|_| std::fs::read_to_string("/sys/class/drm/card1/device/gpu_busy_percent"))
+        && let Ok(pct) = raw.trim().parse::<f32>()
     {
         return (pct / 100.0).clamp(0.0, 1.0);
     }
     0.0
+}
+
+/// Atomically shared metrics — background thread writes, render thread reads.
+/// Values stored as `f32 * 1000` in u32 for lock-free sharing.
+static SHARED_CPU: AtomicU32 = AtomicU32::new(0);
+static SHARED_GPU: AtomicU32 = AtomicU32::new(0);
+static SHARED_MEM: AtomicU32 = AtomicU32::new(0);
+
+fn store_f32(a: &AtomicU32, v: f32) {
+    a.store((v * 1000.0) as u32, Ordering::Relaxed);
+}
+
+fn load_f32(a: &AtomicU32) -> f32 {
+    a.load(Ordering::Relaxed) as f32 / 1000.0
 }
 
 #[derive(Clone, Copy)]
@@ -159,13 +171,34 @@ struct SystemLoad {
 }
 
 impl SystemLoad {
-    fn poll() -> Self {
+    /// Read latest metrics from the background poller (lock-free).
+    fn read_shared() -> Self {
         Self {
-            cpu: read_cpu_load(),
-            gpu: read_gpu_load(),
-            mem: read_mem_load(),
+            cpu: load_f32(&SHARED_CPU),
+            gpu: load_f32(&SHARED_GPU),
+            mem: load_f32(&SHARED_MEM),
         }
     }
+}
+
+/// Spawn a background thread that polls system metrics every second.
+/// This keeps all blocking I/O off the render thread.
+fn spawn_metrics_poller() {
+    // Seed the CPU delta so the first real read has a baseline.
+    let _ = read_cpu_load();
+
+    std::thread::Builder::new()
+        .name("metrics-poller".into())
+        .spawn(move || loop {
+            let cpu = read_cpu_load();
+            let gpu = read_gpu_load();
+            let mem = read_mem_load();
+            store_f32(&SHARED_CPU, cpu);
+            store_f32(&SHARED_GPU, gpu);
+            store_f32(&SHARED_MEM, mem);
+            std::thread::sleep(Duration::from_secs(1));
+        })
+        .expect("failed to spawn metrics poller thread");
 }
 
 // ── WGSL Shader ─────────────────────────────────────────────────────────────
@@ -424,10 +457,12 @@ impl WallpaperPipeline {
     }
 
     fn update_uniforms(&self, queue: &wgpu::Queue, width: u32, height: u32, load: &SystemLoad) {
+        // The shader uses circular paths (cos/sin) in noise space, so time
+        // naturally loops without a modulo. Removing the % 600 wrap that
+        // caused a visible jump every 10 minutes. f32 precision stays fine
+        // for days (noise only needs ~4 significant digits).
         let uniforms = Uniforms {
-            // Wrap time to avoid float precision loss and ensure smooth looping.
-            // 600s period (~10 min) keeps fractional precision high.
-            time: self.start.elapsed().as_secs_f32() % 600.0,
+            time: self.start.elapsed().as_secs_f32(),
             cpu_load: load.cpu,
             gpu_load: load.gpu,
             mem_load: load.mem,
@@ -709,18 +744,11 @@ fn main() -> anyhow::Result<()> {
         "renderer initialized, entering render loop (~30fps)"
     );
 
+    // ── Metrics poller (background thread) ───────────────────────────────
+    spawn_metrics_poller();
+
     // ── Render loop ─────────────────────────────────────────────────────
     let frame_duration = Duration::from_millis(33); // ~30fps
-    let metrics_interval = Duration::from_secs(1);
-    let mut last_metrics_poll = Instant::now() - metrics_interval; // force immediate first poll
-    let mut load = SystemLoad {
-        cpu: 0.0,
-        gpu: 0.0,
-        mem: 0.0,
-    };
-
-    // Seed CPU delta computation.
-    let _ = read_cpu_load();
 
     loop {
         let frame_start = Instant::now();
@@ -742,12 +770,8 @@ fn main() -> anyhow::Result<()> {
             break;
         }
 
-        // Poll system metrics every second.
-        if last_metrics_poll.elapsed() >= metrics_interval {
-            load = SystemLoad::poll();
-            last_metrics_poll = Instant::now();
-            debug!(cpu = load.cpu, gpu = load.gpu, mem = load.mem, "metrics");
-        }
+        // Read latest metrics from background poller (lock-free, never blocks).
+        let load = SystemLoad::read_shared();
 
         // Handle resize.
         if surface_config.width != state.width || surface_config.height != state.height {

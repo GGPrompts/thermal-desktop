@@ -26,7 +26,21 @@ echo "== Kill thermal processes =="
 pkill -f 'thermal-' || true
 kill_matching_pgrep 'target/debug/thermal-'
 kill_matching_pgrep 'cargo.*thermal-'
-sleep 2
+
+# Wait for graceful shutdown, then SIGKILL any stragglers
+echo "   waiting for processes to exit..."
+for i in 1 2 3 4 5; do
+    if ! pgrep -f 'thermal-' >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+# Force-kill anything still alive
+if pgrep -f 'thermal-' >/dev/null 2>&1; then
+    echo "   force-killing remaining processes"
+    pkill -9 -f 'thermal-' || true
+    sleep 1
+fi
 
 echo "== Clean runtime state =="
 mkdir -p "$RUNTIME_DIR"

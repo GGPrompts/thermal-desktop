@@ -195,8 +195,17 @@ pub fn remove_pidfile(daemon_name: &str, path: &Path) {
 /// and calls `std::process::exit(0)`. Otherwise removes the stale pidfile.
 pub fn enforce_single_instance(daemon_name: &str) {
     let path = pidfile_path(daemon_name);
-    if let Some(pid) = validate_pidfile(daemon_name, &path) {
-        eprintln!("{daemon_name} already running (pid {pid}). Exiting.");
+    enforce_single_instance_at(daemon_name, &path);
+}
+
+/// Single-instance guard using an explicit pidfile path.
+///
+/// This is useful for binaries that want user-facing names like
+/// `"thermal-bar"` while storing pidfiles under short runtime names like
+/// `"bar.pid"`.
+pub fn enforce_single_instance_at(display_name: &str, path: &Path) {
+    if let Some(pid) = validate_pidfile(display_name, path) {
+        eprintln!("{display_name} already running (pid {pid}). Exiting.");
         std::process::exit(0);
     }
 }
@@ -237,6 +246,31 @@ pub fn try_connect_or_cleanup(
             path.display()
         )),
     }
+}
+
+/// Try to connect to a daemon socket without mutating the filesystem.
+///
+/// Unlike [`try_connect_or_cleanup`], this helper never removes stale sockets.
+/// It is suitable for read-only diagnostics such as `thc doctor`.
+pub fn try_connect_read_only(
+    daemon_name: &str,
+    path: &Path,
+) -> Result<std::os::unix::net::UnixStream, String> {
+    use std::os::unix::net::UnixStream;
+
+    if !path.exists() {
+        return Err(format!(
+            "{daemon_name} socket not found at {} — is the daemon running?",
+            path.display()
+        ));
+    }
+
+    UnixStream::connect(path).map_err(|e| {
+        format!(
+            "Failed to connect to {daemon_name} at {}: {e}",
+            path.display()
+        )
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -373,5 +407,17 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         let result = try_connect_or_cleanup("test", &path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn try_connect_read_only_stale_preserves_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stale.sock");
+        {
+            let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        }
+        let result = try_connect_read_only("test", &path);
+        assert!(result.is_err());
+        assert!(path.exists(), "read-only probe should not remove stale socket");
     }
 }

@@ -834,6 +834,13 @@ struct DiagnosticReport {
     suggested_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DoctorExecutionPlan {
+    report_filename: Option<String>,
+    should_run_fix: bool,
+    should_print_fix_hint: bool,
+}
+
 impl DiagnosticReport {
     /// Format the report as plain text (no ANSI escape codes).
     fn format_plain(&self) -> String {
@@ -1091,7 +1098,7 @@ async fn build_diagnostic_report() -> DiagnosticReport {
     // 3. Backend mode detection
     let conductor_sock = runtime::socket_path("conductor");
     let backend_mode = if conductor_sock.exists() {
-        match runtime::try_connect_or_cleanup("conductor", &conductor_sock) {
+        match runtime::try_connect_read_only("conductor", &conductor_sock) {
             Ok(_stream) => "Daemon mode (conductor socket responding)".to_string(),
             Err(msg) => format!("Standalone / no daemon ({msg})"),
         }
@@ -1125,24 +1132,41 @@ async fn build_diagnostic_report() -> DiagnosticReport {
     }
 }
 
+fn doctor_execution_plan(fix: bool, report: bool, diagnostic: &DiagnosticReport) -> DoctorExecutionPlan {
+    let dead_count = diagnostic
+        .daemon_results
+        .iter()
+        .filter(|d| d.health == DaemonHealth::Dead)
+        .count();
+
+    DoctorExecutionPlan {
+        report_filename: report.then(|| {
+            format!(
+                "/tmp/thermal-doctor-{}.txt",
+                diagnostic.timestamp.replace([':', ' ', '-'], "")
+            )
+        }),
+        should_run_fix: fix,
+        should_print_fix_hint: dead_count > 0 && !fix,
+    }
+}
+
 async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
     let diagnostic = build_diagnostic_report().await;
+    let plan = doctor_execution_plan(fix, report, &diagnostic);
 
-    if report {
-        let filename = format!("/tmp/thermal-doctor-{}.txt", diagnostic.timestamp.replace([':', ' ', '-'], ""));
+    if let Some(filename) = &plan.report_filename {
         let plain = diagnostic.format_plain();
-        std::fs::write(&filename, &plain)?;
-        // Also print colored to stdout
-        print!("{}", diagnostic.format_colored());
-        println!("  Report written to \x1b[1m{filename}\x1b[0m\n");
-        return Ok(());
+        std::fs::write(filename, &plain)?;
     }
 
-    // Default: colored output to stdout
     print!("{}", diagnostic.format_colored());
 
-    // Run --fix logic on dead daemons
-    if fix {
+    if let Some(filename) = &plan.report_filename {
+        println!("  Report written to \x1b[1m{filename}\x1b[0m\n");
+    }
+
+    if plan.should_run_fix {
         let run_dir = thermal_core::runtime::runtime_dir();
         for (i, spec) in DAEMONS.iter().enumerate() {
             if diagnostic.daemon_results[i].health == DaemonHealth::Dead {
@@ -1150,17 +1174,10 @@ async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
             }
         }
         println!();
-    } else {
-        let dead_count = diagnostic
-            .daemon_results
-            .iter()
-            .filter(|d| d.health == DaemonHealth::Dead)
-            .count();
-        if dead_count > 0 {
-            println!(
-                "  Run \x1b[1mthc doctor --fix\x1b[0m to clean stale files and restart core daemons.\n"
-            );
-        }
+    } else if plan.should_print_fix_hint {
+        println!(
+            "  Run \x1b[1mthc doctor --fix\x1b[0m to clean stale files and restart core daemons.\n"
+        );
     }
 
     Ok(())
@@ -1659,5 +1676,38 @@ mod doctor_tests {
                 d.agent_type
             );
         }
+    }
+
+    #[test]
+    fn test_doctor_execution_plan_allows_fix_and_report_together() {
+        let report = DiagnosticReport {
+            timestamp: "2026-04-01 00:00:00 UTC".to_string(),
+            runtime_dir: std::path::PathBuf::from("/run/user/1000/thermal"),
+            daemon_results: vec![DaemonCheckResult {
+                name: "thermal-audio".to_string(),
+                health: DaemonHealth::Dead,
+                pid: Some(9999),
+                pid_status: Some(PidStatus::Stale),
+                sock_status: Some(SocketStatus::Stale),
+            }],
+            socket_files: vec![],
+            backend_mode: "test".to_string(),
+            session_info: None,
+            log_locations: vec![],
+            gpu_info: None,
+            state_dirs: vec![],
+            suggested_actions: vec![],
+        };
+
+        let plan = doctor_execution_plan(true, true, &report);
+        assert!(plan.should_run_fix, "fix should still run when report=true");
+        assert!(
+            plan.report_filename.is_some(),
+            "report path should still be generated when fix=true"
+        );
+        assert!(
+            !plan.should_print_fix_hint,
+            "fix hint should not print when fix=true"
+        );
     }
 }

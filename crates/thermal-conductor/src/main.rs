@@ -139,6 +139,10 @@ enum Commands {
         /// Auto-fix: clean stale PID/socket files and restart dead core daemons
         #[arg(long)]
         fix: bool,
+
+        /// Write a full diagnostic report to /tmp/thermal-doctor-<timestamp>.txt
+        #[arg(long)]
+        report: bool,
     },
 }
 
@@ -254,7 +258,7 @@ fn main() -> Result<()> {
                 Commands::Kill { session_id } => cmd_kill(session_id, backend_pref).await,
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Say { text, voice } => cmd_say(text.join(" "), voice).await,
-                Commands::Doctor { fix } => cmd_doctor(fix).await,
+                Commands::Doctor { fix, report } => cmd_doctor(fix, report).await,
                 Commands::Window => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
@@ -691,226 +695,769 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// thc doctor — daemon health checker
+// thc doctor — daemon health checker + diagnostic report
 // ---------------------------------------------------------------------------
 
 struct DaemonSpec {
     name: &'static str,
-    pid_file: Option<&'static str>,
-    socket_file: Option<&'static str>,
+    /// Short name used with runtime::pidfile_path() / runtime::socket_path().
+    short_name: &'static str,
+    has_pidfile: bool,
+    has_socket: bool,
     restart_cmd: Option<&'static [&'static str]>,
 }
 
 static DAEMONS: &[DaemonSpec] = &[
     DaemonSpec {
         name: "thermal-messages",
-        pid_file: Some("messages.pid"),
-        socket_file: Some("messages.sock"),
+        short_name: "messages",
+        has_pidfile: true,
+        has_socket: true,
         restart_cmd: Some(&["thermal-messages"]),
     },
     DaemonSpec {
         name: "thermal-audio",
-        pid_file: Some("audio.pid"),
-        socket_file: Some("audio.sock"),
+        short_name: "audio",
+        has_pidfile: true,
+        has_socket: true,
         restart_cmd: Some(&["thermal-audio"]),
     },
     DaemonSpec {
         name: "thermal-voice",
-        pid_file: Some("voice.pid"),
-        socket_file: Some("voice.sock"),
+        short_name: "voice",
+        has_pidfile: true,
+        has_socket: true,
         restart_cmd: Some(&["thermal-voice", "listen"]),
     },
     DaemonSpec {
         name: "thermal-dispatcher",
-        pid_file: Some("dispatcher.pid"),
-        socket_file: None,
+        short_name: "dispatcher",
+        has_pidfile: true,
+        has_socket: false,
         restart_cmd: Some(&["thermal-dispatcher"]),
     },
     DaemonSpec {
         name: "thermal-bar",
-        pid_file: Some("bar.pid"),
-        socket_file: None,
+        short_name: "bar",
+        has_pidfile: true,
+        has_socket: false,
         restart_cmd: None,
     },
     DaemonSpec {
         name: "thermal-conductor",
-        pid_file: None,
-        socket_file: Some("conductor.sock"),
+        short_name: "conductor",
+        has_pidfile: false,
+        has_socket: true,
         restart_cmd: None,
     },
     DaemonSpec {
         name: "thermal-hud",
-        pid_file: Some("hud.pid"),
-        socket_file: None,
+        short_name: "hud",
+        has_pidfile: true,
+        has_socket: false,
         restart_cmd: None,
     },
     DaemonSpec {
         name: "thermal-notify",
-        pid_file: Some("notify.pid"),
-        socket_file: None,
+        short_name: "notify",
+        has_pidfile: true,
+        has_socket: false,
         restart_cmd: None,
     },
     DaemonSpec {
         name: "thermal-wallpaper",
-        pid_file: Some("wallpaper.pid"),
-        socket_file: None,
+        short_name: "wallpaper",
+        has_pidfile: true,
+        has_socket: false,
         restart_cmd: None,
     },
 ];
 
-#[derive(PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum DaemonHealth {
     Running,
     Dead,
     NotRunning,
 }
 
-async fn cmd_doctor(fix: bool) -> Result<()> {
-    let run_dir = thermal_core::runtime::runtime_dir();
+/// Result of checking a single daemon.
+#[derive(Debug, Clone)]
+struct DaemonCheckResult {
+    name: String,
+    health: DaemonHealth,
+    pid: Option<u32>,
+    pid_status: Option<PidStatus>,
+    sock_status: Option<SocketStatus>,
+}
 
-    let mut healthy = 0u32;
-    let mut dead = 0u32;
-    let mut not_running = 0u32;
+#[derive(Debug, Clone, PartialEq)]
+enum PidStatus {
+    Alive,
+    Stale,
+    Missing,
+}
 
-    println!();
-    for spec in DAEMONS {
-        let (health, detail) = check_daemon(spec, &run_dir).await;
+#[derive(Debug, Clone, PartialEq)]
+enum SocketStatus {
+    Connectable,
+    Stale,
+    Missing,
+}
 
-        let icon = match health {
-            DaemonHealth::Running => "\x1b[32m✓\x1b[0m",
-            DaemonHealth::Dead => "\x1b[31m✗\x1b[0m",
-            DaemonHealth::NotRunning => "\x1b[90m-\x1b[0m",
-        };
+/// Status of a socket file under the runtime directory.
+#[derive(Debug, Clone)]
+struct SocketFileInfo {
+    name: String,
+    path: std::path::PathBuf,
+    status: SocketStatus,
+}
 
-        println!("  {icon} {:<24} {detail}", spec.name);
+/// State directory info.
+#[derive(Debug, Clone)]
+struct StateDirectoryInfo {
+    path: String,
+    agent_type: &'static str,
+    file_count: usize,
+}
 
-        match health {
-            DaemonHealth::Running => healthy += 1,
-            DaemonHealth::Dead => {
-                dead += 1;
-                if fix {
-                    fix_daemon(spec, &run_dir).await;
-                }
-            }
-            DaemonHealth::NotRunning => not_running += 1,
+/// Full diagnostic report data.
+struct DiagnosticReport {
+    timestamp: String,
+    runtime_dir: std::path::PathBuf,
+    daemon_results: Vec<DaemonCheckResult>,
+    socket_files: Vec<SocketFileInfo>,
+    backend_mode: String,
+    session_info: Option<String>,
+    log_locations: Vec<(String, String)>,
+    gpu_info: Option<String>,
+    state_dirs: Vec<StateDirectoryInfo>,
+    suggested_actions: Vec<String>,
+}
+
+impl DiagnosticReport {
+    /// Format the report as plain text (no ANSI escape codes).
+    fn format_plain(&self) -> String {
+        let mut out = String::new();
+
+        out.push_str(&format!("Thermal Doctor Report — {}\n", self.timestamp));
+        out.push_str(&"=".repeat(60));
+        out.push('\n');
+
+        // Section 1: Daemon status
+        out.push_str("\n## Daemon Status\n\n");
+        for d in &self.daemon_results {
+            let tag = match d.health {
+                DaemonHealth::Running => "[OK]",
+                DaemonHealth::Dead => "[STALE]",
+                DaemonHealth::NotRunning => "[MISSING]",
+            };
+            let pid_info = match (&d.pid_status, d.pid) {
+                (Some(PidStatus::Alive), Some(pid)) => format!("  pid {pid} alive"),
+                (Some(PidStatus::Stale), Some(pid)) => format!("  pid {pid} STALE"),
+                (Some(PidStatus::Alive), None) => "  alive (pid unknown)".to_string(),
+                (Some(PidStatus::Stale), None) => "  STALE (pid unknown)".to_string(),
+                (Some(PidStatus::Missing), _) => "  no pidfile".to_string(),
+                (None, _) => String::new(),
+            };
+            let sock_info = match &d.sock_status {
+                Some(SocketStatus::Connectable) => "  sock OK",
+                Some(SocketStatus::Stale) => "  sock STALE",
+                Some(SocketStatus::Missing) => "  sock MISSING",
+                None => "",
+            };
+            out.push_str(&format!("  {:<9} {:<24}{}{}\n", tag, d.name, pid_info, sock_info));
         }
+
+        // Section 2: Socket paths
+        out.push_str("\n## Socket Paths\n\n");
+        out.push_str(&format!("  Runtime dir: {}\n\n", self.runtime_dir.display()));
+        if self.socket_files.is_empty() {
+            out.push_str("  No socket files found.\n");
+        } else {
+            for s in &self.socket_files {
+                let tag = match s.status {
+                    SocketStatus::Connectable => "[OK]",
+                    SocketStatus::Stale => "[STALE]",
+                    SocketStatus::Missing => "[MISSING]",
+                };
+                out.push_str(&format!("  {:<9} {}\n", tag, s.path.display()));
+            }
+        }
+
+        // Section 3: Backend mode
+        out.push_str("\n## Backend Mode\n\n");
+        out.push_str(&format!("  {}\n", self.backend_mode));
+
+        // Section 4: Session info
+        out.push_str("\n## Session Info\n\n");
+        if let Some(ref info) = self.session_info {
+            out.push_str(&format!("  {info}\n"));
+        } else {
+            out.push_str("  No daemon connection — session info unavailable.\n");
+        }
+
+        // Section 5: Log locations
+        out.push_str("\n## Log Locations\n\n");
+        for (component, location) in &self.log_locations {
+            out.push_str(&format!("  {:<24} {}\n", component, location));
+        }
+
+        // Section 6: GPU info
+        out.push_str("\n## GPU / Adapter\n\n");
+        if let Some(ref info) = self.gpu_info {
+            out.push_str(&format!("  {info}\n"));
+        } else {
+            out.push_str("  GPU adapter info not available (no wgpu instance).\n");
+        }
+
+        // Section 7: Compatibility state readers
+        out.push_str("\n## Compatibility State Files\n\n");
+        if self.state_dirs.is_empty() {
+            out.push_str("  No state directories found.\n");
+        } else {
+            for sd in &self.state_dirs {
+                let files = if sd.file_count == 1 { "file" } else { "files" };
+                out.push_str(&format!(
+                    "  {:<36} {} ({} {})\n",
+                    sd.path, sd.agent_type, sd.file_count, files
+                ));
+            }
+        }
+
+        // Suggested actions
+        if !self.suggested_actions.is_empty() {
+            out.push_str("\n## Suggested Actions\n\n");
+            for action in &self.suggested_actions {
+                out.push_str(&format!("  - {action}\n"));
+            }
+        }
+
+        out.push('\n');
+        out
     }
 
-    println!();
-    let mut parts = Vec::new();
-    if healthy > 0 {
-        parts.push(format!("\x1b[32m{healthy} healthy\x1b[0m"));
-    }
-    if dead > 0 {
-        parts.push(format!("\x1b[31m{dead} dead\x1b[0m"));
-    }
-    if not_running > 0 {
-        parts.push(format!("\x1b[90m{not_running} not running\x1b[0m"));
-    }
-    println!("  {}", parts.join(", "));
-    println!();
+    /// Format with ANSI colors for terminal display.
+    fn format_colored(&self) -> String {
+        let mut out = String::new();
 
-    if dead > 0 && !fix {
-        println!("  Run \x1b[1mthc doctor --fix\x1b[0m to clean stale files and restart core daemons.");
+        out.push_str(&format!(
+            "\n\x1b[1mThermal Doctor Report\x1b[0m — {}\n",
+            self.timestamp
+        ));
+        out.push_str(&"\x1b[90m─\x1b[0m".repeat(60));
+        out.push('\n');
+
+        // Section 1: Daemon status
+        out.push_str("\n\x1b[1m## Daemon Status\x1b[0m\n\n");
+        for d in &self.daemon_results {
+            let (icon, tag_color) = match d.health {
+                DaemonHealth::Running => ("\x1b[32m✓\x1b[0m", "\x1b[32m"),
+                DaemonHealth::Dead => ("\x1b[31m✗\x1b[0m", "\x1b[31m"),
+                DaemonHealth::NotRunning => ("\x1b[90m-\x1b[0m", "\x1b[90m"),
+            };
+            let tag = match d.health {
+                DaemonHealth::Running => "OK",
+                DaemonHealth::Dead => "STALE",
+                DaemonHealth::NotRunning => "MISSING",
+            };
+            let pid_info = match (&d.pid_status, d.pid) {
+                (Some(PidStatus::Alive), Some(pid)) => format!("  pid {pid}"),
+                (Some(PidStatus::Stale), Some(pid)) => {
+                    format!("  \x1b[31mpid {pid} stale\x1b[0m")
+                }
+                (Some(PidStatus::Alive), None) => "  alive (pid unknown)".to_string(),
+                (Some(PidStatus::Stale), None) => {
+                    "  \x1b[31mstale (pid unknown)\x1b[0m".to_string()
+                }
+                (Some(PidStatus::Missing), _) => "  no pidfile".to_string(),
+                (None, _) => String::new(),
+            };
+            let sock_info = match &d.sock_status {
+                Some(SocketStatus::Connectable) => "  sock \x1b[32m✓\x1b[0m",
+                Some(SocketStatus::Stale) => "  sock \x1b[31m✗ stale\x1b[0m",
+                Some(SocketStatus::Missing) => "  sock \x1b[90mmissing\x1b[0m",
+                None => "",
+            };
+            out.push_str(&format!(
+                "  {icon} {tag_color}[{tag}]\x1b[0m {:<24}{}{}\n",
+                d.name, pid_info, sock_info
+            ));
+        }
+
+        // Section 2: Socket paths
+        out.push_str(&format!(
+            "\n\x1b[1m## Socket Paths\x1b[0m  ({})\n\n",
+            self.runtime_dir.display()
+        ));
+        if self.socket_files.is_empty() {
+            out.push_str("  \x1b[90mNo socket files found.\x1b[0m\n");
+        } else {
+            for s in &self.socket_files {
+                let (icon, label) = match s.status {
+                    SocketStatus::Connectable => ("\x1b[32m✓\x1b[0m", "\x1b[32m[OK]\x1b[0m"),
+                    SocketStatus::Stale => ("\x1b[31m✗\x1b[0m", "\x1b[31m[STALE]\x1b[0m"),
+                    SocketStatus::Missing => ("\x1b[90m-\x1b[0m", "\x1b[90m[MISSING]\x1b[0m"),
+                };
+                out.push_str(&format!("  {icon} {label} {}\n", s.name));
+            }
+        }
+
+        // Section 3: Backend mode
+        out.push_str("\n\x1b[1m## Backend Mode\x1b[0m\n\n");
+        out.push_str(&format!("  {}\n", self.backend_mode));
+
+        // Section 4: Session info
+        out.push_str("\n\x1b[1m## Session Info\x1b[0m\n\n");
+        if let Some(ref info) = self.session_info {
+            out.push_str(&format!("  {info}\n"));
+        } else {
+            out.push_str("  \x1b[90mNo daemon connection — session info unavailable.\x1b[0m\n");
+        }
+
+        // Section 5: Log locations
+        out.push_str("\n\x1b[1m## Log Locations\x1b[0m\n\n");
+        for (component, location) in &self.log_locations {
+            out.push_str(&format!("  {:<24} \x1b[90m{}\x1b[0m\n", component, location));
+        }
+
+        // Section 6: GPU info
+        out.push_str("\n\x1b[1m## GPU / Adapter\x1b[0m\n\n");
+        if let Some(ref info) = self.gpu_info {
+            out.push_str(&format!("  {info}\n"));
+        } else {
+            out.push_str(
+                "  \x1b[90mGPU adapter info not available (no wgpu instance).\x1b[0m\n",
+            );
+        }
+
+        // Section 7: Compatibility state readers
+        out.push_str("\n\x1b[1m## Compatibility State Files\x1b[0m\n\n");
+        if self.state_dirs.is_empty() {
+            out.push_str("  \x1b[90mNo state directories found.\x1b[0m\n");
+        } else {
+            for sd in &self.state_dirs {
+                let files = if sd.file_count == 1 { "file" } else { "files" };
+                out.push_str(&format!(
+                    "  {:<36} \x1b[36m{}\x1b[0m ({} {})\n",
+                    sd.path, sd.agent_type, sd.file_count, files
+                ));
+            }
+        }
+
+        // Suggested actions
+        if !self.suggested_actions.is_empty() {
+            out.push_str("\n\x1b[1;33m## Suggested Actions\x1b[0m\n\n");
+            for action in &self.suggested_actions {
+                out.push_str(&format!("  \x1b[33m-\x1b[0m {action}\n"));
+            }
+        }
+
+        out.push('\n');
+        out
+    }
+}
+
+async fn build_diagnostic_report() -> DiagnosticReport {
+    use thermal_core::runtime;
+
+    let run_dir = runtime::runtime_dir();
+    let timestamp = chrono_timestamp();
+
+    // 1. Check each daemon
+    let mut daemon_results = Vec::new();
+    let mut suggested_actions = Vec::new();
+
+    for spec in DAEMONS {
+        let result = check_daemon(spec);
+        if result.health == DaemonHealth::Dead {
+            if spec.restart_cmd.is_some() {
+                suggested_actions.push(format!(
+                    "Run `thc doctor --fix` to clean stale files and restart {}",
+                    spec.name
+                ));
+            } else {
+                suggested_actions.push(format!(
+                    "Restart {} manually (stale artifacts detected)",
+                    spec.name
+                ));
+            }
+        }
+        daemon_results.push(result);
+    }
+
+    // 2. Enumerate all socket files under runtime_dir
+    let socket_files = enumerate_sockets(&run_dir);
+
+    // 3. Backend mode detection
+    let conductor_sock = runtime::socket_path("conductor");
+    let backend_mode = if conductor_sock.exists() {
+        match runtime::try_connect_or_cleanup("conductor", &conductor_sock) {
+            Ok(_stream) => "Daemon mode (conductor socket responding)".to_string(),
+            Err(msg) => format!("Standalone / no daemon ({msg})"),
+        }
+    } else {
+        "Standalone PTY (no conductor socket)".to_string()
+    };
+
+    // 4. Session info — try to get session count from daemon
+    let session_info = gather_session_info().await;
+
+    // 5. Log locations
+    let log_locations = gather_log_locations(&run_dir);
+
+    // 6. GPU adapter info (best-effort, synchronous probe)
+    let gpu_info = probe_gpu_adapter();
+
+    // 7. Compatibility state directories
+    let state_dirs = scan_state_directories();
+
+    DiagnosticReport {
+        timestamp,
+        runtime_dir: run_dir,
+        daemon_results,
+        socket_files,
+        backend_mode,
+        session_info,
+        log_locations,
+        gpu_info,
+        state_dirs,
+        suggested_actions,
+    }
+}
+
+async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
+    let diagnostic = build_diagnostic_report().await;
+
+    if report {
+        let filename = format!("/tmp/thermal-doctor-{}.txt", diagnostic.timestamp.replace([':', ' ', '-'], ""));
+        let plain = diagnostic.format_plain();
+        std::fs::write(&filename, &plain)?;
+        // Also print colored to stdout
+        print!("{}", diagnostic.format_colored());
+        println!("  Report written to \x1b[1m{filename}\x1b[0m\n");
+        return Ok(());
+    }
+
+    // Default: colored output to stdout
+    print!("{}", diagnostic.format_colored());
+
+    // Run --fix logic on dead daemons
+    if fix {
+        let run_dir = thermal_core::runtime::runtime_dir();
+        for (i, spec) in DAEMONS.iter().enumerate() {
+            if diagnostic.daemon_results[i].health == DaemonHealth::Dead {
+                fix_daemon(spec, &run_dir).await;
+            }
+        }
         println!();
+    } else {
+        let dead_count = diagnostic
+            .daemon_results
+            .iter()
+            .filter(|d| d.health == DaemonHealth::Dead)
+            .count();
+        if dead_count > 0 {
+            println!(
+                "  Run \x1b[1mthc doctor --fix\x1b[0m to clean stale files and restart core daemons.\n"
+            );
+        }
     }
 
     Ok(())
 }
 
-async fn check_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) -> (DaemonHealth, String) {
-    let mut pid_alive = None; // None = no pidfile, Some(true/false)
-    let mut pid_val: Option<u32> = None;
+/// Check a single daemon using thermal_core::runtime helpers.
+fn check_daemon(spec: &DaemonSpec) -> DaemonCheckResult {
+    use thermal_core::runtime;
 
-    if let Some(pf) = spec.pid_file {
-        let path = run_dir.join(pf);
-        if path.exists() {
+    let mut pid_status = None;
+    let mut pid_val: Option<u32> = None;
+    let mut sock_status = None;
+
+    if spec.has_pidfile {
+        let path = runtime::pidfile_path(spec.short_name);
+        if !path.exists() {
+            pid_status = Some(PidStatus::Missing);
+        } else {
+            // Read pid manually (validate_pidfile removes stale files, which we
+            // don't want during a read-only diagnostic).
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(pid) = contents.trim().parse::<u32>() {
                     pid_val = Some(pid);
-                    pid_alive = Some(std::path::Path::new(&format!("/proc/{pid}")).exists());
+                    if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                        pid_status = Some(PidStatus::Alive);
+                    } else {
+                        pid_status = Some(PidStatus::Stale);
+                    }
+                } else {
+                    pid_status = Some(PidStatus::Stale);
                 }
+            } else {
+                pid_status = Some(PidStatus::Missing);
             }
         }
     }
 
-    let mut sock_ok = None; // None = no socket expected
-    if let Some(sf) = spec.socket_file {
-        let path = run_dir.join(sf);
-        if path.exists() {
-            let connect_result = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                tokio::net::UnixStream::connect(&path),
-            )
-            .await;
-            sock_ok = Some(matches!(connect_result, Ok(Ok(_))));
+    if spec.has_socket {
+        let path = runtime::socket_path(spec.short_name);
+        if !path.exists() {
+            sock_status = Some(SocketStatus::Missing);
         } else {
-            sock_ok = Some(false);
+            // Non-blocking sync check
+            use std::os::unix::net::UnixStream;
+            match UnixStream::connect(&path) {
+                Ok(_) => sock_status = Some(SocketStatus::Connectable),
+                Err(_) => sock_status = Some(SocketStatus::Stale),
+            }
         }
     }
 
-    // Determine overall health
-    match (pid_alive, sock_ok) {
-        // PID alive
-        (Some(true), Some(true)) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Running, format!("running (pid {pid})  sock \x1b[32m✓\x1b[0m"))
-        }
-        (Some(true), Some(false)) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Running, format!("running (pid {pid})  sock \x1b[33m✗\x1b[0m"))
-        }
-        (Some(true), None) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Running, format!("running (pid {pid})"))
-        }
-        // PID dead (stale)
-        (Some(false), Some(true)) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m  sock responding (zombie?)"))
-        }
-        (Some(false), Some(false)) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m  sock stale"))
-        }
-        (Some(false), None) => {
-            let pid = pid_val.unwrap();
-            (DaemonHealth::Dead, format!("\x1b[31mstale pid {pid}\x1b[0m"))
-        }
-        // No PID file
-        (None, Some(true)) => {
-            (DaemonHealth::Running, "no pidfile  sock \x1b[32m✓\x1b[0m".to_string())
-        }
-        (None, Some(false)) => {
-            (DaemonHealth::Dead, "no pidfile  sock \x1b[31mstale\x1b[0m".to_string())
-        }
-        (None, None) => {
-            (DaemonHealth::NotRunning, "not running".to_string())
+    let health = match (&pid_status, &sock_status) {
+        (Some(PidStatus::Alive), _) => DaemonHealth::Running,
+        (_, Some(SocketStatus::Connectable)) => DaemonHealth::Running,
+        (Some(PidStatus::Stale), _) => DaemonHealth::Dead,
+        (_, Some(SocketStatus::Stale)) => DaemonHealth::Dead,
+        _ => DaemonHealth::NotRunning,
+    };
+
+    DaemonCheckResult {
+        name: spec.name.to_string(),
+        health,
+        pid: pid_val,
+        pid_status,
+        sock_status,
+    }
+}
+
+/// Enumerate all .sock files under the runtime directory and check their status.
+fn enumerate_sockets(run_dir: &std::path::Path) -> Vec<SocketFileInfo> {
+    let mut sockets = Vec::new();
+
+    // Check expected sockets from DAEMONS
+    for spec in DAEMONS {
+        if spec.has_socket {
+            let path = run_dir.join(format!("{}.sock", spec.short_name));
+            let status = if !path.exists() {
+                SocketStatus::Missing
+            } else {
+                use std::os::unix::net::UnixStream;
+                match UnixStream::connect(&path) {
+                    Ok(_) => SocketStatus::Connectable,
+                    Err(_) => SocketStatus::Stale,
+                }
+            };
+            sockets.push(SocketFileInfo {
+                name: format!("{}.sock", spec.short_name),
+                path: path.clone(),
+                status,
+            });
         }
     }
+
+    // Also scan for any unexpected .sock files
+    if let Ok(entries) = std::fs::read_dir(run_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("sock") {
+                let fname = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                // Skip if already listed
+                if sockets.iter().any(|s| s.name == fname) {
+                    continue;
+                }
+                let status = {
+                    use std::os::unix::net::UnixStream;
+                    match UnixStream::connect(&p) {
+                        Ok(_) => SocketStatus::Connectable,
+                        Err(_) => SocketStatus::Stale,
+                    }
+                };
+                sockets.push(SocketFileInfo {
+                    name: fname,
+                    path: p,
+                    status,
+                });
+            }
+        }
+    }
+
+    sockets
+}
+
+/// Try connecting to the daemon and getting session count.
+async fn gather_session_info() -> Option<String> {
+    use crate::client::DaemonClient;
+
+    let mut client = DaemonClient::connect().await.ok()??;
+    let sessions = client.list_sessions().await.ok()?;
+
+    let total = sessions.len();
+    let alive = sessions.iter().filter(|s| s.is_alive).count();
+
+    Some(format!(
+        "{total} session{} ({alive} alive)",
+        if total == 1 { "" } else { "s" }
+    ))
+}
+
+/// Gather well-known log file locations.
+fn gather_log_locations(
+    run_dir: &std::path::Path,
+) -> Vec<(String, String)> {
+    let mut locs = Vec::new();
+
+    // Conductor TUI log
+    let tui_log = run_dir.join("conductor-tui.log");
+    locs.push((
+        "conductor (TUI)".to_string(),
+        if tui_log.exists() {
+            tui_log.display().to_string()
+        } else {
+            format!("{} (not found)", tui_log.display())
+        },
+    ));
+
+    // General pattern: RUST_LOG=debug <binary> 2>file.log
+    locs.push((
+        "all daemons".to_string(),
+        "RUST_LOG=debug <daemon> 2>/path/to/file.log".to_string(),
+    ));
+
+    // Voice state file
+    let voice_state = std::path::PathBuf::from("/tmp/thermal-voice-state.json");
+    locs.push((
+        "voice state".to_string(),
+        if voice_state.exists() {
+            voice_state.display().to_string()
+        } else {
+            format!("{} (not found)", voice_state.display())
+        },
+    ));
+
+    locs
+}
+
+/// Best-effort wgpu adapter probe.
+fn probe_gpu_adapter() -> Option<String> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        ..Default::default()
+    });
+
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))?;
+
+    let info = adapter.get_info();
+    Some(format!(
+        "{} ({:?}, {:?})",
+        info.name, info.backend, info.device_type,
+    ))
+}
+
+/// Scan /tmp/*-state/ directories for compatibility state files.
+fn scan_state_directories() -> Vec<StateDirectoryInfo> {
+    let dirs: &[(&str, &str)] = &[
+        ("/tmp/claude-code-state", "claude-code"),
+        ("/tmp/codex-state", "codex"),
+        ("/tmp/copilot-state", "copilot"),
+    ];
+
+    let mut results = Vec::new();
+
+    for (path, agent_type) in dirs {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            let file_count = std::fs::read_dir(p)
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            e.path()
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                == Some("json")
+                        })
+                        .count()
+                })
+                .unwrap_or(0);
+            results.push(StateDirectoryInfo {
+                path: path.to_string(),
+                agent_type,
+                file_count,
+            });
+        }
+    }
+
+    results
+}
+
+/// Produce a compact timestamp string.
+fn chrono_timestamp() -> String {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Simple UTC timestamp: YYYY-MM-DD HH:MM:SS
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+    // Approximate date from epoch days (good enough for a diagnostic timestamp)
+    let (year, month, day) = epoch_days_to_date(days);
+    format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02} UTC")
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
+    // Algorithm from Howard Hinnant's civil_from_days
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m, d)
 }
 
 async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
     // Clean stale PID file
-    if let Some(pf) = spec.pid_file {
-        let path = run_dir.join(pf);
+    if spec.has_pidfile {
+        let path = run_dir.join(format!("{}.pid", spec.short_name));
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("    \x1b[33m! could not remove {}: {e}\x1b[0m", path.display());
+                eprintln!(
+                    "    \x1b[33m! could not remove {}: {e}\x1b[0m",
+                    path.display()
+                );
             } else {
-                println!("    \x1b[90mcleaned {pf}\x1b[0m");
+                println!("    \x1b[90mcleaned {}.pid\x1b[0m", spec.short_name);
             }
         }
     }
 
     // Clean stale socket file
-    if let Some(sf) = spec.socket_file {
-        let path = run_dir.join(sf);
+    if spec.has_socket {
+        let path = run_dir.join(format!("{}.sock", spec.short_name));
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {
-                eprintln!("    \x1b[33m! could not remove {}: {e}\x1b[0m", path.display());
+                eprintln!(
+                    "    \x1b[33m! could not remove {}: {e}\x1b[0m",
+                    path.display()
+                );
             } else {
-                println!("    \x1b[90mcleaned {sf}\x1b[0m");
+                println!("    \x1b[90mcleaned {}.sock\x1b[0m", spec.short_name);
             }
         }
     }
@@ -930,7 +1477,10 @@ async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
                 println!("    \x1b[32m↻ restarted {}\x1b[0m", spec.name);
             }
             Err(e) => {
-                eprintln!("    \x1b[31m! failed to restart {}: {e}\x1b[0m", spec.name);
+                eprintln!(
+                    "    \x1b[31m! failed to restart {}: {e}\x1b[0m",
+                    spec.name
+                );
             }
         }
     }
@@ -943,5 +1493,171 @@ fn format_claude_status(status: &ClaudeStatus) -> String {
         ClaudeStatus::Processing => "processing".to_string(),
         ClaudeStatus::ToolUse => "tool_use".to_string(),
         ClaudeStatus::AwaitingInput => "awaiting_input".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    #[test]
+    fn test_epoch_days_to_date() {
+        // 2024-01-01 = 19723 days since epoch
+        let (y, m, d) = epoch_days_to_date(19723);
+        assert_eq!((y, m, d), (2024, 1, 1));
+
+        // 1970-01-01 = day 0
+        let (y, m, d) = epoch_days_to_date(0);
+        assert_eq!((y, m, d), (1970, 1, 1));
+    }
+
+    #[test]
+    fn test_chrono_timestamp_format() {
+        let ts = chrono_timestamp();
+        // Should match YYYY-MM-DD HH:MM:SS UTC
+        assert!(ts.ends_with(" UTC"), "timestamp should end with UTC: {ts}");
+        assert!(ts.len() >= 20, "timestamp too short: {ts}");
+    }
+
+    #[test]
+    fn test_report_format_plain_has_all_sections() {
+        let report = DiagnosticReport {
+            timestamp: "2026-04-01 00:00:00 UTC".to_string(),
+            runtime_dir: std::path::PathBuf::from("/run/user/1000/thermal"),
+            daemon_results: vec![
+                DaemonCheckResult {
+                    name: "thermal-messages".to_string(),
+                    health: DaemonHealth::Running,
+                    pid: Some(1234),
+                    pid_status: Some(PidStatus::Alive),
+                    sock_status: Some(SocketStatus::Connectable),
+                },
+                DaemonCheckResult {
+                    name: "thermal-audio".to_string(),
+                    health: DaemonHealth::Dead,
+                    pid: Some(9999),
+                    pid_status: Some(PidStatus::Stale),
+                    sock_status: Some(SocketStatus::Stale),
+                },
+                DaemonCheckResult {
+                    name: "thermal-hud".to_string(),
+                    health: DaemonHealth::NotRunning,
+                    pid: None,
+                    pid_status: Some(PidStatus::Missing),
+                    sock_status: None,
+                },
+            ],
+            socket_files: vec![SocketFileInfo {
+                name: "messages.sock".to_string(),
+                path: std::path::PathBuf::from("/run/user/1000/thermal/messages.sock"),
+                status: SocketStatus::Connectable,
+            }],
+            backend_mode: "Standalone PTY (no conductor socket)".to_string(),
+            session_info: None,
+            log_locations: vec![("conductor (TUI)".to_string(), "/tmp/log".to_string())],
+            gpu_info: Some("Test GPU (Vulkan, DiscreteGpu)".to_string()),
+            state_dirs: vec![StateDirectoryInfo {
+                path: "/tmp/claude-code-state".to_string(),
+                agent_type: "claude-code",
+                file_count: 2,
+            }],
+            suggested_actions: vec![
+                "Run `thc doctor --fix` to clean stale files and restart thermal-audio".to_string(),
+            ],
+        };
+
+        let plain = report.format_plain();
+
+        assert!(plain.contains("## Daemon Status"), "missing Daemon Status section");
+        assert!(plain.contains("[OK]"), "missing [OK] tag");
+        assert!(plain.contains("[STALE]"), "missing [STALE] tag");
+        assert!(plain.contains("[MISSING]"), "missing [MISSING] tag");
+        assert!(plain.contains("## Socket Paths"), "missing Socket Paths section");
+        assert!(plain.contains("## Backend Mode"), "missing Backend Mode section");
+        assert!(plain.contains("## Session Info"), "missing Session Info section");
+        assert!(plain.contains("## Log Locations"), "missing Log Locations section");
+        assert!(plain.contains("## GPU / Adapter"), "missing GPU section");
+        assert!(
+            plain.contains("## Compatibility State Files"),
+            "missing state files section"
+        );
+        assert!(
+            plain.contains("## Suggested Actions"),
+            "missing suggested actions"
+        );
+        assert!(plain.contains("claude-code"), "missing agent type");
+        assert!(plain.contains("2 files"), "missing file count");
+    }
+
+    #[test]
+    fn test_report_format_colored_has_ansi() {
+        let report = DiagnosticReport {
+            timestamp: "2026-04-01 00:00:00 UTC".to_string(),
+            runtime_dir: std::path::PathBuf::from("/run/user/1000/thermal"),
+            daemon_results: vec![DaemonCheckResult {
+                name: "thermal-test".to_string(),
+                health: DaemonHealth::Running,
+                pid: Some(42),
+                pid_status: Some(PidStatus::Alive),
+                sock_status: None,
+            }],
+            socket_files: vec![],
+            backend_mode: "test".to_string(),
+            session_info: None,
+            log_locations: vec![],
+            gpu_info: None,
+            state_dirs: vec![],
+            suggested_actions: vec![],
+        };
+
+        let colored = report.format_colored();
+        assert!(colored.contains("\x1b["), "colored output should have ANSI codes");
+        assert!(colored.contains("\x1b[32m"), "should have green for running daemon");
+    }
+
+    #[test]
+    fn test_report_no_suggested_actions_when_all_healthy() {
+        let report = DiagnosticReport {
+            timestamp: "2026-04-01 00:00:00 UTC".to_string(),
+            runtime_dir: std::path::PathBuf::from("/run/user/1000/thermal"),
+            daemon_results: vec![DaemonCheckResult {
+                name: "thermal-test".to_string(),
+                health: DaemonHealth::Running,
+                pid: Some(42),
+                pid_status: Some(PidStatus::Alive),
+                sock_status: None,
+            }],
+            socket_files: vec![],
+            backend_mode: "test".to_string(),
+            session_info: Some("1 session (1 alive)".to_string()),
+            log_locations: vec![],
+            gpu_info: None,
+            state_dirs: vec![],
+            suggested_actions: vec![],
+        };
+
+        let plain = report.format_plain();
+        assert!(
+            !plain.contains("## Suggested Actions"),
+            "should not have suggestions when all healthy"
+        );
+    }
+
+    #[test]
+    fn test_scan_state_directories_returns_vec() {
+        // Just ensure it doesn't panic — the actual directories may or may not exist
+        let dirs = scan_state_directories();
+        // All entries should have a valid agent type
+        for d in &dirs {
+            assert!(
+                ["claude-code", "codex", "copilot"].contains(&d.agent_type),
+                "unexpected agent type: {}",
+                d.agent_type
+            );
+        }
     }
 }

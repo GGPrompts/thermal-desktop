@@ -16,6 +16,7 @@ mod environment_pipeline;
 mod font_config;
 mod grid_renderer;
 mod heatmap_pipeline;
+mod hud_overlays;
 mod image_pipeline;
 mod inject;
 mod input;

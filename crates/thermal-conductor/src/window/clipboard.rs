@@ -7,6 +7,71 @@ use alacritty_terminal::term::TermMode;
 
 use super::ConductorWindow;
 
+/// Strip ANSI escape sequences from clipboard data to prevent terminal injection
+/// when pasting without bracketed paste mode. Preserves normal text including
+/// tabs, newlines, and carriage returns.
+fn sanitize_paste(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        match input[i] {
+            // ESC — skip the entire escape sequence
+            0x1b => {
+                i += 1;
+                if i >= input.len() {
+                    break;
+                }
+                match input[i] {
+                    // CSI sequence: ESC [ ... final_byte
+                    b'[' => {
+                        i += 1;
+                        while i < input.len() && !(0x40..=0x7E).contains(&input[i]) {
+                            i += 1;
+                        }
+                        if i < input.len() {
+                            i += 1; // skip final byte
+                        }
+                    }
+                    // OSC sequence: ESC ] ... ST (ESC \ or BEL)
+                    b']' => {
+                        i += 1;
+                        while i < input.len() {
+                            if input[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    // Two-character sequence (e.g., ESC c for RIS)
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            // Allow tab, newline, carriage return
+            b'\t' | b'\n' | b'\r' => {
+                out.push(input[i]);
+                i += 1;
+            }
+            // Strip other C0 control chars (0x00-0x1F except the above, and 0x7F)
+            c if c < 0x20 || c == 0x7F => {
+                i += 1;
+            }
+            // Pass through everything else (printable ASCII + UTF-8)
+            _ => {
+                out.push(input[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 impl ConductorWindow {
     /// Copy the current terminal selection to the Wayland clipboard via `wl-copy`.
     pub(super) fn clipboard_copy(&self) {
@@ -222,7 +287,9 @@ impl ConductorWindow {
             payload.extend_from_slice(b"\x1b[201~");
             self.write_session(&payload);
         } else {
-            self.write_session(text);
+            // Sanitize control sequences to prevent terminal injection.
+            let sanitized = sanitize_paste(text);
+            self.write_session(&sanitized);
         }
 
         tracing::debug!(
@@ -269,7 +336,9 @@ impl ConductorWindow {
             payload.extend_from_slice(b"\x1b[201~");
             self.write_session(&payload);
         } else {
-            self.write_session(text);
+            // Sanitize control sequences to prevent terminal injection.
+            let sanitized = sanitize_paste(text);
+            self.write_session(&sanitized);
         }
 
         tracing::debug!(

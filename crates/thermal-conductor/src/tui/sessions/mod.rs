@@ -83,7 +83,7 @@ impl FocusedPanel {
 // Sessions page state
 // ---------------------------------------------------------------------------
 
-pub struct SessionsPage {
+pub(in crate::tui) struct SessionsPage {
     pub(super) sessions: Vec<ClaudeSessionState>,
     pub(super) display_rows: Vec<DisplayRow>,
     pub(super) table_state: TableState,

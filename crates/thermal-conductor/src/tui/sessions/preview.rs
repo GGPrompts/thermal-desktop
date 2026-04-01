@@ -151,7 +151,7 @@ async fn preview_subscriber_loop(
 
                     match tokio::time::timeout(std::time::Duration::from_secs(3), c.recv()).await {
                         Ok(Some(Response::SessionState { cols, cells, .. })) => {
-                            let mut guard = buffer.lock().unwrap();
+                            let mut guard = buffer.lock().unwrap_or_else(|p| p.into_inner());
                             *guard = Some(PreviewBuffer {
                                 cells,
                                 cols: cols as usize,
@@ -183,7 +183,7 @@ async fn preview_subscriber_loop(
                     }
                 }
                 None => {
-                    let mut guard = buffer.lock().unwrap();
+                    let mut guard = buffer.lock().unwrap_or_else(|p| p.into_inner());
                     *guard = None;
                     current_session = None;
                 }
@@ -195,7 +195,7 @@ async fn preview_subscriber_loop(
         if let Some(c) = client.as_mut() {
             match tokio::time::timeout(std::time::Duration::from_millis(50), c.recv()).await {
                 Ok(Some(Response::ScreenUpdate { dirty_cells, .. })) => {
-                    let mut guard = buffer.lock().unwrap();
+                    let mut guard = buffer.lock().unwrap_or_else(|p| p.into_inner());
                     if let Some(ref mut buf) = *guard {
                         apply_dirty_cells(&mut buf.cells, buf.cols, &dirty_cells);
                         buf.seq += 1;
@@ -203,7 +203,7 @@ async fn preview_subscriber_loop(
                     }
                 }
                 Ok(Some(Response::SessionState { cols, cells, .. })) => {
-                    let mut guard = buffer.lock().unwrap();
+                    let mut guard = buffer.lock().unwrap_or_else(|p| p.into_inner());
                     if let Some(ref mut buf) = *guard {
                         buf.cells = cells;
                         buf.cols = cols as usize;
@@ -212,7 +212,7 @@ async fn preview_subscriber_loop(
                     }
                 }
                 Ok(Some(Response::SessionExited { .. })) => {
-                    let mut guard = buffer.lock().unwrap();
+                    let mut guard = buffer.lock().unwrap_or_else(|p| p.into_inner());
                     *guard = None;
                     current_session = None;
                 }
@@ -346,7 +346,14 @@ pub(super) fn scan_all_kitty_windows() -> HashMap<String, (String, i64)> {
                 .map(|n| n.starts_with("kitty-thc-"))
                 .unwrap_or(false)
         })
-        .map(|e| format!("unix:{}", e.path().display()))
+        .filter_map(|e| {
+            let canonical = std::fs::canonicalize(e.path()).ok()?;
+            // Verify resolved path is still under /tmp to prevent symlink redirect.
+            if !canonical.starts_with("/tmp") {
+                return None;
+            }
+            Some(format!("unix:{}", canonical.display()))
+        })
         .collect();
 
     for socket in &sockets {

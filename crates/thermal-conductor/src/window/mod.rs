@@ -566,9 +566,10 @@ pub fn run() -> anyhow::Result<()> {
         }
 
         // Dispatch all pending Wayland events.
-        event_queue
-            .dispatch_pending(&mut state)
-            .expect("Wayland event dispatch failed");
+        if let Err(e) = event_queue.dispatch_pending(&mut state) {
+            tracing::error!("Wayland event dispatch failed: {e}");
+            break;
+        }
 
         // ── Key repeat ──────────────────────────────────────────────────
         if let (Some(key), Some(next)) = (&state.repeat_key, state.repeat_next)
@@ -1005,19 +1006,19 @@ impl SeatHandler for ConductorWindow {
         capability: Capability,
     ) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            let keyboard = self
-                .seat_state
-                .get_keyboard(qh, &seat, None)
-                .expect("Failed to create keyboard");
-            self.keyboard = Some(keyboard);
-            self.seat = Some(seat.clone());
+            match self.seat_state.get_keyboard(qh, &seat, None) {
+                Ok(keyboard) => {
+                    self.keyboard = Some(keyboard);
+                    self.seat = Some(seat.clone());
+                }
+                Err(e) => tracing::warn!("Failed to create keyboard: {e}"),
+            }
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = Some(
-                self.seat_state
-                    .get_pointer(qh, &seat)
-                    .expect("Failed to create pointer"),
-            );
+            match self.seat_state.get_pointer(qh, &seat) {
+                Ok(pointer) => self.pointer = Some(pointer),
+                Err(e) => tracing::warn!("Failed to create pointer: {e}"),
+            }
         }
     }
 

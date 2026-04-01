@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
@@ -515,6 +515,81 @@ fn is_voice_active() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Suppressed announcement queue
+// ---------------------------------------------------------------------------
+
+/// Max entries in the suppressed-announcement queue.
+const SUPPRESSED_QUEUE_MAX: usize = 8;
+
+/// An announcement that was suppressed during voice activity.
+#[derive(Debug, Clone)]
+struct SuppressedAnnouncement {
+    session_id: String,
+    voice: String,
+    text: String,
+}
+
+/// Bounded queue that holds announcements suppressed while voice is active.
+/// Keeps only the latest announcement per session (coalesces duplicates).
+struct SuppressedQueue {
+    entries: VecDeque<SuppressedAnnouncement>,
+    was_voice_active: bool,
+}
+
+impl SuppressedQueue {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+            was_voice_active: false,
+        }
+    }
+
+    /// Push an announcement, coalescing by session_id (keeps latest).
+    fn push(&mut self, session_id: String, voice: String, text: String) {
+        // Remove any existing entry for this session.
+        self.entries.retain(|e| e.session_id != session_id);
+        // Evict oldest if at capacity.
+        if self.entries.len() >= SUPPRESSED_QUEUE_MAX {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(SuppressedAnnouncement {
+            session_id,
+            voice,
+            text,
+        });
+    }
+
+    /// Check for voice active→inactive transition and drain the queue.
+    /// Returns the queued announcements to replay, or empty vec.
+    fn check_and_drain(&mut self) -> Vec<SuppressedAnnouncement> {
+        let currently_active = is_voice_active();
+        let was_active = self.was_voice_active;
+        self.was_voice_active = currently_active;
+
+        if was_active && !currently_active && !self.entries.is_empty() {
+            info!(
+                "voice went inactive — replaying {} suppressed announcement(s)",
+                self.entries.len()
+            );
+            self.entries.drain(..).collect()
+        } else if !currently_active {
+            // Voice not active and wasn't before — clear any stale entries
+            // (shouldn't happen, but defensive).
+            self.entries.clear();
+            Vec::new()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Update voice-active tracking without draining (used when we already
+    /// checked voice state inline).
+    fn track_voice_state(&mut self, currently_active: bool) {
+        self.was_voice_active = currently_active;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State transition announcements
 // ---------------------------------------------------------------------------
 
@@ -773,11 +848,16 @@ async fn run_daemon_event_loop(
 ) -> Result<()> {
     use daemon_client::*;
 
+    let mut suppressed_queue = SuppressedQueue::new();
+
     // Track per-session display names and previous activity for announcements.
     let mut session_names: HashMap<String, String> = HashMap::new();
     let mut session_activities: HashMap<String, AgentActivity> = HashMap::new();
     // Track context thresholds to avoid repeat alerts (keyed by session_id).
     let mut prev_context_level: HashMap<String, ContextThreshold> = HashMap::new();
+
+    let mut voice_check = tokio::time::interval(std::time::Duration::from_millis(500));
+    voice_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -795,6 +875,22 @@ async fn run_daemon_event_loop(
                     }
                 } else {
                     info!("socket TTS skipped (muted)");
+                }
+            }
+
+            // Replay suppressed announcements when voice goes inactive.
+            _ = voice_check.tick() => {
+                let replays = suppressed_queue.check_and_drain();
+                if !replays.is_empty() {
+                    let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                    if !is_muted {
+                        for entry in replays {
+                            info!("replaying suppressed: [{}] {}", entry.session_id, entry.text);
+                            if let Err(e) = audio.announce(&entry.session_id, &entry.voice, &entry.text).await {
+                                warn!("replay announce failed: {e}");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -862,13 +958,16 @@ async fn run_daemon_event_loop(
                                 info!("[{sid}] daemon event: {text}");
                                 let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                                 let voice_active = is_voice_active();
+                                suppressed_queue.track_voice_state(voice_active);
                                 if !is_muted && !voice_active {
                                     let voice = voices.assign(sid);
                                     if let Err(e) = audio.announce(sid, voice, &text).await {
                                         warn!("announce failed: {e}");
                                     }
-                                } else if voice_active {
-                                    info!("suppressed announcement (voice active): {text}");
+                                } else if voice_active && !is_muted {
+                                    let voice = voices.assign(sid).to_string();
+                                    info!("queued suppressed announcement (voice active): {text}");
+                                    suppressed_queue.push(sid.to_string(), voice, text);
                                 }
                             }
                         }
@@ -880,11 +979,17 @@ async fn run_daemon_event_loop(
                         let text = format!("{label} exited");
                         info!("[{id}] daemon event: {text}");
                         let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
-                        if !is_muted && !is_voice_active() {
+                        let voice_active = is_voice_active();
+                        suppressed_queue.track_voice_state(voice_active);
+                        if !is_muted && !voice_active {
                             let voice = voices.assign(&id);
                             if let Err(e) = audio.announce(&id, voice, &text).await {
                                 warn!("announce failed: {e}");
                             }
+                        } else if voice_active && !is_muted {
+                            let voice = voices.assign(&id).to_string();
+                            info!("queued suppressed announcement (voice active): {text}");
+                            suppressed_queue.push(id.clone(), voice, text);
                         }
                     }
                     Ok(None) => {
@@ -961,6 +1066,7 @@ async fn run_poll_loop(
     let mut poller = ClaudeStatePoller::new().context("creating state poller")?;
     let mut prev_states: HashMap<String, (ClaudeStatus, Option<String>)> = HashMap::new();
     let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
+    let mut suppressed_queue = SuppressedQueue::new();
 
     // Seed initial states without announcing.
     for session in poller.poll() {
@@ -998,6 +1104,20 @@ async fn run_poll_loop(
             }
 
             _ = poll_interval.tick() => {
+                // Replay suppressed announcements on voice active→inactive transition.
+                let replays = suppressed_queue.check_and_drain();
+                if !replays.is_empty() {
+                    let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                    if !is_muted {
+                        for entry in replays {
+                            info!("replaying suppressed: [{}] {}", entry.session_id, entry.text);
+                            if let Err(e) = audio.announce(&entry.session_id, &entry.voice, &entry.text).await {
+                                warn!("replay announce failed: {e}");
+                            }
+                        }
+                    }
+                }
+
                 let sessions = poller.poll();
 
                 for session in &sessions {
@@ -1022,13 +1142,16 @@ async fn run_poll_loop(
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
                             let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                             let voice_active = is_voice_active();
+                            suppressed_queue.track_voice_state(voice_active);
                             if !is_muted && !voice_active {
                                 let voice = voices.assign(&session.session_id);
                                 if let Err(e) = audio.announce(&session.session_id, voice, &text).await {
                                     warn!("announce failed: {e}");
                                 }
-                            } else if voice_active {
-                                info!("suppressed announcement (voice active): {text}");
+                            } else if voice_active && !is_muted {
+                                let voice = voices.assign(&session.session_id).to_string();
+                                info!("queued suppressed announcement (voice active): {text}");
+                                suppressed_queue.push(session.session_id.clone(), voice, text);
                             }
                         }
                         prev_states.insert(session.session_id.clone(), (session.status.clone(), curr_tool.clone()));
@@ -1045,11 +1168,17 @@ async fn run_poll_loop(
                             let text = format!("{urgency}, {label} at {pct}% context");
                             info!("[{}] context alert: {text}", session.session_id);
                             let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
-                            if !is_muted && !is_voice_active() {
+                            let voice_active = is_voice_active();
+                            suppressed_queue.track_voice_state(voice_active);
+                            if !is_muted && !voice_active {
                                 let voice = voices.assign(&session.session_id);
                                 if let Err(e) = audio.announce(&format!("{}-ctx", session.session_id), voice, &text).await {
                                     warn!("context announce failed: {e}");
                                 }
+                            } else if voice_active && !is_muted {
+                                let voice = voices.assign(&session.session_id).to_string();
+                                info!("queued suppressed context alert (voice active): {text}");
+                                suppressed_queue.push(format!("{}-ctx", session.session_id), voice, text);
                             }
                             prev_context_alert.insert(session.session_id.clone(), threshold);
                         }
@@ -2428,5 +2557,64 @@ mod tests {
     #[test]
     fn short_id_preserves_short_ids() {
         assert_eq!(short_id("abc"), "abc");
+    }
+
+    // -----------------------------------------------------------------------
+    // SuppressedQueue tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn suppressed_queue_push_and_coalesce() {
+        let mut q = SuppressedQueue::new();
+        q.push("s1".into(), "voice1".into(), "first".into());
+        q.push("s1".into(), "voice1".into(), "second".into());
+        assert_eq!(q.entries.len(), 1);
+        assert_eq!(q.entries[0].text, "second");
+    }
+
+    #[test]
+    fn suppressed_queue_bounded_at_max() {
+        let mut q = SuppressedQueue::new();
+        for i in 0..SUPPRESSED_QUEUE_MAX + 3 {
+            q.push(format!("s{i}"), "v".into(), format!("text{i}"));
+        }
+        assert_eq!(q.entries.len(), SUPPRESSED_QUEUE_MAX);
+        // Oldest entries should have been evicted.
+        assert_eq!(q.entries[0].session_id, "s3");
+    }
+
+    #[test]
+    fn suppressed_queue_multiple_sessions() {
+        let mut q = SuppressedQueue::new();
+        q.push("s1".into(), "v1".into(), "a".into());
+        q.push("s2".into(), "v2".into(), "b".into());
+        q.push("s1".into(), "v1".into(), "c".into());
+        assert_eq!(q.entries.len(), 2);
+        // s1 should have the latest text.
+        let s1 = q.entries.iter().find(|e| e.session_id == "s1").unwrap();
+        assert_eq!(s1.text, "c");
+    }
+
+    #[test]
+    fn suppressed_queue_drain_on_transition() {
+        let mut q = SuppressedQueue::new();
+        q.was_voice_active = true;
+        q.push("s1".into(), "v".into(), "hello".into());
+        // Simulate voice going inactive — check_and_drain reads is_voice_active()
+        // which returns false in test env (no state file).
+        let drained = q.check_and_drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "hello");
+        assert!(q.entries.is_empty());
+    }
+
+    #[test]
+    fn suppressed_queue_no_drain_when_voice_still_inactive() {
+        let mut q = SuppressedQueue::new();
+        q.was_voice_active = false;
+        q.push("s1".into(), "v".into(), "hello".into());
+        // Voice was inactive and still is — should clear stale entries.
+        let drained = q.check_and_drain();
+        assert!(drained.is_empty());
     }
 }

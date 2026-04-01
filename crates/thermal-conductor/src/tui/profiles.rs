@@ -491,7 +491,9 @@ impl ProfilesPage {
                         }
                         crate::backend::Backend::Daemon(mut client) => {
                             for _ in 0..count {
-                                match client
+                                // Create the daemon session for tracking /
+                                // state inference.
+                                let session_id = match client
                                     .spawn_session(
                                         Some(command.clone()),
                                         Some(effective_cwd.clone()),
@@ -499,10 +501,51 @@ impl ProfilesPage {
                                     )
                                     .await
                                 {
-                                    Ok(_id) => spawned += 1,
+                                    Ok(id) => id,
                                     Err(e) => {
                                         tracing::error!("Daemon spawn failed: {e}");
                                         last_err = Some(format!("{e}"));
+                                        continue;
+                                    }
+                                };
+
+                                // Launch a visible terminal window so the
+                                // user can actually see the session.  Try
+                                // `kitty` first (new instance, no remote
+                                // control required), then fall back to common
+                                // terminal emulators.
+                                let title = format!("thc:{session_id}");
+                                let visible = launch_visible_terminal(
+                                    &command,
+                                    &effective_cwd,
+                                    &title,
+                                );
+                                match visible {
+                                    Ok(()) => {
+                                        spawned += 1;
+                                        tracing::info!(
+                                            session = %session_id,
+                                            "Daemon session + visible terminal launched"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // The daemon session exists but is
+                                        // headless — still count it as
+                                        // spawned but warn the user.
+                                        spawned += 1;
+                                        tracing::warn!(
+                                            session = %session_id,
+                                            error = %e,
+                                            "Daemon session spawned headless \
+                                             (no terminal emulator found)"
+                                        );
+                                        if last_err.is_none() {
+                                            last_err = Some(format!(
+                                                "Session(s) spawned headless — \
+                                                 no terminal emulator available \
+                                                 to display them: {e}"
+                                            ));
+                                        }
                                     }
                                 }
                             }
@@ -1525,6 +1568,100 @@ impl ProfilesPage {
             },
         }
     }
+}
+
+// ── Visible terminal launcher (daemon backend) ──────────────────────────────
+
+/// Launch a visible terminal window running `command` in `cwd`.
+///
+/// Tries terminal emulators in order of preference:
+/// 1. `kitty` — launched as a new process (no remote control needed)
+/// 2. `alacritty`
+/// 3. `foot`
+/// 4. `xterm` (last resort)
+///
+/// The spawned process is detached (will not block the TUI).
+fn launch_visible_terminal(command: &str, cwd: &str, title: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    // Each entry: (binary, args-builder).  The closure returns the full
+    // argument list for that emulator.
+    let emulators: &[(&str, fn(&str, &str, &str) -> Vec<String>)] = &[
+        ("kitty", |cmd, dir, t| {
+            vec![
+                "--title".into(),
+                t.into(),
+                "--directory".into(),
+                dir.into(),
+                "-e".into(),
+                cmd.into(),
+            ]
+        }),
+        ("alacritty", |cmd, dir, t| {
+            vec![
+                "--title".into(),
+                t.into(),
+                "--working-directory".into(),
+                dir.into(),
+                "-e".into(),
+                cmd.into(),
+            ]
+        }),
+        ("foot", |cmd, dir, t| {
+            vec![
+                format!("--title={t}"),
+                format!("--working-directory={dir}"),
+                cmd.into(),
+            ]
+        }),
+        ("xterm", |cmd, dir, t| {
+            // xterm doesn't support --working-directory natively; wrap
+            // via sh -c.
+            vec![
+                "-T".into(),
+                t.into(),
+                "-e".into(),
+                "sh".into(),
+                "-c".into(),
+                format!("cd {dir} && exec {cmd}"),
+            ]
+        }),
+    ];
+
+    for (bin, args_fn) in emulators {
+        if which_exists(bin) {
+            let args = args_fn(command, cwd, title);
+            let result = Command::new(bin)
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                // Detach from the TUI process group so the window
+                // outlives the TUI.
+                .spawn();
+            match result {
+                Ok(_child) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(emulator = bin, error = %e, "Failed to launch");
+                    // Try the next emulator.
+                }
+            }
+        }
+    }
+
+    Err("No terminal emulator found (tried kitty, alacritty, foot, xterm)".into())
+}
+
+/// Check if a binary exists on PATH.
+fn which_exists(name: &str) -> bool {
+    use std::process::Command;
+    Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

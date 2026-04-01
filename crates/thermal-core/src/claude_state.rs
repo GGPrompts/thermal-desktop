@@ -269,7 +269,21 @@ fn status_priority(status: &ClaudeStatus) -> u8 {
     }
 }
 
+/// Returns `true` if `source` is `Some("hook")`, indicating the session
+/// identity was reported directly by Claude Code hooks (ground truth) rather
+/// than inferred heuristically from PTY or tmux state.
+fn is_hook_sourced(state: &ClaudeSessionState) -> bool {
+    state.source.as_deref() == Some("hook")
+}
+
 fn state_supersedes(candidate: &ClaudeSessionState, current: &ClaudeSessionState) -> bool {
+    // Hook-sourced sessions are authoritative — prefer them over heuristic ones.
+    let candidate_hook = is_hook_sourced(candidate);
+    let current_hook = is_hook_sourced(current);
+    if candidate_hook != current_hook {
+        return candidate_hook;
+    }
+
     let candidate_updated = candidate.last_updated.as_deref().unwrap_or("");
     let current_updated = current.last_updated.as_deref().unwrap_or("");
 
@@ -1363,6 +1377,58 @@ mod tests {
         // but we verify it handles diverse states without panicking.
         let collapsed = collapse_sessions_by_id(vec![alive, dead, fresh_no_pid]);
         assert_eq!(collapsed.len(), 3);
+    }
+
+    #[test]
+    fn collapse_sessions_prefers_hook_sourced() {
+        // A hook-sourced session should win over a heuristic one with the same ID,
+        // even if the heuristic one has a newer timestamp.
+        let heuristic = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Processing,
+            working_dir: Some("/tmp/guessed".into()),
+            last_updated: Some("2026-03-31T22:00:01Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        let hook = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Idle,
+            working_dir: Some("/home/builder/projects/real".into()),
+            source: Some("hook".into()),
+            last_updated: Some("2026-03-31T22:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+
+        let collapsed = collapse_sessions_by_id(vec![heuristic, hook]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].source.as_deref(), Some("hook"));
+        assert_eq!(
+            collapsed[0].working_dir.as_deref(),
+            Some("/home/builder/projects/real")
+        );
+    }
+
+    #[test]
+    fn collapse_sessions_hook_vs_hook_uses_timestamp() {
+        // When both are hook-sourced, fall back to timestamp comparison.
+        let older_hook = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::Idle,
+            source: Some("hook".into()),
+            last_updated: Some("2026-03-31T22:00:00Z".into()),
+            ..ClaudeSessionState::default()
+        };
+        let newer_hook = ClaudeSessionState {
+            session_id: "dup".into(),
+            status: ClaudeStatus::ToolUse,
+            source: Some("hook".into()),
+            last_updated: Some("2026-03-31T22:00:01Z".into()),
+            ..ClaudeSessionState::default()
+        };
+
+        let collapsed = collapse_sessions_by_id(vec![older_hook, newer_hook]);
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(collapsed[0].status, ClaudeStatus::ToolUse);
     }
 
     // --- type alias smoke tests ---

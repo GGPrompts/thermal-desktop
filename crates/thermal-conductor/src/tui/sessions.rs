@@ -27,7 +27,7 @@ use crate::agent_timeline::{AgentTimeline, ToolCategory};
 use crate::backend::BackendPreference;
 use crate::client::DaemonClient;
 use crate::profiles_config::{Profile, load_profiles, save_profiles};
-use crate::protocol::{CellData, Response};
+use crate::protocol::{CellData, DirtyCellData, Response};
 
 use super::TuiPage;
 
@@ -389,6 +389,256 @@ fn build_display_order(sessions: &[ClaudeSessionState]) -> Vec<DisplayRow> {
     }
 
     rows
+}
+
+// ---------------------------------------------------------------------------
+// Preview broadcast subscriber — replaces 500ms polling with Attach streaming
+// ---------------------------------------------------------------------------
+
+use std::sync::{Arc, Mutex};
+
+/// Shared buffer holding the latest screen state from a daemon broadcast subscription.
+#[allow(dead_code)]
+struct PreviewBuffer {
+    /// Row-major flat cell grid (length = cols * rows).
+    cells: Vec<CellData>,
+    /// Number of columns.
+    cols: usize,
+    /// The daemon session ID this buffer corresponds to.
+    session_id: String,
+    /// Sequence number of the latest ScreenUpdate applied.
+    seq: u64,
+    /// Set to true whenever new data arrives (cleared by the reader).
+    dirty: bool,
+}
+
+/// Manages a background thread that subscribes to daemon screen updates via `Attach`.
+///
+/// Instead of polling `GetSessionState` every 500ms, we maintain a persistent
+/// connection to the daemon that streams `ScreenUpdate` broadcasts. This keeps
+/// `receiver_count() > 0` on the daemon side so broadcasts are never dropped.
+struct PreviewSubscriber {
+    /// Shared buffer with the latest screen state.
+    buffer: Arc<Mutex<Option<PreviewBuffer>>>,
+    /// Channel to tell the background task which session to attach to.
+    /// Sending `Some(id)` switches sessions; `None` detaches.
+    session_tx: std::sync::mpsc::Sender<Option<(String, String)>>,
+}
+
+impl PreviewSubscriber {
+    /// Start the background subscriber thread.
+    fn spawn() -> Self {
+        let buffer: Arc<Mutex<Option<PreviewBuffer>>> = Arc::new(Mutex::new(None));
+        let (session_tx, session_rx) = std::sync::mpsc::channel::<Option<(String, String)>>();
+
+        let buffer_clone = Arc::clone(&buffer);
+        std::thread::Builder::new()
+            .name("preview-subscriber".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("preview-subscriber: failed to create runtime: {e}");
+                        return;
+                    }
+                };
+                rt.block_on(preview_subscriber_loop(buffer_clone, session_rx));
+            })
+            .expect("spawn preview-subscriber thread");
+
+        Self { buffer, session_tx }
+    }
+
+    /// Switch the subscription to a different daemon session.
+    /// `daemon_id` is the daemon session ID, `cwd` is used for diagnostics.
+    fn attach(&self, daemon_id: &str, _cwd: &str) {
+        let _ = self.session_tx.send(Some((daemon_id.to_string(), _cwd.to_string())));
+    }
+
+    /// Read the current preview content if new data is available.
+    /// Returns `Some((cells, cols))` if the buffer has been updated since last read.
+    fn take_if_dirty(&self) -> Option<(Vec<CellData>, usize)> {
+        let mut guard = self.buffer.lock().ok()?;
+        let buf = guard.as_mut()?;
+        if !buf.dirty {
+            return None;
+        }
+        buf.dirty = false;
+        Some((buf.cells.clone(), buf.cols))
+    }
+
+    /// Read the current preview content regardless of dirty flag.
+    fn read(&self) -> Option<(Vec<CellData>, usize)> {
+        let guard = self.buffer.lock().ok()?;
+        let buf = guard.as_ref()?;
+        Some((buf.cells.clone(), buf.cols))
+    }
+
+}
+
+/// Background async loop: listens for session switch commands and runs
+/// the attach/stream cycle for each.
+async fn preview_subscriber_loop(
+    buffer: Arc<Mutex<Option<PreviewBuffer>>>,
+    session_rx: std::sync::mpsc::Receiver<Option<(String, String)>>,
+) {
+    // Current attached session state.
+    let mut current_session: Option<String> = None;
+    let mut client: Option<DaemonClient> = None;
+
+    loop {
+        // Check for a new session switch command (non-blocking if we have an active stream).
+        let switch = if client.is_some() && current_session.is_some() {
+            // Non-blocking check while streaming.
+            match session_rx.try_recv() {
+                Ok(cmd) => Some(cmd),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+            }
+        } else {
+            // Blocking wait when idle (no active session).
+            match session_rx.recv() {
+                Ok(cmd) => Some(cmd),
+                Err(_) => return,
+            }
+        };
+
+        if let Some(cmd) = switch {
+            match cmd {
+                Some((daemon_id, _cwd)) => {
+                    // Connect if needed.
+                    if client.is_none() {
+                        match DaemonClient::connect().await {
+                            Ok(Some(c)) => client = Some(c),
+                            Ok(None) => {
+                                tracing::warn!("preview-subscriber: daemon not running");
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!("preview-subscriber: connect error: {e}");
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Send Attach request.
+                    let c = client.as_mut().unwrap();
+                    if let Err(e) = c.send(crate::protocol::Request::Attach {
+                        id: daemon_id.clone(),
+                        initial_size: None,
+                    }).await {
+                        tracing::warn!("preview-subscriber: attach send error: {e}");
+                        client = None;
+                        continue;
+                    }
+
+                    // Wait for SessionState response (initial snapshot).
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        c.recv(),
+                    ).await {
+                        Ok(Some(Response::SessionState { cols, cells, .. })) => {
+                            let mut guard = buffer.lock().unwrap();
+                            *guard = Some(PreviewBuffer {
+                                cells,
+                                cols: cols as usize,
+                                session_id: daemon_id.clone(),
+                                seq: 0,
+                                dirty: true,
+                            });
+                            current_session = Some(daemon_id);
+                        }
+                        Ok(Some(Response::Error { message })) => {
+                            tracing::warn!("preview-subscriber: attach error: {message}");
+                            current_session = None;
+                        }
+                        Ok(Some(_)) => {
+                            tracing::warn!("preview-subscriber: unexpected response to attach");
+                            current_session = None;
+                        }
+                        Ok(None) => {
+                            tracing::warn!("preview-subscriber: connection closed during attach");
+                            client = None;
+                            current_session = None;
+                        }
+                        Err(_) => {
+                            tracing::warn!("preview-subscriber: attach timed out");
+                            current_session = None;
+                        }
+                    }
+                }
+                None => {
+                    // Detach: clear the buffer.
+                    let mut guard = buffer.lock().unwrap();
+                    *guard = None;
+                    current_session = None;
+                }
+            }
+            continue;
+        }
+
+        // No switch command — try to read the next broadcast update.
+        if let Some(c) = client.as_mut() {
+            // Use a short timeout so we can check for session switch commands.
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                c.recv(),
+            ).await {
+                Ok(Some(Response::ScreenUpdate { dirty_cells, .. })) => {
+                    let mut guard = buffer.lock().unwrap();
+                    if let Some(ref mut buf) = *guard {
+                        apply_dirty_cells(&mut buf.cells, buf.cols, &dirty_cells);
+                        buf.seq += 1;
+                        buf.dirty = true;
+                    }
+                }
+                Ok(Some(Response::SessionState { cols, cells, .. })) => {
+                    // Full re-sync (e.g. after lag).
+                    let mut guard = buffer.lock().unwrap();
+                    if let Some(ref mut buf) = *guard {
+                        buf.cells = cells;
+                        buf.cols = cols as usize;
+                        buf.seq += 1;
+                        buf.dirty = true;
+                    }
+                }
+                Ok(Some(Response::SessionExited { .. })) => {
+                    // Session exited — clear buffer.
+                    let mut guard = buffer.lock().unwrap();
+                    *guard = None;
+                    current_session = None;
+                }
+                Ok(Some(_)) => {
+                    // Ignore other responses.
+                }
+                Ok(None) => {
+                    // Connection closed.
+                    tracing::info!("preview-subscriber: connection closed");
+                    client = None;
+                    current_session = None;
+                }
+                Err(_) => {
+                    // Timeout — no data, loop back to check for commands.
+                }
+            }
+        }
+    }
+}
+
+/// Apply incremental dirty cells to a flat row-major cell grid.
+fn apply_dirty_cells(cells: &mut [CellData], cols: usize, dirty: &[DirtyCellData]) {
+    if cols == 0 {
+        return;
+    }
+    for dc in dirty {
+        let idx = dc.row as usize * cols + dc.col as usize;
+        if idx < cells.len() {
+            cells[idx] = dc.cell.clone();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -776,6 +1026,9 @@ pub struct SessionsPage {
     last_workspace_refresh: Instant,
     /// Per-session tool activity timelines, keyed by session_id.
     timelines: HashMap<String, AgentTimeline>,
+    /// Tracks when each session first disappeared from the active list.
+    /// Used to garbage-collect stale entries after a grace period.
+    stale_since: HashMap<String, Instant>,
 
     // -- Multi-select --
     /// Set of selected display_row indices.
@@ -851,6 +1104,14 @@ pub struct SessionsPage {
     /// When using the Daemon backend, receives session state from the daemon's
     /// semantic event stream instead of file-watching via ClaudeStatePoller.
     daemon_sub_rx: Option<tokio::sync::watch::Receiver<Vec<ClaudeSessionState>>>,
+
+    // -- Preview broadcast subscription --
+    /// Background subscriber that streams ScreenUpdate broadcasts from the daemon
+    /// instead of polling GetSessionState. Keeps receiver_count() > 0 so the daemon
+    /// never drops updates.
+    preview_subscriber: Option<PreviewSubscriber>,
+    /// The daemon session ID currently attached to the preview subscriber.
+    preview_attached_daemon_id: Option<String>,
 }
 
 impl SessionsPage {
@@ -874,6 +1135,7 @@ impl SessionsPage {
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now() - std::time::Duration::from_secs(10),
             timelines: HashMap::new(),
+            stale_since: HashMap::new(),
             selected_set: HashSet::new(),
             chat_input: String::new(),
             chat_cursor: 0,
@@ -904,6 +1166,8 @@ impl SessionsPage {
             last_bus_seq: 0,
             last_bus_connect_attempt: None,
             daemon_sub_rx,
+            preview_subscriber: None,
+            preview_attached_daemon_id: None,
         }
     }
 
@@ -943,17 +1207,47 @@ impl SessionsPage {
                 tl.record_tool_change(s.current_tool.as_deref());
             }
         }
-        // Record idle for sessions that have disappeared.
+        // Record idle for sessions that have disappeared, and track staleness.
         let stale_ids: Vec<String> = self
             .timelines
             .keys()
             .filter(|id| !active_ids.contains(id.as_str()))
             .cloned()
             .collect();
-        for id in stale_ids {
-            if let Some(tl) = self.timelines.get_mut(&id) {
+        let now = Instant::now();
+        for id in &stale_ids {
+            if let Some(tl) = self.timelines.get_mut(id) {
                 tl.record_idle();
             }
+            // Mark when this session first went stale.
+            self.stale_since.entry(id.clone()).or_insert(now);
+        }
+        // Sessions that reappeared are no longer stale.
+        self.stale_since.retain(|id, _| !active_ids.contains(id.as_str()));
+
+        // Garbage-collect sessions that have been stale for >30s and have no
+        // corresponding state file on disk.
+        const STALE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+        let expired: Vec<String> = self
+            .stale_since
+            .iter()
+            .filter(|(_, since)| now.duration_since(**since) >= STALE_GRACE)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            // Double-check: only purge if no state file exists on disk.
+            let state_path = format!("/tmp/claude-code-state/{}.json", id);
+            if std::path::Path::new(&state_path).exists() {
+                // State file still present — keep the entry, reset the timer
+                // so we re-check after another grace period.
+                self.stale_since.insert(id.clone(), now);
+                continue;
+            }
+            self.timelines.remove(id);
+            self.stale_since.remove(id);
+            self.cached_context_pct.remove(id);
+            self.prev_state.remove(id);
+            self.history.remove(id);
         }
 
         self.display_rows = build_display_order(&self.sessions);
@@ -1369,8 +1663,8 @@ impl SessionsPage {
     }
 
     /// Fetch terminal content for the selected session's preview pane.
-    /// Uses kitty `get-text` for the kitty backend, or `DaemonClient::get_session_state`
-    /// for the daemon backend. Throttled to at most once every 500ms.
+    /// Uses kitty `get-text` for the kitty backend, or a persistent broadcast
+    /// subscription for the daemon backend. Throttled to at most once every 500ms.
     fn fetch_preview(&mut self) {
         // Determine the currently selected session's working directory.
         let selected = self.table_state.selected().and_then(|i| {
@@ -1409,6 +1703,8 @@ impl SessionsPage {
             self.preview_pinned = false;
             // Force refresh by clearing the throttle timestamp.
             self.last_preview_update = None;
+            // Clear attached daemon ID so fetch_preview_daemon re-attaches.
+            self.preview_attached_daemon_id = None;
         }
 
         // Throttle: only refresh every 500ms.
@@ -1486,9 +1782,14 @@ impl SessionsPage {
         true
     }
 
-    /// Fetch preview via `DaemonClient::get_session_state`. Uses a small
-    /// tokio runtime (same pattern as ProfilesPage spawn). Resolves daemon
-    /// session by matching cwd against the daemon session list.
+    /// Fetch preview via daemon broadcast subscription. On first call (or when
+    /// the selected session changes), spawns a `PreviewSubscriber` that sends
+    /// `Attach` and streams `ScreenUpdate` broadcasts. Subsequent calls just
+    /// read the latest state from the shared buffer — no network round-trip.
+    ///
+    /// This keeps `receiver_count() > 0` on the daemon side so broadcasts are
+    /// never dropped, fixing the text-disappearance bug from the old 500ms
+    /// polling approach.
     fn fetch_preview_daemon(&mut self, cwd: &str) {
         // Refresh daemon session map every 3 seconds.
         let stale = self
@@ -1511,43 +1812,40 @@ impl SessionsPage {
             }
         };
 
-        // Fetch session state via a short-lived tokio runtime.
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => {
-                self.preview_content = Self::preview_diagnostic("(failed to create async runtime)");
+        // Lazily spawn the preview subscriber on first daemon preview request.
+        if self.preview_subscriber.is_none() {
+            self.preview_subscriber = Some(PreviewSubscriber::spawn());
+        }
+        let sub = self.preview_subscriber.as_ref().unwrap();
+
+        // If the selected session changed, tell the subscriber to re-attach.
+        let need_attach = self
+            .preview_attached_daemon_id
+            .as_deref()
+            .map(|id| id != daemon_id)
+            .unwrap_or(true);
+
+        if need_attach {
+            sub.attach(&daemon_id, cwd);
+            self.preview_attached_daemon_id = Some(daemon_id.clone());
+        }
+
+        // Read latest content from the shared buffer.
+        if let Some((cells, cols)) = sub.take_if_dirty() {
+            self.preview_content = cells_to_lines(&cells, cols);
+            if !self.preview_pinned {
                 self.preview_scroll = self.preview_content.len();
-                return;
             }
-        };
-
-        let result = rt.block_on(async {
-            let mut client = match DaemonClient::connect().await? {
-                Some(c) => c,
-                None => anyhow::bail!("daemon not running"),
-            };
-            client.get_session_state(&daemon_id).await
-        });
-
-        match result {
-            Ok(Response::SessionState { cols, cells, .. }) => {
-                self.preview_content = cells_to_lines(&cells, cols as usize);
+        } else if self.preview_content.is_empty() || need_attach {
+            // Buffer not dirty yet — try reading whatever is there (may be
+            // from the initial Attach snapshot that arrived between ticks).
+            if let Some((cells, cols)) = sub.read() {
+                self.preview_content = cells_to_lines(&cells, cols);
                 if !self.preview_pinned {
                     self.preview_scroll = self.preview_content.len();
                 }
             }
-            Ok(_) => {
-                self.preview_content = Self::preview_diagnostic("(unexpected daemon response)");
-                self.preview_scroll = self.preview_content.len();
-            }
-            Err(e) => {
-                self.preview_content =
-                    Self::preview_diagnostic(&format!("(daemon preview error: {})", e));
-                self.preview_scroll = self.preview_content.len();
-            }
+            // If nothing yet, keep the previous content until data arrives.
         }
     }
 
@@ -3334,6 +3632,7 @@ mod tests {
             workspace_map: HashMap::new(),
             last_workspace_refresh: Instant::now(),
             timelines: HashMap::new(),
+            stale_since: HashMap::new(),
             selected_set: HashSet::new(),
             chat_input: String::new(),
             chat_cursor: 0,
@@ -3364,6 +3663,8 @@ mod tests {
             last_daemon_ls: None,
             last_focus_time: None,
             daemon_sub_rx: None,
+            preview_subscriber: None,
+            preview_attached_daemon_id: None,
         }
     }
 

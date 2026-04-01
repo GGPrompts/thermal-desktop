@@ -6,13 +6,16 @@
 # real Codex event schema, and writes /tmp/codex-state/<session-id>.json files
 # that ClaudeStatePoller can consume alongside Claude's state tracker.
 #
+# Uses inotifywait (inotify-tools) for event-driven file watching. Falls back
+# to polling if inotifywait is not installed (with a stderr warning).
+#
 # Stream mode is still available for ad hoc replay / piping:
 #   codex exec --json 2>&1 | ./scripts/codex-state-adapter.sh --stdin
 #
 # Environment overrides:
 #   CODEX_SESSIONS_DIR          Source session tree (default: ~/.codex/sessions)
 #   CODEX_STATE_DIR             Output state dir (default: /tmp/codex-state)
-#   CODEX_STATE_POLL_INTERVAL   Watch-mode poll interval in seconds (default: 1)
+#   CODEX_STATE_POLL_INTERVAL   Fallback poll interval in seconds (default: 1)
 #   CODEX_STATE_STALE_SECS      Remove untouched sessions after N seconds (120)
 
 set -euo pipefail
@@ -578,34 +581,76 @@ prune_stale_sources() {
     done
 }
 
-watch_mode() {
+full_scan() {
     local source now source_mtime
+    now="$(now_epoch)"
+    while IFS= read -r -d '' source; do
+        [[ -z "$source" ]] && continue
+        source_mtime="$(source_mtime_epoch "$source")"
+        if [[ "$source_mtime" -eq 0 || $((now - source_mtime)) -gt "$STALE_SECS" ]]; then
+            if [[ -n "${SOURCE_SESSION_ID[$source]:-}" ]]; then
+                remove_state_for_session "${SOURCE_SESSION_ID[$source]}"
+            fi
+            unset SOURCE_LINE_COUNT["$source"]
+            unset SOURCE_LAST_TOUCH["$source"]
+            unset SOURCE_SESSION_ID["$source"]
+            unset SOURCE_WORKDIR["$source"]
+            continue
+        fi
+        process_source_file "$source"
+    done < <(find "$SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null | sort -z)
+    prune_stale_sources "$now"
+}
 
+watch_mode_polling() {
+    while true; do
+        full_scan
+        sleep "$POLL_INTERVAL"
+    done
+}
+
+watch_mode_inotify() {
+    local prune_interval=30
+    local last_prune dir events filename source now
+    last_prune="$(now_epoch)"
+
+    # inotifywait emits lines like:  /path/to/dir/ MODIFY rollout-xxx.jsonl
+    # -m = monitor (continuous), -r = recursive, -q = quiet (no startup banner)
+    # Use process substitution (not pipe) so the while loop runs in the current
+    # shell and can update the associative arrays used for state tracking.
+    while IFS=' ' read -r dir events filename; do
+        [[ -z "$filename" ]] && continue
+        source="${dir}${filename}"
+        [[ -f "$source" ]] || continue
+        process_source_file "$source"
+
+        # Periodic stale-source pruning (piggybacks on event processing)
+        now="$(now_epoch)"
+        if [[ $((now - last_prune)) -ge "$prune_interval" ]]; then
+            prune_stale_sources "$now"
+            last_prune="$now"
+        fi
+    done < <(inotifywait -m -r -q -e modify,create,moved_to \
+        --include 'rollout-.*\.jsonl$' \
+        "$SESSIONS_DIR" 2>/dev/null)
+}
+
+watch_mode() {
     ensure_dirs
     ensure_single_instance
     reset_state_dir
 
-    while true; do
-        now="$(now_epoch)"
-        while IFS= read -r -d '' source; do
-            [[ -z "$source" ]] && continue
-            source_mtime="$(source_mtime_epoch "$source")"
-            if [[ "$source_mtime" -eq 0 || $((now - source_mtime)) -gt "$STALE_SECS" ]]; then
-                if [[ -n "${SOURCE_SESSION_ID[$source]:-}" ]]; then
-                    remove_state_for_session "${SOURCE_SESSION_ID[$source]}"
-                fi
-                unset SOURCE_LINE_COUNT["$source"]
-                unset SOURCE_LAST_TOUCH["$source"]
-                unset SOURCE_SESSION_ID["$source"]
-                unset SOURCE_WORKDIR["$source"]
-                continue
-            fi
-            process_source_file "$source"
-        done < <(find "$SESSIONS_DIR" -type f -name 'rollout-*.jsonl' -print0 2>/dev/null | sort -z)
+    # Bootstrap: initial full scan of existing sessions
+    full_scan
 
-        prune_stale_sources "$now"
-        sleep "$POLL_INTERVAL"
-    done
+    if command -v inotifywait &>/dev/null; then
+        # Ensure the sessions directory exists for inotifywait
+        mkdir -p "$SESSIONS_DIR"
+        watch_mode_inotify
+    else
+        echo "WARNING: inotifywait not found (install inotify-tools); falling back to ${POLL_INTERVAL}s polling" >&2
+        watch_mode_polling
+    fi
 }
 
 stdin_mode() {

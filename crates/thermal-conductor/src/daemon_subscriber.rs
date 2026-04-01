@@ -182,13 +182,58 @@ pub(crate) fn try_spawn_subscriber() -> Option<watch::Receiver<Vec<ClaudeSession
                 Err(e) => warn!("Daemon subscription error: {e}"),
             }
 
+            // Grace period: retain the last-good snapshot so short disconnects
+            // (daemon restart, socket hiccup) don't cause visible flicker.
+            // Retry rapidly during the window; only clear if every attempt fails.
+            const GRACE_SECS: u64 = 8;
+            const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS);
+            let mut reconnected = false;
+
+            info!("Disconnect — entering {GRACE_SECS}s grace period (retaining last snapshot)");
+
+            while tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(RETRY_INTERVAL).await;
+
+                if !protocol::socket_path().exists() {
+                    // Socket removed — daemon is fully gone, no point retrying.
+                    break;
+                }
+
+                // Attempt to reconnect.  `run_subscription` will push fresh
+                // data through `tx` on success, so the stale snapshot is
+                // replaced automatically.
+                match run_subscription(&tx).await {
+                    Ok(()) => {
+                        info!("Reconnected during grace — subscription ended cleanly");
+                        reconnected = true;
+                        break; // back to outer loop for a new grace cycle
+                    }
+                    Err(_) => {
+                        // Daemon not ready yet — keep retrying.
+                    }
+                }
+            }
+
+            if reconnected {
+                // Subscription ran and ended — the outer loop will handle it
+                // with a fresh grace period.
+                continue;
+            }
+
+            // Grace expired without reconnection — clear stale data.
+            info!("Grace period expired — clearing sessions");
             let _ = tx.send(Vec::new());
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
             if !protocol::socket_path().exists() {
                 info!("Daemon socket gone — stopping subscriber");
                 break;
             }
+
+            // Back off before the next attempt.
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
     });
 

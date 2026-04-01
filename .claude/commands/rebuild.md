@@ -13,21 +13,20 @@ IMPORTANT: `CARGO_TARGET_DIR=~/.cargo-target` — `cargo build` alone does NOT u
 
 | Crate | Path | Daemon? | How to restart |
 |-------|------|---------|----------------|
-| thermal-audio | crates/thermal-audio | Yes (pidfile: audio.pid) | `thermal-audio` |
-| thermal-bar | crates/thermal-bar | Yes (long-running, no pidfile) | `thermal-bar &` |
+| thermal-audio | crates/thermal-audio | Yes (pidfile: audio.pid, socket: audio.sock) | `thermal-audio` |
+| thermal-bar | crates/thermal-bar | Yes (pidfile: bar.pid) | `thermal-bar &` |
 | thermal-commander | crates/thermal-commander | No (stdio MCP server) | N/A |
-| thermal-conductor | crates/thermal-conductor | Optional daemon mode | `thc daemon &` (if was running) |
-| thermal-dispatcher | crates/thermal-dispatcher | Yes (no pidfile) | `thermal-dispatcher &` |
-| thermal-face | crates/thermal-face | Yes (long-running, no pidfile) | `thermal-face &` |
-| thermal-hud | crates/thermal-hud | Yes (long-running, no pidfile) | `thermal-hud &` |
+| thermal-conductor | crates/thermal-conductor | Optional daemon mode (socket: conductor.sock) | `thc daemon &` (if was running) |
+| thermal-dispatcher | crates/thermal-dispatcher | Yes (pidfile: dispatcher.pid, socket: dispatcher.sock) | `thermal-dispatcher &` |
+| thermal-hud | crates/thermal-hud | Yes (pidfile: hud.pid) | `thermal-hud &` |
 | thermal-launch | crates/thermal-launch | No (on-demand overlay) | N/A |
 | thermal-lock | crates/thermal-lock | No (on-demand) | N/A |
-| thermal-messages | crates/thermal-messages | Yes (pidfile: messages.pid) | `thermal-messages &` or `thermal-messages --persist &` |
+| thermal-messages | crates/thermal-messages | Yes (pidfile: messages.pid, socket: messages.sock) | `thermal-messages &` or `thermal-messages --persist &` |
 | thermal-monitor | crates/thermal-monitor | No (interactive TUI) | N/A |
-| thermal-notify | crates/thermal-notify | Yes (long-running, no pidfile) | `thermal-notify &` |
-| thermal-screensaver | crates/thermal-screensaver | Yes (long-running, no pidfile) | `thermal-screensaver &` |
-| thermal-voice | crates/thermal-voice | Yes (pidfile: voice.pid) | `thermal-voice listen &` |
-| thermal-wallpaper | crates/thermal-wallpaper | Yes (long-running, no pidfile) | `thermal-wallpaper &` |
+| thermal-notify | crates/thermal-notify | Yes (pidfile: notify.pid) | `thermal-notify &` |
+| thermal-screensaver | crates/thermal-screensaver | Yes (pidfile: screensaver.pid) | `thermal-screensaver &` |
+| thermal-voice | crates/thermal-voice | Yes (pidfile: voice.pid, socket: voice.sock) | `thermal-voice listen &` |
+| thermal-wallpaper | crates/thermal-wallpaper | Yes (pidfile: wallpaper.pid) | `thermal-wallpaper &` |
 
 Note: thermal-core and thermal-terminal are libraries (no binary).
 
@@ -57,7 +56,7 @@ If the argument is "nuke", perform a full scorched-earth reset:
 3. **Clean up ALL pidfiles and sockets**:
    ```bash
    rm -f /run/user/$UID/thermal/*.pid
-   rm -f /run/user/$UID/thermal/conductor.sock
+   rm -f /run/user/$UID/thermal/*.sock
    ```
 
 4. **Rebuild ALL binary crates** (same as "all" mode)
@@ -103,9 +102,10 @@ pgrep -af 'cargo.*thermal-' | while read pid rest; do kill "$pid"; done
 ```
 
 Also clean up stale pidfiles and sockets for killed daemons:
-- Pidfiles: `/run/user/$UID/thermal/{audio,messages,voice}.pid`
-- Sockets: `/run/user/$UID/thermal/conductor.sock` (if no conductor process is running)
-- Only remove pidfiles for processes you just killed
+- Pidfiles live under `/run/user/$UID/thermal/*.pid`
+- Sockets live under `/run/user/$UID/thermal/*.sock`
+- Only remove pidfiles/sockets for processes you just killed, unless you are in `nuke` mode
+- Prefer `thc doctor` after restart to detect any stale runtime artifacts you missed
 
 Wait 1-2 seconds after killing to let sockets close.
 
@@ -121,9 +121,13 @@ Restart order matters — dependencies first:
 1. **thermal-messages** (message bus — others depend on it)
 2. **thermal-audio** (TTS — dispatcher depends on it)
 3. **thermal-voice**, **thermal-dispatcher** (voice pipeline)
-4. **thermal-bar**, **thermal-hud**, **thermal-notify**, **thermal-wallpaper**, **thermal-screensaver**, **thermal-face** (UI components, independent)
+4. **thermal-bar**, **thermal-hud**, **thermal-notify**, **thermal-wallpaper**, **thermal-screensaver** (UI components, independent)
 
 Preserve original arguments: if `thermal-voice` was running with `listen`, restart as `thermal-voice listen`. If `thermal-messages` was running with `--persist`, include that flag. Check the original `pgrep -a` output for the full command line.
+
+After restarting, use the conductor doctor command as the canonical verification/repair path:
+- Run `thc doctor` to inspect pid/socket health without mutating runtime state
+- If stale artifacts remain, run `thc doctor --fix`
 
 Do NOT restart:
 - thermal-conductor TUI (interactive, user manages it)
@@ -134,7 +138,10 @@ Do NOT restart:
 
 ### Step 6: Verify
 
-After a couple seconds, run `pgrep -a 'thermal-'` again and confirm all previously-running daemons are back. Report the results.
+After a couple seconds:
+1. Run `pgrep -a 'thermal-'` again and confirm all previously-running daemons are back
+2. Run `thc doctor` to verify pid/socket health
+3. If needed, run `thc doctor --fix` to clean stale artifacts and restart core daemons
 
 ## Output
 

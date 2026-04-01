@@ -169,6 +169,14 @@ const SERVICES: &[ServiceDef] = &[
         doc_content: Some(include_str!("../../../../docs/daemons/thermal-messages.md")),
     },
     ServiceDef {
+        binary: "thermal-wallpaper",
+        description: "Animated thermal wallpaper",
+        pid_source: PidSource::Pidfile("wallpaper.pid"),
+        command: None,
+        args: &[],
+        doc_content: Some(include_str!("../../../../docs/daemons/thermal-wallpaper.md")),
+    },
+    ServiceDef {
         binary: "thermal-conductor",
         description: "Session daemon",
         pid_source: PidSource::PgrepPattern("thc daemon"),

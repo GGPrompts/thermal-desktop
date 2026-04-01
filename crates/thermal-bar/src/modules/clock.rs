@@ -47,11 +47,32 @@ fn refresh_cache(guard: &mut MutexGuard<'_, Option<ClockCache>>) {
 fn run_date(fmt: &str) -> String {
     Command::new("date")
         .arg(fmt)
+        .env("TZ", detect_tz())
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_owned())
         .unwrap_or_else(|| "--:--:--".to_owned())
+}
+
+/// Resolve the local timezone string for passing to `date`.
+///
+/// Checks `TZ` env, then reads `/etc/localtime` symlink target, falling back
+/// to UTC if neither is available.
+fn detect_tz() -> String {
+    if let Ok(tz) = std::env::var("TZ") {
+        if !tz.is_empty() {
+            return tz;
+        }
+    }
+    // /etc/localtime is typically a symlink like .../zoneinfo/America/New_York
+    if let Ok(target) = std::fs::read_link("/etc/localtime") {
+        let s = target.to_string_lossy();
+        if let Some(pos) = s.find("zoneinfo/") {
+            return s[pos + "zoneinfo/".len()..].to_string();
+        }
+    }
+    "UTC".to_string()
 }
 
 // ---------------------------------------------------------------------------

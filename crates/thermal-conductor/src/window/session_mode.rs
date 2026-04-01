@@ -25,7 +25,7 @@ use super::ConductorWindow;
 
 /// How to handle BEL (0x07) from the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BellMode {
+pub(crate) enum BellMode {
     /// Brief translucent screen flash.
     Visual,
     /// Bell is silently ignored.
@@ -53,7 +53,7 @@ pub(super) const BELL_FLASH_DURATION: Duration = Duration::from_millis(200);
 /// updates over a Unix socket and forward input/resize there.
 ///
 /// In **standalone mode** we own the PTY directly (legacy, no daemon).
-pub(super) enum SessionMode {
+pub(crate) enum SessionMode {
     /// Connected to the session daemon.
     Client {
         /// Daemon client for sending requests (input, resize, detach).

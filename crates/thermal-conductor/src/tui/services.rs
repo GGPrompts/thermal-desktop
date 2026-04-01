@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 10);
+        assert_eq!(SERVICES.len(), 11);
     }
 
     #[test]

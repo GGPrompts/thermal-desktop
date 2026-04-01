@@ -24,7 +24,7 @@ use std::time::Instant;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
     widgets::TableState,
 };
@@ -717,6 +717,7 @@ impl TuiPage for SessionsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
     use thermal_core::{ClaudeSessionState, ClaudeStatus};
 
     // ── Helpers ───────────────────────────────────────────────────────────────

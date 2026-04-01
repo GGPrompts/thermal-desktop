@@ -10,7 +10,7 @@ use thermal_core::ClaudeSessionState;
 
 pub(super) const MAX_HISTORY: usize = 12;
 
-pub(super) struct HistoryEntry {
+pub(in crate::tui) struct HistoryEntry {
     pub(super) text: String,
     pub(super) timestamp: Instant,
 }
@@ -19,7 +19,7 @@ pub(super) struct HistoryEntry {
 // Display ordering -- parents first, subagents nested underneath
 // ---------------------------------------------------------------------------
 
-pub(super) struct DisplayRow {
+pub(in crate::tui) struct DisplayRow {
     pub(super) session: ClaudeSessionState,
     pub(super) is_subagent: bool,
     pub(super) is_last_child: bool,

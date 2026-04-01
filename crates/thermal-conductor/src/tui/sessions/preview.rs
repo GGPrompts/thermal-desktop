@@ -36,7 +36,7 @@ pub(super) struct PreviewBuffer {
 }
 
 /// Manages a background thread that subscribes to daemon screen updates via `Attach`.
-pub(super) struct PreviewSubscriber {
+pub(in crate::tui) struct PreviewSubscriber {
     /// Shared buffer with the latest screen state.
     buffer: Arc<Mutex<Option<PreviewBuffer>>>,
     /// Channel to tell the background task which session to attach to.

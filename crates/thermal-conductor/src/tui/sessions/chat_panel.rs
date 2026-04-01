@@ -1,6 +1,5 @@
 //! Chat panel: bus connection, @-mention parsing, message routing, autocomplete.
 
-use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
@@ -9,8 +8,7 @@ use std::time::Instant;
 use thermal_core::message::{AgentId, Message, MessageType};
 use thermal_core::ClaudeSessionState;
 
-use super::format::TEXT_MUTED;
-use super::{FocusedPanel, SessionsPage};
+use super::SessionsPage;
 
 // ---------------------------------------------------------------------------
 // Messages socket path
@@ -26,7 +24,7 @@ fn messages_socket_path() -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Non-blocking connection to the messages daemon.
-pub(super) struct BusConnection {
+pub(in crate::tui) struct BusConnection {
     reader: BufReader<UnixStream>,
     line_buf: String,
 }
@@ -169,7 +167,7 @@ pub(super) fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool 
 pub(super) const MAX_RECENT_MESSAGES: usize = 50;
 
 /// A recent message displayed in the inline chat area.
-pub(super) struct ChatEntry {
+pub(in crate::tui) struct ChatEntry {
     pub(super) from_label: String,
     pub(super) content: String,
     pub(super) timestamp: Instant,

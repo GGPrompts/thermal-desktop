@@ -26,10 +26,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{
-            BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler,
-        },
+        keyboard::{KeyEvent, Modifiers},
     },
     shell::{
         WaylandSurface,
@@ -46,12 +43,7 @@ use wayland_client::{
 };
 
 use alacritty_terminal::event::Event as TermEvent;
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point, Side};
-use alacritty_terminal::selection::{Selection, SelectionType};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{TermDamage, TermMode};
-use std::collections::HashSet;
+use alacritty_terminal::term::TermMode;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr::NonNull;
 use std::sync::{
@@ -67,7 +59,7 @@ use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
 use crate::font_config::FontConfig;
 use crate::grid_renderer::{
-    self, ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer, RenderCell,
+    ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer,
 };
 use crate::inject::{self, InjectWatcher};
 use crate::input;
@@ -1078,4 +1070,3 @@ mod url_detection;
 use claude_session::find_matching_session;
 use daemon_reader::{apply_session_state_to_term, spawn_daemon_reader_task};
 use session_mode::{BellMode, BELL_FLASH_DURATION, SessionMode, setup_standalone_session};
-use url_detection::detect_urls_in_cells;

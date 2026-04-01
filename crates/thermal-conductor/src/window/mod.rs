@@ -142,7 +142,9 @@ pub fn run() -> anyhow::Result<()> {
                 .copied()
                 .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
         })
-        .unwrap_or(caps.formats[0]);
+        .unwrap_or_else(|| {
+            *caps.formats.first().unwrap_or(&wgpu::TextureFormat::Bgra8Unorm)
+        });
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,

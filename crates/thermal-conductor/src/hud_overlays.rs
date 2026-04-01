@@ -382,11 +382,11 @@ impl GridRenderer {
                 })
                 .collect();
 
-            if let Err(e) = self.text_renderer.prepare(
+            if let Err(e) = self.overlay_text_renderer.prepare(
                 device,
                 queue,
                 &mut self.font_system,
-                &mut self.atlas,
+                &mut self.overlay_atlas,
                 &self.viewport,
                 text_areas,
                 &mut self.swash_cache,
@@ -412,8 +412,8 @@ impl GridRenderer {
                 });
 
                 if let Err(e) = self
-                    .text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .overlay_text_renderer
+                    .render(&self.overlay_atlas, &self.viewport, &mut pass)
                 {
                     tracing::warn!("Command block label text render failed: {}", e);
                 }

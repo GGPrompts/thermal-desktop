@@ -522,8 +522,7 @@ impl KittyController {
 
 /// Return the sidecar file path: `/run/user/<uid>/thermal/sessions.json`.
 fn sidecar_path() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal/sessions.json"))
+    thermal_core::runtime::runtime_dir().join("sessions.json")
 }
 
 /// Read the sidecar, returning default if missing or unparseable.

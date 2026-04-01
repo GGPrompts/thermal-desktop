@@ -23,8 +23,7 @@ use tokio::net::UnixStream;
 use thermal_core::message::{AgentId, Message, MessageType};
 
 fn socket_path() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal/messages.sock"))
+    thermal_core::runtime::socket_path("messages")
 }
 
 fn parse_args() -> Result<(String, String)> {
@@ -66,12 +65,28 @@ async fn main() -> Result<()> {
     };
 
     let sock = socket_path();
-    let stream = UnixStream::connect(&sock).await.with_context(|| {
-        format!(
-            "could not connect to {} — is thermal-messages running?",
-            sock.display()
-        )
-    })?;
+    let stream = match UnixStream::connect(&sock).await {
+        Ok(s) => s,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::ConnectionRefused && sock.exists() {
+                // Stale socket — clean it up and report clearly.
+                let _ = std::fs::remove_file(&sock);
+                anyhow::bail!(
+                    "thermal-messages socket exists at {} but daemon is not responding — removed stale socket",
+                    sock.display()
+                );
+            }
+            if e.kind() == std::io::ErrorKind::NotFound || !sock.exists() {
+                anyhow::bail!(
+                    "thermal-messages socket not found at {} — is the daemon running?",
+                    sock.display()
+                );
+            }
+            return Err(e).with_context(|| {
+                format!("could not connect to {}", sock.display())
+            });
+        }
+    };
 
     let (reader, mut writer) = stream.into_split();
 

@@ -391,10 +391,10 @@ pub async fn run() -> anyhow::Result<()> {
     // daemon is not running.
     let daemon_rx = daemon_subscriber::try_spawn_subscriber();
     let mut poller = if daemon_rx.is_some() {
-        tracing::info!("Using daemon semantic subscription for agent state");
+        tracing::info!("Using daemon semantic subscription for agent state (source: daemon)");
         None
     } else {
-        tracing::info!("Daemon not available — using ClaudeStatePoller fallback");
+        tracing::info!("Daemon not available — using ClaudeStatePoller fallback (source: file-derived)");
         Some(
             ClaudeStatePoller::new()
                 .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?,

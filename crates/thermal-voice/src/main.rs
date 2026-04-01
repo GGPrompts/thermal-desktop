@@ -145,19 +145,18 @@ fn resolve_model_path(config: &Config) -> PathBuf {
 // Runtime paths
 // ---------------------------------------------------------------------------
 
-fn runtime_dir() -> PathBuf {
-    PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
-        .join("thermal")
-}
-
 fn pidfile_path() -> PathBuf {
-    runtime_dir().join("voice.pid")
+    thermal_core::runtime::pidfile_path("voice")
 }
 
 fn socket_path() -> PathBuf {
-    runtime_dir().join("voice.sock")
+    thermal_core::runtime::socket_path("voice")
 }
 
+// Voice state file: producer end of the voice state chain. Written at ~5Hz
+// with RMS level + state. Consumers: thermal-bar (voice module), thermal-hud
+// (voice poller), thermal-audio (TTS suppression). This is a separate chain
+// from agent session state and does NOT flow through the conductor daemon.
 const STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 
 // ---------------------------------------------------------------------------
@@ -540,7 +539,7 @@ fn transcribe(samples: &[i16], config: &Config) -> Result<String> {
 /// Send a transcript to thermal-dispatcher via its Unix socket for command execution.
 /// Used by VAD mode — the dispatcher handles tool routing via local Ollama.
 async fn dispatch_to_dispatcher(transcript: String) {
-    let sock_path = runtime_dir().join("dispatcher.sock");
+    let sock_path = thermal_core::runtime::socket_path("dispatcher");
     match tokio::net::UnixStream::connect(&sock_path).await {
         Ok(stream) => {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -630,7 +629,7 @@ async fn dispatch_to_claude(transcript: &str) {
 
 /// Send text to thermal-audio for TTS playback via Unix socket.
 async fn send_to_audio(text: &str) {
-    let audio_sock = runtime_dir().join("audio.sock");
+    let audio_sock = thermal_core::runtime::socket_path("audio");
 
     match tokio::net::UnixStream::connect(&audio_sock).await {
         Ok(stream) => {
@@ -831,31 +830,19 @@ fn execute_code_word(code: &CodeWord) {
 // ---------------------------------------------------------------------------
 
 fn check_daemon_running() -> Option<u32> {
-    let pidfile = pidfile_path();
-    if pidfile.exists() {
-        if let Ok(contents) = fs::read_to_string(&pidfile)
-            && let Ok(pid) = contents.trim().parse::<u32>()
-            && Path::new(&format!("/proc/{pid}")).exists()
-        {
-            return Some(pid);
-        }
-        // Stale pidfile
-        let _ = fs::remove_file(&pidfile);
-    }
-    None
+    thermal_core::runtime::validate_pidfile("thermal-voice", &pidfile_path())
 }
 
 fn write_pidfile() -> Result<()> {
-    let run_dir = runtime_dir();
-    fs::create_dir_all(&run_dir).with_context(|| format!("creating runtime dir {:?}", run_dir))?;
-    let pidfile = pidfile_path();
-    fs::write(&pidfile, std::process::id().to_string())
-        .with_context(|| format!("writing pidfile {:?}", pidfile))?;
+    thermal_core::runtime::ensure_runtime_dir()
+        .with_context(|| "creating thermal runtime directory")?;
+    thermal_core::runtime::write_pidfile("thermal-voice", &pidfile_path())
+        .with_context(|| "writing voice pidfile")?;
     Ok(())
 }
 
 fn cleanup_pidfile() {
-    let _ = fs::remove_file(pidfile_path());
+    thermal_core::runtime::remove_pidfile("thermal-voice", &pidfile_path());
 }
 
 // ---------------------------------------------------------------------------
@@ -928,12 +915,9 @@ async fn run_daemon() -> Result<()> {
     // Write initial state
     write_state(VoiceState::Muted, None);
 
-    // Set up socket
+    // Set up socket — clean stale if needed
     let sock_path = socket_path();
-    if sock_path.exists() {
-        fs::remove_file(&sock_path)
-            .with_context(|| format!("removing stale socket {:?}", sock_path))?;
-    }
+    thermal_core::runtime::cleanup_stale_socket("thermal-voice", &sock_path);
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!("thermal-voice daemon listening on {}", sock_path.display());
@@ -1398,10 +1382,7 @@ async fn run_listen_daemon(
 
     // Set up socket (same as push-to-talk daemon for override commands)
     let sock_path = socket_path();
-    if sock_path.exists() {
-        fs::remove_file(&sock_path)
-            .with_context(|| format!("removing stale socket {:?}", sock_path))?;
-    }
+    thermal_core::runtime::cleanup_stale_socket("thermal-voice", &sock_path);
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!(
@@ -2194,7 +2175,7 @@ mod tests {
 
     #[test]
     fn runtime_dir_ends_with_thermal() {
-        let dir = runtime_dir();
+        let dir = thermal_core::runtime::runtime_dir();
         assert!(dir.ends_with("thermal"));
     }
 

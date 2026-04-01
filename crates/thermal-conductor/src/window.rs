@@ -468,7 +468,9 @@ pub fn run() -> anyhow::Result<()> {
 
     // ── Agent state source ───────────────────────────────────────────────────
     // In client mode (daemon available), prefer semantic subscriptions.
-    // In standalone mode, fall back to file-watching via ClaudeStatePoller.
+    // Sessions via daemon have source: "daemon" or "daemon:external".
+    // In standalone mode, fall back to file-watching via ClaudeStatePoller
+    // (compatibility path for unmanaged sessions, source not tagged).
     let is_client_mode = matches!(session_mode, SessionMode::Client { .. });
     let daemon_sub_rx = if is_client_mode {
         crate::daemon_subscriber::try_spawn_subscriber()
@@ -476,12 +478,12 @@ pub fn run() -> anyhow::Result<()> {
         None
     };
     let claude_poller = if daemon_sub_rx.is_some() {
-        tracing::info!("Using daemon semantic subscription for agent state");
+        tracing::info!("Using daemon semantic subscription for agent state (source: daemon)");
         None
     } else {
         match ClaudeStatePoller::new() {
             Ok(poller) => {
-                tracing::info!("Claude state poller initialized");
+                tracing::info!("Using ClaudeStatePoller fallback for agent state (source: file-derived)");
                 Some(poller)
             }
             Err(e) => {

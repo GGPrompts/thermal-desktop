@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use nix::sys::signal::{self, Signal};
-use nix::unistd::{Pid, getuid};
+use nix::unistd::Pid;
 
 use ratatui::{
     Frame,
@@ -183,11 +183,7 @@ const SERVICES: &[ServiceDef] = &[
 // ---------------------------------------------------------------------------
 
 fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("thermal")
-    } else {
-        PathBuf::from(format!("/run/user/{}/thermal", getuid()))
-    }
+    thermal_core::runtime::runtime_dir()
 }
 
 const CODEX_ADAPTER_SCRIPT: &str = concat!(

@@ -381,7 +381,12 @@ pub fn cmd_create_worktree(cwd: &str, session_id: &str) -> Result<String> {
 }
 
 /// Show status of all Claude sessions from state files.
-/// This reads directly from /tmp/claude-code-state/ — no daemon dependency needed.
+///
+/// # State source: compatibility/file-derived (standalone CLI)
+///
+/// This reads directly from `/tmp/*-state/` files via `ClaudeStatePoller`.
+/// It is intentionally daemon-independent so `thc status` works even when
+/// the daemon is not running. Sessions shown here are always file-derived.
 async fn cmd_status() -> Result<()> {
     let sessions: Vec<ClaudeSessionState> = match ClaudeStatePoller::new() {
         Ok(poller) => poller.get_all(),
@@ -644,13 +649,12 @@ async fn cmd_audio(action: AudioAction) -> Result<()> {
 
 /// Speak text via the running thermal-audio daemon's Unix socket.
 async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
-    let uid = nix::unistd::getuid().as_raw();
-    let sock_path = format!("/run/user/{uid}/thermal/audio.sock");
+    let sock_path = thermal_core::runtime::socket_path("audio");
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
         .with_context(|| {
-            format!("cannot connect to audio daemon at {sock_path} — is thermal-audio running?")
+            format!("cannot connect to audio daemon at {} — is thermal-audio running?", sock_path.display())
         })?;
 
     let mut request = serde_json::json!({
@@ -762,8 +766,7 @@ enum DaemonHealth {
 }
 
 async fn cmd_doctor(fix: bool) -> Result<()> {
-    let uid = nix::unistd::getuid().as_raw();
-    let run_dir = std::path::PathBuf::from(format!("/run/user/{uid}/thermal"));
+    let run_dir = thermal_core::runtime::runtime_dir();
 
     let mut healthy = 0u32;
     let mut dead = 0u32;

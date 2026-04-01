@@ -55,17 +55,12 @@ const BROADCAST_CAP: usize = 128;
 // Paths
 // ---------------------------------------------------------------------------
 
-fn socket_dir() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal"))
-}
-
 fn socket_path() -> PathBuf {
-    socket_dir().join("messages.sock")
+    thermal_core::runtime::socket_path("messages")
 }
 
 fn pidfile_path() -> PathBuf {
-    socket_dir().join("messages.pid")
+    thermal_core::runtime::pidfile_path("messages")
 }
 
 // ---------------------------------------------------------------------------
@@ -515,18 +510,13 @@ async fn send_error(
 // ---------------------------------------------------------------------------
 
 fn write_pidfile(path: &Path) -> Result<()> {
-    let pid = std::process::id();
-    std::fs::write(path, pid.to_string())
+    thermal_core::runtime::write_pidfile("thermal-messages", path)
         .with_context(|| format!("writing pidfile to {}", path.display()))?;
-    info!(pid, path = %path.display(), "wrote pidfile");
     Ok(())
 }
 
 fn remove_pidfile(path: &Path) {
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-        info!(path = %path.display(), "removed pidfile");
-    }
+    thermal_core::runtime::remove_pidfile("thermal-messages", path);
 }
 
 // ---------------------------------------------------------------------------
@@ -550,22 +540,21 @@ async fn main() -> Result<()> {
         cli.persist,
     );
 
-    // Ensure socket directory exists.
-    let sock_dir = socket_dir();
-    tokio::fs::create_dir_all(&sock_dir)
-        .await
-        .with_context(|| format!("creating socket dir {}", sock_dir.display()))?;
+    // Ensure runtime directory exists.
+    thermal_core::runtime::ensure_runtime_dir()
+        .with_context(|| "creating thermal runtime directory")?;
 
-    // Remove stale socket.
-    let sock_path = socket_path();
-    if sock_path.exists() {
-        tokio::fs::remove_file(&sock_path)
-            .await
-            .context("removing stale socket")?;
+    // Single-instance check via pidfile.
+    let pid_path = pidfile_path();
+    if let Some(pid) = thermal_core::runtime::validate_pidfile("thermal-messages", &pid_path) {
+        anyhow::bail!("thermal-messages already running (pid {pid})");
     }
 
-    // Pidfile guard.
-    let pid_path = pidfile_path();
+    // Remove stale socket if present (checks whether a listener is alive).
+    let sock_path = socket_path();
+    thermal_core::runtime::cleanup_stale_socket("thermal-messages", &sock_path);
+
+    // Write our pidfile.
     write_pidfile(&pid_path)?;
 
     let listener = UnixListener::bind(&sock_path)

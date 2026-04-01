@@ -4,6 +4,13 @@
 //! using the `notify` crate (same pattern as `ClaudeStatePoller` in thermal-core).
 //! When the voice assistant is active, the HUD switches from agent tabs to
 //! voice UI mode.
+//!
+//! # State source: voice state file (separate chain)
+//!
+//! Voice state is a separate chain from agent session state. The file is
+//! written by `thermal-voice` and read directly by consumers (bar, HUD,
+//! audio). It does NOT flow through the conductor daemon's semantic event
+//! bus — see `thermal-core/src/claude_state.rs` header for details.
 
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,

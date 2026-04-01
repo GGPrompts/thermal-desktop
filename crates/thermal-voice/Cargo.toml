@@ -9,6 +9,7 @@ name = "thermal-voice"
 path = "src/main.rs"
 
 [dependencies]
+thermal-core = { path = "../thermal-core" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

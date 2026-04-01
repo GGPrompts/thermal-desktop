@@ -9,6 +9,7 @@ pub mod ggl_types;
 pub mod message;
 pub mod palette;
 pub mod pane;
+pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod text;

@@ -43,6 +43,14 @@ fn runtime_to_agent_type(runtime: &AgentRuntime) -> Option<String> {
 }
 
 fn snapshot_to_session_state(snap: &SemanticSessionSnapshot) -> ClaudeSessionState {
+    // Tag the source so consumers can distinguish daemon-owned sessions from
+    // external (file-derived) sessions imported by the daemon's state watcher.
+    let source = if snap.backend == "external" {
+        Some("daemon:external".into())
+    } else {
+        Some("daemon".into())
+    };
+
     ClaudeSessionState {
         session_id: snap.session_id.clone(),
         status: activity_to_status(&snap.agent_activity),
@@ -52,6 +60,7 @@ fn snapshot_to_session_state(snap: &SemanticSessionSnapshot) -> ClaudeSessionSta
         agent_type: runtime_to_agent_type(&snap.runtime),
         last_updated: snap.last_activity_at.clone(),
         pid: snap.pid.map(|p| p as i64),
+        source,
         ..ClaudeSessionState::default()
     }
 }

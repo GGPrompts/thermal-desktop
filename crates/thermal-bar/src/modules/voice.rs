@@ -9,6 +9,14 @@
 ///
 /// The file is polled once per render cycle (~1 Hz). Missing or
 /// unreadable files are treated as "muted" (cold).
+///
+/// # State source: voice state file (separate chain)
+///
+/// Voice state is a separate chain from agent session state. The file is
+/// written by `thermal-voice` and read directly by consumers (bar, HUD,
+/// audio). It does NOT flow through the conductor daemon's semantic event
+/// bus. This is intentional — voice state is high-frequency (5 Hz RMS
+/// updates) and ephemeral, not session-lifecycle data.
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

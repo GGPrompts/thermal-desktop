@@ -319,8 +319,7 @@ pub enum DaemonMessage {
 
 /// Return the daemon socket path.
 pub fn daemon_socket_path() -> std::path::PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    std::path::PathBuf::from(format!("/run/user/{uid}/thermal/conductor.sock"))
+    thermal_core::runtime::socket_path("conductor")
 }
 
 /// Connect to the conductor daemon, subscribe to all events, and return a

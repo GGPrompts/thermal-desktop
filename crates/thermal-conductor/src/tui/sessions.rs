@@ -1103,6 +1103,8 @@ pub struct SessionsPage {
     // -- Daemon semantic subscription --
     /// When using the Daemon backend, receives session state from the daemon's
     /// semantic event stream instead of file-watching via ClaudeStatePoller.
+    /// Sessions received via this channel have `source` set to "daemon" or
+    /// "daemon:external" — see [`snapshot_to_session_state`] in daemon_subscriber.
     daemon_sub_rx: Option<tokio::sync::watch::Receiver<Vec<ClaudeSessionState>>>,
 
     // -- Preview broadcast subscription --
@@ -1118,6 +1120,8 @@ impl SessionsPage {
     pub fn new(backend_pref: BackendPreference) -> Self {
         // When using the Daemon backend, try to subscribe to semantic events
         // for real-time session state (avoids file-watching overhead).
+        // Sessions via daemon have source: "daemon" or "daemon:external".
+        // Fallback to ClaudeStatePoller: source not tagged (file-derived).
         let daemon_sub_rx = if matches!(backend_pref, BackendPreference::Daemon) {
             crate::daemon_subscriber::try_spawn_subscriber()
         } else {
@@ -1235,7 +1239,12 @@ impl SessionsPage {
             .map(|(id, _)| id.clone())
             .collect();
         for id in &expired {
-            // Double-check: only purge if no state file exists on disk.
+            // Compatibility fallback: check /tmp state file existence as a
+            // last-resort liveness signal. This direct file read is intentional
+            // for stale-session GC — it catches sessions that disappeared from
+            // the daemon event stream but still have a state file on disk
+            // (e.g. unmanaged/external sessions). See claude_state.rs header
+            // for the full state authority boundary documentation.
             let state_path = format!("/tmp/claude-code-state/{}.json", id);
             if std::path::Path::new(&state_path).exists() {
                 // State file still present — keep the entry, reset the timer

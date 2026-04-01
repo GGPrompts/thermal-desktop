@@ -1391,6 +1391,11 @@ pub async fn run_daemon_on(
 /// This collapses the N separate inotify watchers that consumers (bar, audio,
 /// HUD, TUI, monitor) would each create into a single watcher owned by the
 /// daemon.  Consumers subscribe to the daemon's event stream instead.
+///
+/// Sessions imported via this watcher are tagged `backend: "external"` in the
+/// semantic state, and `source: "daemon:external"` when converted to
+/// `ClaudeSessionState` for subscribers. Daemon-owned PTY sessions have
+/// `backend: "daemon"` and `source: "daemon"`.
 fn spawn_state_file_watcher(daemon: Arc<Daemon>) {
     use std::collections::HashSet;
     use thermal_core::ClaudeStatePoller;
@@ -1427,6 +1432,16 @@ fn spawn_state_file_watcher(daemon: Arc<Daemon>) {
                 }
 
                 current_ids.insert(sid.clone());
+
+                // Log when a new external session is first imported so the
+                // daemon's authority boundary is visible in debug output.
+                if !known_external.contains(sid) {
+                    info!(
+                        session = %sid,
+                        agent_type = session.agent_type.as_deref().unwrap_or("unknown"),
+                        "Importing external session (file-derived, source: daemon:external)"
+                    );
+                }
                 daemon.event_bus.import_external_session(session);
             }
 
@@ -1438,6 +1453,7 @@ fn spawn_state_file_watcher(daemon: Arc<Daemon>) {
             for sid in &removed {
                 // Only remove if it's still external (not daemon-owned).
                 if !daemon.event_bus.is_daemon_owned(sid) {
+                    info!(session = %sid, "Removing external session (state file gone)");
                     daemon.event_bus.remove_external_session(sid);
                 }
             }
@@ -1458,18 +1474,12 @@ pub async fn run_daemon() -> Result<()> {
     let socket_path = protocol::socket_path();
     info!(path = %socket_path.display(), "Starting session daemon");
 
-    // Ensure parent directory exists.
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create socket directory: {}", parent.display()))?;
-    }
+    // Ensure runtime directory exists.
+    thermal_core::runtime::ensure_runtime_dir()
+        .with_context(|| "Failed to create thermal runtime directory")?;
 
-    // Remove stale socket if present.
-    if socket_path.exists() {
-        info!("Removing stale socket");
-        std::fs::remove_file(&socket_path)
-            .with_context(|| format!("Failed to remove stale socket: {}", socket_path.display()))?;
-    }
+    // Remove stale socket if present (checks whether a listener is alive).
+    thermal_core::runtime::cleanup_stale_socket("conductor", &socket_path);
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Failed to bind Unix socket: {}", socket_path.display()))?;

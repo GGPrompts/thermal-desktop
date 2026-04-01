@@ -17,8 +17,7 @@ use serde::{Deserialize, Serialize};
 
 /// Return the daemon socket path: `/run/user/<uid>/thermal/conductor.sock`
 pub fn socket_path() -> std::path::PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    std::path::PathBuf::from(format!("/run/user/{uid}/thermal/conductor.sock"))
+    thermal_core::runtime::socket_path("conductor")
 }
 
 // ── Semantic event stream types ──────────────────────────────────────────────

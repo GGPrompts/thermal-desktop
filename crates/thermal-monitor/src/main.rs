@@ -2,6 +2,14 @@
 //!
 //! Reads session state from `/tmp/claude-code-state/` via thermal-core's
 //! `ClaudeStatePoller` and renders a thermal-styled dashboard table.
+//!
+//! # State source: compatibility/file-derived (standalone tool)
+//!
+//! This is a standalone monitoring tool that reads `/tmp/*-state/` files
+//! directly. It does NOT subscribe to the conductor daemon's semantic event
+//! bus. This is the expected path for a lightweight standalone tool that
+//! works whether or not the daemon is running. Sessions displayed here are
+//! always file-derived (no `source` tagging).
 
 use std::collections::{HashMap, VecDeque};
 use std::io;

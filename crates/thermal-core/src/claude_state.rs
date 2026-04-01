@@ -4,6 +4,27 @@
 //! Supports Claude Code, OpenAI Codex, and GitHub Copilot sessions. Files in
 //! each state directory get `agent_type` inferred from the parent directory
 //! name (`"claude"`, `"codex"`, or `"copilot"`).
+//!
+//! # State authority boundary
+//!
+//! The conductor daemon (`thc daemon`) owns **a single `ClaudeStatePoller`**
+//! instance and imports file-derived sessions into its `SemanticEventBus`.
+//! Components that run alongside the daemon (TUI, HUD, window, audio) should
+//! subscribe to the daemon's semantic event stream for real-time state. They
+//! fall back to creating their own `ClaudeStatePoller` only when the daemon is
+//! unavailable (standalone / unmanaged mode).
+//!
+//! Direct `/tmp` state file reads are still the normal path for:
+//! - **Standalone CLI tools** (`thc status`, `thermal-monitor`) that run
+//!   without the daemon.
+//! - **thermal-bar agent module** — a lightweight Wayland bar that avoids
+//!   async daemon connections for simplicity.
+//! - **Stale-session GC** in the TUI, which checks file existence as a
+//!   last-resort liveness signal.
+//!
+//! Voice state (`/tmp/thermal-voice-state.json`) is a **separate chain**
+//! with its own producer (thermal-voice) and consumers (bar, HUD, audio).
+//! It does not flow through the conductor daemon.
 
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,

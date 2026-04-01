@@ -31,6 +31,9 @@ use context::ConversationContext;
 // Constants
 // ---------------------------------------------------------------------------
 
+// HUD and voice state files: separate chains from agent session state.
+// These are written by the dispatcher for its own UI coordination and do
+// NOT flow through the conductor daemon's semantic event bus.
 const HUD_STATE_FILE: &str = "/tmp/thermal-hud-state.json";
 const VOICE_STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 
@@ -41,23 +44,19 @@ const VOICE_STATE_FILE: &str = "/tmp/thermal-voice-state.json";
 /// Return the thermal runtime directory, respecting XDG_RUNTIME_DIR.
 /// Falls back to `/run/user/<uid>/thermal` when the env var is unset.
 pub fn runtime_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(dir).join("thermal")
-    } else {
-        PathBuf::from(format!("/run/user/{}/thermal", nix::unistd::getuid()))
-    }
+    thermal_core::runtime::runtime_dir()
 }
 
 fn socket_path() -> PathBuf {
-    runtime_dir().join("dispatcher.sock")
+    thermal_core::runtime::socket_path("dispatcher")
 }
 
 pub fn audio_socket_path() -> PathBuf {
-    runtime_dir().join("audio.sock")
+    thermal_core::runtime::socket_path("audio")
 }
 
 pub fn messages_socket_path() -> PathBuf {
-    runtime_dir().join("messages.sock")
+    thermal_core::runtime::socket_path("messages")
 }
 
 /// Maximum number of tool-use iterations before bailing out.
@@ -69,34 +68,23 @@ const MAX_TOOL_ITERATIONS: usize = 10;
 // ---------------------------------------------------------------------------
 
 fn pidfile_path() -> PathBuf {
-    runtime_dir().join("dispatcher.pid")
+    thermal_core::runtime::pidfile_path("dispatcher")
 }
 
 fn enforce_single_instance() {
-    let pidfile = pidfile_path();
-    if pidfile.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&pidfile)
-            && let Ok(pid) = contents.trim().parse::<u32>()
-            && std::path::Path::new(&format!("/proc/{pid}")).exists()
-        {
-            eprintln!("thermal-dispatcher already running (pid {pid}). Exiting.");
-            std::process::exit(0);
-        }
-        let _ = std::fs::remove_file(&pidfile);
-    }
+    thermal_core::runtime::enforce_single_instance("thermal-dispatcher");
 }
 
 fn write_pidfile() {
-    let pidfile = pidfile_path();
-    if let Some(parent) = pidfile.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let path = pidfile_path();
+    if let Err(e) = thermal_core::runtime::write_pidfile("thermal-dispatcher", &path) {
+        tracing::warn!(error = %e, "Failed to write pidfile");
     }
-    let _ = std::fs::write(&pidfile, std::process::id().to_string());
 }
 
 #[allow(dead_code)] // Available for future graceful shutdown
 fn cleanup_pidfile() {
-    let _ = std::fs::remove_file(pidfile_path());
+    thermal_core::runtime::remove_pidfile("thermal-dispatcher", &pidfile_path());
 }
 
 #[tokio::main]
@@ -144,19 +132,13 @@ async fn main() -> Result<()> {
     let tool_schemas = tools::build_slim_tool_schemas();
     info!("registered {} slim tools for dispatch", tool_schemas.len());
 
-    // Ensure socket directory exists
-    let sock_dir = runtime_dir();
-    tokio::fs::create_dir_all(&sock_dir)
-        .await
-        .with_context(|| format!("creating socket dir {}", sock_dir.display()))?;
+    // Ensure runtime directory exists
+    thermal_core::runtime::ensure_runtime_dir()
+        .with_context(|| "creating thermal runtime directory")?;
 
-    // Remove stale socket
+    // Remove stale socket if present (checks whether a listener is alive)
     let sock_path = socket_path();
-    if sock_path.exists() {
-        tokio::fs::remove_file(&sock_path)
-            .await
-            .context("removing stale socket")?;
-    }
+    thermal_core::runtime::cleanup_stale_socket("thermal-dispatcher", &sock_path);
 
     let listener = UnixListener::bind(&sock_path).context("binding Unix socket")?;
     info!("listening on {}", sock_path.display());

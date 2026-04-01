@@ -72,7 +72,7 @@ impl DaemonClient {
                 // Connection refused means daemon crashed but socket remains.
                 if e.kind() == std::io::ErrorKind::ConnectionRefused {
                     warn!(
-                        "Stale daemon socket at {}; daemon not running — cleaning up",
+                        "Conductor socket exists at {} but daemon is not responding — removing stale socket",
                         socket_path.display()
                     );
                     // Best-effort cleanup of the stale socket file so future
@@ -80,7 +80,10 @@ impl DaemonClient {
                     let _ = tokio::fs::remove_file(&socket_path).await;
                     return Ok(None);
                 }
-                return Err(e).context("Failed to connect to daemon socket");
+                return Err(e).context(format!(
+                    "Failed to connect to conductor at {}",
+                    socket_path.display()
+                ));
             }
             Err(_elapsed) => {
                 warn!(

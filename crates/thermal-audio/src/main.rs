@@ -486,19 +486,18 @@ fn dirs_cache() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Determine the socket path. Uses $XDG_RUNTIME_DIR/thermal/audio.sock,
-/// falling back to /run/user/1000/thermal/audio.sock.
+/// falling back to /run/user/<uid>/thermal/audio.sock.
 fn socket_path() -> PathBuf {
-    let runtime_dir =
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".to_string());
-    PathBuf::from(runtime_dir)
-        .join("thermal")
-        .join("audio.sock")
+    thermal_core::runtime::socket_path("audio")
 }
 
 // ---------------------------------------------------------------------------
 // Voice state check — suppress TTS while mic is active
 // ---------------------------------------------------------------------------
 
+// Voice state file: separate chain (not routed through conductor daemon).
+// Written by thermal-voice at ~5Hz, read here for TTS suppression.
+// See thermal-core/src/claude_state.rs header for state authority docs.
 const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
 
 /// Returns true if thermal-voice is actively listening, processing, or monitoring
@@ -745,36 +744,18 @@ async fn main() -> Result<()> {
     }
 
     // Daemon mode — single-instance guard via pidfile.
-    let run_dir = PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into()))
-        .join("thermal");
-    fs::create_dir_all(&run_dir)?;
-    let pidfile = run_dir.join("audio.pid");
-    if pidfile.exists() {
-        if let Ok(contents) = fs::read_to_string(&pidfile)
-            && let Ok(pid) = contents.trim().parse::<u32>()
-            && Path::new(&format!("/proc/{pid}")).exists()
-        {
-            eprintln!("thermal-audio already running (pid {pid}). Exiting.");
-            std::process::exit(0);
-        }
-        // Stale pidfile — remove it.
-        let _ = fs::remove_file(&pidfile);
-    }
-    fs::write(&pidfile, std::process::id().to_string())
+    thermal_core::runtime::ensure_runtime_dir()?;
+    let pidfile = thermal_core::runtime::pidfile_path("audio");
+    thermal_core::runtime::enforce_single_instance("thermal-audio");
+    thermal_core::runtime::write_pidfile("thermal-audio", &pidfile)
         .with_context(|| format!("writing pidfile {:?}", pidfile))?;
 
     info!("thermal-audio daemon starting (pid {})", std::process::id());
 
     // Set up the Unix socket listener.
     let sock_path = socket_path();
-    if let Some(parent) = sock_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating socket dir {:?}", parent))?;
-    }
-    // Remove stale socket if it exists.
-    if sock_path.exists() {
-        fs::remove_file(&sock_path)
-            .with_context(|| format!("removing stale socket {:?}", sock_path))?;
-    }
+    // Remove stale socket if present (checks whether a listener is alive).
+    thermal_core::runtime::cleanup_stale_socket("thermal-audio", &sock_path);
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!("socket API listening on {}", sock_path.display());
@@ -1056,7 +1037,9 @@ fn short_id(id: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Run the main loop using file-polling for state change announcements.
-/// This is the fallback when the conductor daemon is unavailable.
+/// This is the compatibility fallback when the conductor daemon is unavailable.
+/// Sessions here are file-derived (no `source` tagging). The daemon event
+/// loop (`run_daemon_event_loop`) is preferred when the daemon is running.
 async fn run_poll_loop(
     audio: &mut AudioManager,
     voices: &mut VoicePool,

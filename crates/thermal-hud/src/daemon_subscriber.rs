@@ -412,8 +412,7 @@ impl SessionAggregator {
 
 /// Return the daemon socket path.
 fn socket_path() -> std::path::PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    std::path::PathBuf::from(format!("/run/user/{uid}/thermal/conductor.sock"))
+    thermal_core::runtime::socket_path("conductor")
 }
 
 /// Spawn a background task that subscribes to daemon semantic events and

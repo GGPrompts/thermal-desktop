@@ -65,8 +65,7 @@ pub struct RecoveredSession {
 
 /// Return the daemon state file path: `/run/user/<uid>/thermal/sessiond-state.json`
 pub fn state_file_path() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal/sessiond-state.json"))
+    thermal_core::runtime::runtime_dir().join("sessiond-state.json")
 }
 
 // ── Save ───────────────────────────────────────────────────────────────────

@@ -518,8 +518,7 @@ fn infer_source(session_id: &str) -> SessionSource {
 /// Read and parse the sessions sidecar at `/run/user/{uid}/thermal/sessions.json`.
 /// Returns `None` if the file doesn't exist or can't be parsed.
 fn read_sidecar() -> Option<Vec<RoutingSidecarEntry>> {
-    let uid = nix::unistd::getuid().as_raw();
-    let path = format!("/run/user/{uid}/thermal/sessions.json");
+    let path = thermal_core::runtime::runtime_dir().join("sessions.json");
     let content = std::fs::read_to_string(path).ok()?;
     let data: RoutingSidecarData = serde_json::from_str(&content).ok()?;
     Some(data.sessions)
@@ -571,8 +570,7 @@ enum DaemonResponse {
 
 /// Return the conductor daemon socket path.
 fn conductor_socket_path() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal/conductor.sock"))
+    thermal_core::runtime::socket_path("conductor")
 }
 
 /// Send text to a daemon session via the conductor's `SendText` request.
@@ -924,12 +922,11 @@ async fn dispatch_user(msg: &Message) -> Result<Message> {
 async fn dispatch_dispatcher(msg: &Message) -> Result<Message> {
     info!(content_len = msg.content.len(), "dispatching to dispatcher");
 
-    let uid = nix::unistd::getuid().as_raw();
-    let sock_path = format!("/run/user/{uid}/thermal/dispatcher.sock");
+    let sock_path = thermal_core::runtime::socket_path("dispatcher");
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
-        .with_context(|| format!("connecting to thermal-dispatcher at {sock_path}"))?;
+        .with_context(|| format!("connecting to thermal-dispatcher at {}", sock_path.display()))?;
 
     let request = json!({
         "transcript": msg.content,
@@ -969,12 +966,11 @@ async fn dispatch_dispatcher(msg: &Message) -> Result<Message> {
 
 /// Send a TTS request to thermal-audio via its Unix socket.
 async fn send_tts(text: &str) -> Result<()> {
-    let uid = nix::unistd::getuid().as_raw();
-    let sock_path = format!("/run/user/{uid}/thermal/audio.sock");
+    let sock_path = thermal_core::runtime::socket_path("audio");
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
-        .with_context(|| format!("connecting to thermal-audio at {sock_path}"))?;
+        .with_context(|| format!("connecting to thermal-audio at {}", sock_path.display()))?;
 
     let request = json!({
         "action": "speak",

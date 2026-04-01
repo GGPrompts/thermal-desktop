@@ -5,6 +5,16 @@
 /// Shows nothing when no sessions are active to avoid clutter.
 ///
 /// Display prefixes: "CLU" for Claude, "COX" for Codex, "COP" for Copilot.
+///
+/// # State source: compatibility/file-derived
+///
+/// This module reads `/tmp/*-state/` files directly via its own
+/// `ClaudeStatePoller` instance. This is intentional — the bar is a
+/// lightweight Wayland layer-shell process that avoids async daemon
+/// connections for simplicity. When the conductor daemon is running, it
+/// also watches the same files and publishes events, but the bar does
+/// not subscribe to those. This is acceptable because the bar only needs
+/// aggregate status (counts per agent type), not real-time granularity.
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, ThermalPalette};
 
 use crate::layout::{ModuleOutput, Zone};

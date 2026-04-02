@@ -27,6 +27,7 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, Modifiers},
+        pointer::cursor_shape::CursorShapeManager,
     },
     shell::{
         WaylandSurface,
@@ -35,6 +36,10 @@ use smithay_client_toolkit::{
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
     },
+};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+    wp_cursor_shape_device_v1::Shape as CursorShape,
 };
 use wayland_client::{
     Connection, Proxy, QueueHandle,
@@ -71,7 +76,7 @@ const DEFAULT_HEIGHT: u32 = 800;
 
 
 /// Launch the SCTK + wgpu window with a live terminal.
-pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
+pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> anyhow::Result<()> {
     tracing::info!("thermal-conductor window starting");
 
     // ── Wayland connection ────────────────────────────────────────────────────
@@ -82,6 +87,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
     // ── Bind globals ──────────────────────────────────────────────────────────
     let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
     let xdg_shell = XdgShell::bind(&globals, &qh).expect("xdg_wm_base is not available");
+    let cursor_shape_mgr = CursorShapeManager::bind(&globals, &qh).ok();
 
     // ── Create xdg toplevel window ────────────────────────────────────────────
     let surface = compositor.create_surface(&qh);
@@ -169,6 +175,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
 
     // ── Font configuration ─────────────────────────────────────────────────────
     let font_config = FontConfig::from_env();
+    let scrollback_lines = font_config.scrollback_lines;
 
     // ── Grid renderer ─────────────────────────────────────────────────────────
     let grid_renderer = GridRenderer::new(
@@ -191,7 +198,11 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
     // ── Terminal + session (daemon client or standalone PTY) ──────────────────
     // Calculate initial grid size from the renderer's cell metrics.
     let (init_cols, init_rows) = grid_renderer.grid_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    let mut terminal = Terminal::with_size(init_cols, init_rows);
+    let mut terminal = Terminal::with_size_and_scrollback(
+        init_cols,
+        init_rows,
+        scrollback_lines,
+    );
 
     // Start a tokio runtime for the async PTY reader / daemon client.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -232,9 +243,20 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
     // The render loop drains this each iteration and calls window.set_title().
     let pending_title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
-    // Try to connect to the session daemon. If it is running, use client
-    // mode; otherwise fall back to standalone mode with a local PTY.
-    let (session_mode, term_event_rx, pty_child_pid) = tokio_rt.block_on(async {
+    // When a custom command is provided, always use standalone mode — the
+    // daemon's spawn_session API expects a shell path, not an arbitrary
+    // command line. Standalone mode execs the command directly via PTY.
+    let (session_mode, term_event_rx, pty_child_pid) = if command.is_some() {
+        tracing::info!("Custom command provided — standalone mode");
+        setup_standalone_session(
+            &mut terminal,
+            init_cols,
+            init_rows,
+            Arc::clone(&pty_dirty),
+            wakeup_write,
+            command,
+        )
+    } else { tokio_rt.block_on(async {
         match DaemonClient::connect().await {
             Ok(Some(mut client)) => {
                 // Verify the daemon is actually alive (stale sockets can
@@ -248,6 +270,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                         init_rows,
                         Arc::clone(&pty_dirty),
                         wakeup_write,
+                        command,
                     );
                 }
 
@@ -270,6 +293,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                                 init_rows,
                                 Arc::clone(&pty_dirty),
                                 wakeup_write,
+                                command,
                             );
                         }
                     };
@@ -285,9 +309,12 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                         }).await;
                     }
 
-                    let shell =
-                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                    match client.spawn_session(Some(shell), None, false).await {
+                    let spawn_cmd = command.as_ref()
+                        .map(|c| c.join(" "))
+                        .unwrap_or_else(|| {
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+                        });
+                    match client.spawn_session(Some(spawn_cmd), None, false).await {
                         Ok(id) => {
                             tracing::info!(id = %id, "Spawned new session on daemon");
                             id
@@ -302,6 +329,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                                 init_rows,
                                 Arc::clone(&pty_dirty),
                                 wakeup_write,
+                                command,
                             );
                         }
                     }
@@ -323,6 +351,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                             init_rows,
                             Arc::clone(&pty_dirty),
                             wakeup_write,
+                            command,
                         );
                     }
                 };
@@ -394,6 +423,7 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                     init_rows,
                     Arc::clone(&pty_dirty),
                     wakeup_write,
+                    command,
                 )
             }
             Err(e) => {
@@ -404,10 +434,11 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
                     init_rows,
                     Arc::clone(&pty_dirty),
                     wakeup_write,
+                    command,
                 )
             }
         }
-    });
+    }) };
 
     tracing::info!(cols = init_cols, rows = init_rows, "Terminal initialized");
 
@@ -512,6 +543,9 @@ pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
             num_lock: false,
         },
         pointer: None,
+        cursor_shape_mgr,
+        cursor_shape_device: None,
+        pointer_enter_serial: 0,
         mouse_left_held: false,
         repeat_key: None,
         repeat_next: None,
@@ -808,6 +842,13 @@ pub(super) struct ConductorWindow {
     pub(super) modifiers: Modifiers,
     // Mouse / pointer state
     pub(super) pointer: Option<wl_pointer::WlPointer>,
+    /// Cursor shape manager — sets the Wayland pointer cursor via
+    /// wp_cursor_shape_manager_v1. `None` if the compositor doesn't support it.
+    pub(super) cursor_shape_mgr: Option<CursorShapeManager>,
+    /// Cursor shape device bound to the active pointer.
+    pub(super) cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    /// Serial from the latest pointer enter event (required for set_shape).
+    pub(super) pointer_enter_serial: u32,
     /// Whether the left mouse button is currently held (for drag selection).
     pub(super) mouse_left_held: bool,
     // Key repeat state
@@ -1032,7 +1073,14 @@ impl SeatHandler for ConductorWindow {
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
             match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
+                Ok(pointer) => {
+                    // Create the cursor shape device if the compositor supports it.
+                    if let Some(ref mgr) = self.cursor_shape_mgr {
+                        self.cursor_shape_device =
+                            Some(mgr.get_shape_device(&pointer, qh));
+                    }
+                    self.pointer = Some(pointer);
+                }
                 Err(e) => tracing::warn!("Failed to create pointer: {e}"),
             }
         }
@@ -1053,6 +1101,9 @@ impl SeatHandler for ConductorWindow {
         if capability == Capability::Pointer
             && let Some(pointer) = self.pointer.take()
         {
+            if let Some(device) = self.cursor_shape_device.take() {
+                device.destroy();
+            }
             pointer.release();
         }
     }
@@ -1070,6 +1121,9 @@ delegate_pointer!(ConductorWindow);
 delegate_xdg_shell!(ConductorWindow);
 delegate_xdg_window!(ConductorWindow);
 delegate_registry!(ConductorWindow);
+
+// Note: delegate_pointer! provides Dispatch impls for WpCursorShapeManagerV1
+// and WpCursorShapeDeviceV1 automatically.
 
 impl ProvidesRegistryState for ConductorWindow {
     fn registry(&mut self) -> &mut RegistryState {

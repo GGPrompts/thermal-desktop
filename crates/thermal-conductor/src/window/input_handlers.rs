@@ -291,6 +291,15 @@ impl PointerHandler for ConductorWindow {
             || mode.contains(TermMode::MOUSE_MOTION);
 
         for event in events {
+            // Set the cursor shape on pointer enter — the Wayland protocol
+            // requires re-setting the cursor on every enter event.
+            if let PointerEventKind::Enter { serial } = event.kind {
+                self.pointer_enter_serial = serial;
+                if let Some(ref device) = self.cursor_shape_device {
+                    device.set_shape(serial, super::CursorShape::Text);
+                }
+            }
+
             let (px, py) = event.position;
             let (col, line, _side) = self.pixel_to_grid(px, py);
             let cx = col.0 + 1; // SGR is 1-based

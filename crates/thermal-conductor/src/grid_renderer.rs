@@ -244,6 +244,22 @@ impl GridRenderer {
         let font_family = font_config.family.clone();
         // ── Glyphon setup ────────────────────────────────────────────────
         let mut font_system = FontSystem::new();
+        // Set the default monospace family to our primary font so that
+        // cosmic-text's fallback logic prefers it. The database already
+        // contains all system fonts (including emoji/symbol fonts), so
+        // glyphs not found in the primary font will fall back automatically.
+        font_system.db_mut().set_monospace_family(&font_family);
+        // Log available fallback fonts for diagnostics.
+        for fb in &font_config.fallback_families {
+            let found = font_system.db().faces().any(|f| {
+                f.families.iter().any(|(name, _)| name == fb)
+            });
+            if found {
+                tracing::info!(font = %fb, "Fallback font available");
+            } else {
+                tracing::warn!(font = %fb, "Fallback font not found in system");
+            }
+        }
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, queue, &cache, surface_format);

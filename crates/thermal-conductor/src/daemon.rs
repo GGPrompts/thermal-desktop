@@ -123,8 +123,27 @@ impl Daemon {
         };
 
         let mut terminal = Terminal::with_size(120, 36);
-        let mut pty = PtySession::spawn_sized(&shell_path, Some(&effective_cwd), 120, 36)
-            .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?;
+        // Split multi-word commands into program + args. Single-word commands
+        // (bare shell paths like "zsh" or "claude") use spawn_sized which
+        // creates a login shell. Multi-word commands use spawn_command_sized
+        // to exec with proper argv splitting.
+        let parts: Vec<&str> = shell_path.split_whitespace().collect();
+        let mut pty = if parts.len() > 1 {
+            let mut env = std::collections::HashMap::new();
+            env.insert("TERM".to_string(), "xterm-256color".to_string());
+            env.insert("COLORTERM".to_string(), "truecolor".to_string());
+            let ws = nix::pty::Winsize {
+                ws_row: 36,
+                ws_col: 120,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            PtySession::spawn_command_sized(parts[0], &parts, Some(&effective_cwd), env, Some(ws))
+                .with_context(|| format!("Failed to spawn PTY with command: {shell_path}"))?
+        } else {
+            PtySession::spawn_sized(&shell_path, Some(&effective_cwd), 120, 36)
+                .with_context(|| format!("Failed to spawn PTY with shell: {shell_path}"))?
+        };
         let pty_output_rx = pty.take_output();
 
         // Attach agent state inference to the terminal byte processor.

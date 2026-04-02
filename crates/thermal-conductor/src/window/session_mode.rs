@@ -77,6 +77,7 @@ pub(super) fn setup_standalone_session(
     init_rows: usize,
     pty_dirty: Arc<AtomicBool>,
     wakeup_write: std::os::fd::OwnedFd,
+    command: Option<Vec<String>>,
 ) -> (
     SessionMode,
     tokio::sync::mpsc::UnboundedReceiver<TermEvent>,
@@ -85,8 +86,25 @@ pub(super) fn setup_standalone_session(
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     // Spawn the PTY at the correct initial size so the shell doesn't need a
     // SIGWINCH resize cycle (which creates spurious scrollback on launch).
-    let mut pty = PtySession::spawn_sized(&shell, None, init_cols as u16, init_rows as u16)
-        .expect("Failed to spawn PTY");
+    let mut pty = if let Some(ref cmd) = command {
+        use std::collections::HashMap;
+        let program = &cmd[0];
+        let args: Vec<&str> = cmd.iter().map(|s| s.as_str()).collect();
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+        env.insert("COLORTERM".to_string(), "truecolor".to_string());
+        let ws = nix::pty::Winsize {
+            ws_row: init_rows as u16,
+            ws_col: init_cols as u16,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        PtySession::spawn_command_sized(program, &args, None, env, Some(ws))
+            .expect("Failed to spawn command PTY")
+    } else {
+        PtySession::spawn_sized(&shell, None, init_cols as u16, init_rows as u16)
+            .expect("Failed to spawn PTY")
+    };
 
     // Connect PTY output to the terminal byte processor.
     let pty_output_rx = pty.take_output();

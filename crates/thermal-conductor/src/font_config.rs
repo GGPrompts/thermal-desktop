@@ -22,17 +22,25 @@ const MAX_FONT_SIZE: f32 = 72.0;
 /// Step size for Ctrl+Plus/Minus font size adjustment.
 const FONT_SIZE_STEP: f32 = 1.0;
 
+/// Default scrollback history size (lines).
+const DEFAULT_SCROLLBACK: usize = 50_000;
+
 /// Font configuration read from environment variables.
 #[derive(Clone, Debug)]
 pub struct FontConfig {
     /// Font family name (e.g. "JetBrains Mono", "Fira Code").
     pub family: String,
+    /// Fallback font families for glyphs not found in the primary font.
+    /// Parsed from `THERMAL_FONT_FALLBACK` (comma-separated).
+    pub fallback_families: Vec<String>,
     /// Current font size in points.
     pub font_size: f32,
     /// Line height in points (derived from font_size * LINE_HEIGHT_RATIO).
     pub line_height: f32,
     /// The original font size at startup, used for Ctrl+0 reset.
     default_font_size: f32,
+    /// Scrollback history size (lines). Read from `THERMAL_SCROLLBACK`.
+    pub scrollback_lines: usize,
 }
 
 impl FontConfig {
@@ -44,6 +52,13 @@ impl FontConfig {
         let family = std::env::var("THERMAL_FONT_FAMILY")
             .unwrap_or_else(|_| DEFAULT_FONT_FAMILY.to_string());
 
+        let fallback_families: Vec<String> = std::env::var("THERMAL_FONT_FALLBACK")
+            .unwrap_or_else(|_| "Noto Color Emoji".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let font_size = std::env::var("THERMAL_FONT_SIZE")
             .ok()
             .and_then(|s| s.parse::<f32>().ok())
@@ -52,18 +67,27 @@ impl FontConfig {
 
         let line_height = font_size * LINE_HEIGHT_RATIO;
 
+        let scrollback_lines = std::env::var("THERMAL_SCROLLBACK")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_SCROLLBACK);
+
         tracing::info!(
             font_family = %family,
+            ?fallback_families,
             font_size,
             line_height,
+            scrollback_lines,
             "Font configuration loaded"
         );
 
         Self {
             family,
+            fallback_families,
             font_size,
             line_height,
             default_font_size: font_size,
+            scrollback_lines,
         }
     }
 

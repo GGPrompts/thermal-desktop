@@ -138,7 +138,16 @@ impl Terminal {
     }
 
     /// Create a new terminal emulator with the given column/row dimensions.
+    ///
+    /// Scrollback defaults to 10,000 lines (alacritty default). Use
+    /// [`with_size_and_scrollback`](Self::with_size_and_scrollback) to
+    /// configure a custom scrollback size.
     pub fn with_size(cols: usize, rows: usize) -> Self {
+        Self::with_size_and_scrollback(cols, rows, 10_000)
+    }
+
+    /// Create a new terminal emulator with custom scrollback history size.
+    pub fn with_size_and_scrollback(cols: usize, rows: usize, scrollback_lines: usize) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let listener = ThermalEventListener::new(event_tx);
 
@@ -147,6 +156,7 @@ impl Terminal {
         // helix, zellij) can push progressive enhancement flags and receive
         // unambiguous key encodings.
         config.kitty_keyboard = true;
+        config.scrolling_history = scrollback_lines;
         let size = ConductorTerminalSize::new(cols, rows);
         let term = Term::new(config, &size, listener);
 

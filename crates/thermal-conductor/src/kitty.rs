@@ -339,7 +339,7 @@ impl KittyController {
             .kitty_cmd()
             .args([
                 "launch",
-                "--type=window",
+                "--type=os-window",
                 &format!("--title={title}"),
                 &format!("--cwd={cwd}"),
                 "--",

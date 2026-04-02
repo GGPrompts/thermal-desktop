@@ -115,7 +115,12 @@ impl PtySession {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        Self::spawn_command_sized(shell, &[shell], cwd, env, Some(ws))
+        // Use "-shellname" as argv[0] to spawn a login shell, which sources
+        // the full profile chain (.zprofile, .zshrc, etc.) so PATH and other
+        // environment setup is available to the session.
+        let basename = shell.rsplit('/').next().unwrap_or(shell);
+        let login_argv0 = format!("-{basename}");
+        Self::spawn_command_sized(shell, &[&login_argv0], cwd, env, Some(ws))
     }
 
     /// Spawn a PTY session running an arbitrary command with arguments.

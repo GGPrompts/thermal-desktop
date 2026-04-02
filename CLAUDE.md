@@ -7,7 +7,9 @@ Custom-built Wayland desktop components with a thermal/FLIR infrared aesthetic. 
 Cargo workspace with shared dependencies. All components use `thermal-core` for the color palette and shared rendering utilities. Each crate has its own `CLAUDE.md` with detailed architecture — read those when working on a specific component.
 
 ### Disambiguation
-- **thermal-terminal vs kitty**: thermal-terminal is our custom Rust crate (`crates/thermal-terminal/`) — PTY management, OSC 633 parsing, state inference engine. kitty is the external terminal emulator used as a backend. When asked to work on "terminal code", default to `crates/thermal-terminal/` unless kitty is explicitly named.
+- **thermal-terminal vs kitty**: thermal-terminal is our custom Rust crate (`crates/thermal-terminal/`) — PTY management, OSC 633 parsing, state inference engine. kitty is an external terminal emulator used as a backend. When asked to work on "terminal code", default to `crates/thermal-terminal/` unless kitty is explicitly named.
+- **GPU terminal (`thc window`) vs kitty**: `thc window` is the custom wgpu-rendered terminal using `alacritty_terminal` (a Rust library, not the alacritty app) for terminal emulation. kitty is the stable fallback. The user's primary terminal on Arch is `thc window` (Super+Enter), with kitty as fallback (Super+Shift+Enter). GPU terminal bugs are high priority since they affect daily workflow.
+- **alacritty_terminal**: A Rust terminal emulation *library* embedded in `thc window` — not the alacritty terminal application. Handles escape sequence parsing and grid buffer management. The GPU renderer (`grid_renderer.rs`, `color_mapping.rs`) draws the grid with wgpu.
 
 ### Core Stack
 - **GPU rendering**: wgpu 23 + glyphon 0.7 + cosmic-text 0.12 (glyph atlas)
@@ -24,6 +26,9 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 All colors in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.
 
 ## Development
+
+### Dev Environment
+Dual-boot: WSL2 (Windows) for coding, Arch Linux for runtime testing (Wayland, PipeWire, GPU). WSL2 lacks native Wayland — compilation works but GPU windows, HUD, audio, and transparency require Arch. `libssl-dev`/`openssl` needed for thermal-voice/audio crates.
 
 ### Build Environment
 `CARGO_TARGET_DIR` is set to `~/.cargo-target` (keeps build artifacts outside the project tree). This means:

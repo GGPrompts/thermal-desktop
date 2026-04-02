@@ -78,7 +78,7 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         }
 
         NamedColor::DimBlack => TERM_BG,
-        NamedColor::DimRed => PaletteColor::CRITICAL.to_f32_array(), // #dc2626 — darker than Red's SEARING
+        NamedColor::DimRed => [0.94, 0.27, 0.27, 1.0], // #ef4444 — SEARING (was CRITICAL #dc2626, too dim at 4.26:1)
         NamedColor::DimGreen => [0.17, 0.72, 0.66, 1.0], // #2ab8a8 — brighter teal
         NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
         NamedColor::DimBlue => [0.20, 0.47, 0.95, 1.0], // #3378f2 — slight lift over COOL

@@ -21,9 +21,9 @@ use glyphon::{
 };
 use thermal_core::palette::Color as PaletteColor;
 
-use tracing::debug;
 use crate::font_config::FontConfig;
 use crate::kitty_graphics::ImageStore;
+use tracing::debug;
 
 /// Terminal background — matches kitty's `background #0a0010` (palette BG).
 /// Spec(0,0,0) and palette BG are suppressed in ansi_to_glyphon_bg
@@ -262,9 +262,10 @@ impl GridRenderer {
         font_system.db_mut().set_monospace_family(&font_family);
         // Log available fallback fonts for diagnostics.
         for fb in &font_config.fallback_families {
-            let found = font_system.db().faces().any(|f| {
-                f.families.iter().any(|(name, _)| name == fb)
-            });
+            let found = font_system
+                .db()
+                .faces()
+                .any(|f| f.families.iter().any(|(name, _)| name == fb));
             if found {
                 tracing::info!(font = %fb, "Fallback font available");
             } else {

@@ -105,6 +105,11 @@ impl Color {
     pub const ACCENT_NEUTRAL: Color = Color::from_hex(0x14b8a6);
     pub const ACCENT_WARM: Color = Color::from_hex(0xf59e0b);
     pub const ACCENT_HOT: Color = Color::from_hex(0xef4444);
+
+    // Status
+    pub const STATUS_OK: Color = Color::from_hex(0x22c55e);
+    pub const STATUS_WARN: Color = Color::from_hex(0xf59e0b);
+    pub const STATUS_ERROR: Color = Color::from_hex(0xef4444);
 }
 // THERMAL-COLORS-END
 
@@ -536,7 +541,10 @@ mod tests {
         let black = Color::from_hex(0x000000);
         let white = Color::from_hex(0xFFFFFF);
         let ratio = black.contrast_ratio(white);
-        assert!((ratio - 21.0).abs() < 0.1, "expected ~21:1, got {ratio:.2}:1");
+        assert!(
+            (ratio - 21.0).abs() < 0.1,
+            "expected ~21:1, got {ratio:.2}:1"
+        );
     }
 
     #[test]
@@ -566,7 +574,9 @@ mod tests {
         assert!(
             ratio >= min_ratio,
             "{name} ({:02x}{:02x}{:02x}) contrast {ratio:.2}:1 < {min_ratio}:1 against BG",
-            color.r, color.g, color.b,
+            color.r,
+            color.g,
+            color.b,
         );
     }
 
@@ -599,6 +609,13 @@ mod tests {
         assert_contrast("ACCENT_NEUTRAL", Color::ACCENT_NEUTRAL, WCAG_AA_LARGE);
         assert_contrast("ACCENT_WARM", Color::ACCENT_WARM, WCAG_AA_LARGE);
         assert_contrast("ACCENT_HOT", Color::ACCENT_HOT, WCAG_AA_LARGE);
+    }
+
+    #[test]
+    fn status_colors_meet_wcag_aa_for_text() {
+        assert_contrast("STATUS_OK", Color::STATUS_OK, WCAG_AA_TEXT);
+        assert_contrast("STATUS_WARN", Color::STATUS_WARN, WCAG_AA_TEXT);
+        assert_contrast("STATUS_ERROR", Color::STATUS_ERROR, WCAG_AA_TEXT);
     }
 }
 
@@ -638,6 +655,11 @@ impl ThermalPalette {
     pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
     pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
     pub const ACCENT_HOT: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
+
+    // Status
+    pub const STATUS_OK: [f32; 4] = Self::hex(0x22, 0xc5, 0x5e);
+    pub const STATUS_WARN: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);
+    pub const STATUS_ERROR: [f32; 4] = Self::hex(0xef, 0x44, 0x44);
     // THERMAL-PALETTE-COLORS-END
 
     const fn hex(r: u8, g: u8, b: u8) -> [f32; 4] {

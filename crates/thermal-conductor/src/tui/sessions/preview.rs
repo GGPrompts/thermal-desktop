@@ -13,8 +13,8 @@ use ratatui::{
 use crate::client::DaemonClient;
 use crate::protocol::{CellData, DirtyCellData, Response};
 
-use super::format::TEXT_MUTED;
 use super::SessionsPage;
+use super::format::TEXT_MUTED;
 
 // ---------------------------------------------------------------------------
 // Preview broadcast subscriber
@@ -170,9 +170,7 @@ async fn preview_subscriber_loop(
                             current_session = None;
                         }
                         Ok(None) => {
-                            tracing::warn!(
-                                "preview-subscriber: connection closed during attach"
-                            );
+                            tracing::warn!("preview-subscriber: connection closed during attach");
                             client = None;
                             current_session = None;
                         }
@@ -390,8 +388,7 @@ pub(super) fn scan_all_kitty_windows() -> HashMap<String, (String, i64)> {
                         for proc in procs {
                             if let Some(cwd) = proc["cwd"].as_str() {
                                 if !cwd.is_empty() {
-                                    map.entry(cwd.to_string())
-                                        .or_insert_with(|| entry.clone());
+                                    map.entry(cwd.to_string()).or_insert_with(|| entry.clone());
                                 }
                             }
                         }

@@ -48,6 +48,7 @@ impl KeyboardHandler for ConductorWindow {
         if self.current_term_mode().contains(TermMode::FOCUS_IN_OUT) {
             self.write_session(b"\x1b[O");
         }
+        self.reset_keyboard_state();
     }
 
     fn press_key(
@@ -301,6 +302,7 @@ impl PointerHandler for ConductorWindow {
             }
 
             if let PointerEventKind::Leave { .. } = event.kind {
+                self.reset_pointer_state();
                 if let Some(ref device) = self.cursor_shape_device {
                     device.set_shape(self.pointer_enter_serial, super::CursorShape::Default);
                 }

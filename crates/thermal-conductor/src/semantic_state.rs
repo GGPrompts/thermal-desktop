@@ -36,8 +36,8 @@ use crate::protocol::{
     SemanticEventKind, SemanticSessionSnapshot, SnapshotSync,
 };
 use thermal_core::{ClaudeSessionState, ClaudeStatus};
-use thermal_terminal::state_inference::{AgentType, InferredStatus};
 use thermal_terminal::StateChangeNotification;
+use thermal_terminal::state_inference::{AgentType, InferredStatus};
 
 // ── SemanticSessionState ───────────────────────────────────────────────────
 
@@ -68,7 +68,12 @@ pub(crate) struct SemanticSessionState {
 
 impl SemanticSessionState {
     /// Create a new state for a freshly spawned session.
-    pub fn new(session_id: String, display_name: Option<String>, cwd: Option<String>, pid: Option<u32>) -> Self {
+    pub fn new(
+        session_id: String,
+        display_name: Option<String>,
+        cwd: Option<String>,
+        pid: Option<u32>,
+    ) -> Self {
         Self {
             session_id,
             backend: "daemon".to_string(),
@@ -203,10 +208,7 @@ impl SemanticEventBus {
         self.emit(SemanticEvent {
             session_id: session_id.to_string(),
             seq,
-            kind: SemanticEventKind::SessionSpawned {
-                display_name,
-                cwd,
-            },
+            kind: SemanticEventKind::SessionSpawned { display_name, cwd },
         });
         debug!(session = %session_id, "Semantic: session spawned");
     }
@@ -315,10 +317,7 @@ impl SemanticEventBus {
                 self.emit(SemanticEvent {
                     session_id: session_id.to_string(),
                     seq,
-                    kind: SemanticEventKind::AgentActivityChanged {
-                        activity,
-                        previous,
-                    },
+                    kind: SemanticEventKind::AgentActivityChanged { activity, previous },
                 });
             }
 
@@ -538,7 +537,9 @@ impl SemanticEventBus {
                 states = self.states.lock();
                 // Re-borrow after re-lock — session may have been removed
                 // (extremely unlikely but safe).
-                if states.get_mut(sid).is_none() { return; }
+                if states.get_mut(sid).is_none() {
+                    return;
+                }
             }
 
             let state = states.get_mut(sid).unwrap();
@@ -578,7 +579,9 @@ impl SemanticEventBus {
                     self.emit(e);
                 }
                 states = self.states.lock();
-                if states.get_mut(sid).is_none() { return; }
+                if states.get_mut(sid).is_none() {
+                    return;
+                }
             }
 
             let state = states.get_mut(sid).unwrap();
@@ -778,10 +781,7 @@ fn agent_type_to_runtime(at: AgentType) -> AgentRuntime {
 }
 
 /// Check if saturation crossed a warning (0.75) or critical (0.90) threshold.
-fn check_threshold_crossing(
-    old: Option<f64>,
-    new: Option<f64>,
-) -> Option<ContextThreshold> {
+fn check_threshold_crossing(old: Option<f64>, new: Option<f64>) -> Option<ContextThreshold> {
     let new_val = new?;
     let old_val = old.unwrap_or(0.0);
     if old_val < 0.90 && new_val >= 0.90 {
@@ -836,7 +836,10 @@ mod tests {
 
         let event = rx.try_recv().unwrap();
         assert_eq!(event.session_id, "s1");
-        assert!(matches!(event.kind, SemanticEventKind::SessionSpawned { .. }));
+        assert!(matches!(
+            event.kind,
+            SemanticEventKind::SessionSpawned { .. }
+        ));
 
         // Snapshot
         let syncs = bus.snapshot_syncs(&EventScope::All);
@@ -847,7 +850,9 @@ mod tests {
         // Title change
         bus.title_changed("s1", "new title".into());
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.kind, SemanticEventKind::SessionRetitled { ref title } if title == "new title"));
+        assert!(
+            matches!(event.kind, SemanticEventKind::SessionRetitled { ref title } if title == "new title")
+        );
 
         // Duplicate title — no event
         bus.title_changed("s1", "new title".into());
@@ -856,7 +861,13 @@ mod tests {
         // Exit
         bus.session_exited("s1", Some(0), "PtyEof".into());
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.kind, SemanticEventKind::SessionExited { exit_code: Some(0), .. }));
+        assert!(matches!(
+            event.kind,
+            SemanticEventKind::SessionExited {
+                exit_code: Some(0),
+                ..
+            }
+        ));
 
         let syncs = bus.snapshot_syncs(&EventScope::All);
         assert!(!syncs[0].snapshot.is_alive);
@@ -895,7 +906,9 @@ mod tests {
             },
         );
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.kind, SemanticEventKind::ToolStarted { ref tool_name } if tool_name == "Edit"));
+        assert!(
+            matches!(event.kind, SemanticEventKind::ToolStarted { ref tool_name } if tool_name == "Edit")
+        );
 
         // Verify snapshot reflects tool
         let snap = bus.snapshot("s1").unwrap();
@@ -910,7 +923,10 @@ mod tests {
             },
         );
         let event = rx.try_recv().unwrap();
-        assert!(matches!(event.kind, SemanticEventKind::ToolCompleted { .. }));
+        assert!(matches!(
+            event.kind,
+            SemanticEventKind::ToolCompleted { .. }
+        ));
 
         let snap = bus.snapshot("s1").unwrap();
         assert_eq!(snap.current_tool, None);
@@ -926,10 +942,7 @@ mod tests {
             check_threshold_crossing(Some(0.5), Some(0.95)),
             Some(ContextThreshold::Critical)
         );
-        assert_eq!(
-            check_threshold_crossing(Some(0.8), Some(0.85)),
-            None
-        );
+        assert_eq!(check_threshold_crossing(Some(0.8), Some(0.85)), None);
         assert_eq!(
             check_threshold_crossing(Some(0.85), Some(0.95)),
             Some(ContextThreshold::Critical)

@@ -5,8 +5,8 @@ use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::time::Instant;
 
-use thermal_core::message::{AgentId, Message, MessageType};
 use thermal_core::ClaudeSessionState;
+use thermal_core::message::{AgentId, Message, MessageType};
 
 use super::SessionsPage;
 

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::TermDamage;
+use alacritty_terminal::term::cell::Flags;
 
 use crate::grid_renderer::{self, RenderCell};
 

@@ -778,7 +778,8 @@ impl Daemon {
                         }
                     });
                     // Emit semantic events for kill.
-                    self.event_bus.session_exited(id, None, "killed".to_string());
+                    self.event_bus
+                        .session_exited(id, None, "killed".to_string());
                     self.event_bus.session_removed(id);
                     info!(session = %id, "Session killed");
                     Response::Ok
@@ -1222,11 +1223,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
             // Send initial snapshot syncs for all in-scope sessions.
             let syncs = daemon.event_bus.snapshot_syncs(scope);
             for sync in syncs {
-                if client_tx
-                    .send(Response::SnapshotSync(sync))
-                    .await
-                    .is_err()
-                {
+                if client_tx.send(Response::SnapshotSync(sync)).await.is_err() {
                     break;
                 }
             }
@@ -1260,7 +1257,10 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) {
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!(skipped = n, "Event subscriber lagged; sending resync snapshots");
+                            warn!(
+                                skipped = n,
+                                "Event subscriber lagged; sending resync snapshots"
+                            );
                             // Force resync: re-send snapshots for all in-scope sessions.
                             let syncs = daemon_clone.event_bus.snapshot_syncs(&scope_clone);
                             for sync in syncs {
@@ -1488,10 +1488,7 @@ fn spawn_state_file_watcher(daemon: Arc<Daemon>) {
             }
 
             // Detect removed external sessions.
-            let removed: Vec<String> = known_external
-                .difference(&current_ids)
-                .cloned()
-                .collect();
+            let removed: Vec<String> = known_external.difference(&current_ids).cloned().collect();
             for sid in &removed {
                 // Only remove if it's still external (not daemon-owned).
                 if !daemon.event_bus.is_daemon_owned(sid) {
@@ -1607,8 +1604,8 @@ pub async fn run_daemon() -> Result<()> {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
-            let mut sigterm = signal(SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     info!("Received SIGINT — shutting down");
@@ -2407,7 +2404,10 @@ mod tests {
         // The session should be alive and its shell_command should be non-empty.
         let sessions = client.list_sessions().await.expect("list_sessions failed");
         assert_eq!(sessions.len(), 1);
-        assert!(sessions[0].is_alive, "Default shell session should be alive");
+        assert!(
+            sessions[0].is_alive,
+            "Default shell session should be alive"
+        );
         assert!(
             !sessions[0].shell_command.is_empty(),
             "Shell command should not be empty when falling back to $SHELL"
@@ -2449,10 +2449,7 @@ mod tests {
 
         // Kill all sessions.
         for id in &ids {
-            client
-                .kill_session(id)
-                .await
-                .expect("kill_session failed");
+            client.kill_session(id).await.expect("kill_session failed");
         }
 
         // Allow a short time for async cleanup.

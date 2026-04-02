@@ -45,11 +45,9 @@ const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
 const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
 const WARM: Color = pal(ThermalPalette::WARM);
 const SEARING: Color = pal(ThermalPalette::SEARING);
-
-// Green for running
-const RUNNING_COLOR: Color = Color::Rgb(0, 200, 80);
-// Red for stopped
-const STOPPED_COLOR: Color = Color::Rgb(200, 50, 50);
+const STATUS_OK: Color = pal(ThermalPalette::STATUS_OK);
+const STATUS_WARN: Color = pal(ThermalPalette::STATUS_WARN);
+const STATUS_ERROR: Color = pal(ThermalPalette::STATUS_ERROR);
 
 // ---------------------------------------------------------------------------
 // Service definitions
@@ -158,7 +156,9 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-dispatcher.md")),
+        doc_content: Some(include_str!(
+            "../../../../docs/daemons/thermal-dispatcher.md"
+        )),
     },
     ServiceDef {
         binary: "thermal-messages",
@@ -174,7 +174,9 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::Pidfile("wallpaper.pid"),
         command: None,
         args: &[],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-wallpaper.md")),
+        doc_content: Some(include_str!(
+            "../../../../docs/daemons/thermal-wallpaper.md"
+        )),
     },
     ServiceDef {
         binary: "thermal-conductor",
@@ -182,7 +184,9 @@ const SERVICES: &[ServiceDef] = &[
         pid_source: PidSource::PgrepPattern("thc daemon"),
         command: Some("thc"),
         args: &["daemon"],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-conductor.md")),
+        doc_content: Some(include_str!(
+            "../../../../docs/daemons/thermal-conductor.md"
+        )),
     },
 ];
 
@@ -842,16 +846,16 @@ impl TuiPage for ServicesPage {
                         && self.audio_state.last_fetched.is_some()
                     {
                         if self.audio_state.muted {
-                            ("muted".to_string(), Color::Rgb(200, 150, 50))
+                            ("muted".to_string(), STATUS_WARN)
                         } else {
                             let pct = (self.audio_state.volume * 100.0).round() as u32;
-                            (format!("vol {pct}%"), RUNNING_COLOR)
+                            (format!("vol {pct}%"), STATUS_OK)
                         }
                     } else {
-                        ("running".to_string(), RUNNING_COLOR)
+                        ("running".to_string(), STATUS_OK)
                     }
                 } else {
-                    ("stopped".to_string(), STOPPED_COLOR)
+                    ("stopped".to_string(), STATUS_ERROR)
                 };
                 let pid_text = status
                     .pid

@@ -98,8 +98,7 @@ impl DaemonClient {
 
         info!(path = %socket_path.display(), "Connected to session daemon");
 
-        let (request_tx, response_rx, writer_handle, reader_handle) =
-            Self::spawn_io_tasks(stream);
+        let (request_tx, response_rx, writer_handle, reader_handle) = Self::spawn_io_tasks(stream);
 
         Ok(Some(Self {
             request_tx,

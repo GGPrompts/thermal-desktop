@@ -37,14 +37,14 @@ use smithay_client_toolkit::{
         },
     },
 };
-use wayland_protocols::wp::cursor_shape::v1::client::{
-    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
-    wp_cursor_shape_device_v1::Shape as CursorShape,
-};
 use wayland_client::{
     Connection, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
+};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::Shape as CursorShape,
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
 };
 
 use alacritty_terminal::event::Event as TermEvent;
@@ -63,9 +63,7 @@ use crate::agent_timeline::{AgentTimeline, TIMELINE_BAR_HEIGHT};
 use crate::client::DaemonClient;
 use crate::context_environment::{TerminalContext, detect_context};
 use crate::font_config::FontConfig;
-use crate::grid_renderer::{
-    ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer,
-};
+use crate::grid_renderer::{ContextHeatmapPipeline, EnvironmentEffectPipeline, GridRenderer};
 use crate::inject::{self, InjectWatcher};
 use crate::input;
 use crate::protocol::Response;
@@ -74,6 +72,16 @@ use crate::terminal::Terminal;
 const DEFAULT_WIDTH: u32 = 1200;
 const DEFAULT_HEIGHT: u32 = 800;
 
+fn empty_modifiers() -> Modifiers {
+    Modifiers {
+        ctrl: false,
+        alt: false,
+        shift: false,
+        caps_lock: false,
+        logo: false,
+        num_lock: false,
+    }
+}
 
 /// Launch the SCTK + wgpu window with a live terminal.
 pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> anyhow::Result<()> {
@@ -149,7 +157,10 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                 .find(|f| *f == wgpu::TextureFormat::Bgra8UnormSrgb)
         })
         .unwrap_or_else(|| {
-            *caps.formats.first().unwrap_or(&wgpu::TextureFormat::Bgra8Unorm)
+            *caps
+                .formats
+                .first()
+                .unwrap_or(&wgpu::TextureFormat::Bgra8Unorm)
         });
     // Prefer PreMultiplied alpha for compositor transparency (wallpaper shows through).
     // Fall back through PostMultiplied → Inherit → Auto.
@@ -210,11 +221,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     // ── Terminal + session (daemon client or standalone PTY) ──────────────────
     // Calculate initial grid size from the renderer's cell metrics.
     let (init_cols, init_rows) = grid_renderer.grid_size(DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    let mut terminal = Terminal::with_size_and_scrollback(
-        init_cols,
-        init_rows,
-        scrollback_lines,
-    );
+    let mut terminal = Terminal::with_size_and_scrollback(init_cols, init_rows, scrollback_lines);
 
     // Start a tokio runtime for the async PTY reader / daemon client.
     let tokio_rt = tokio::runtime::Builder::new_multi_thread()
@@ -268,7 +275,8 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
             wakeup_write,
             command,
         )
-    } else { tokio_rt.block_on(async {
+    } else {
+        tokio_rt.block_on(async {
         match DaemonClient::connect().await {
             Ok(Some(mut client)) => {
                 // Verify the daemon is actually alive (stale sockets can
@@ -458,7 +466,8 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                 )
             }
         }
-    }) };
+    })
+    };
 
     tracing::info!(cols = init_cols, rows = init_rows, "Terminal initialized");
 
@@ -500,7 +509,9 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     } else {
         match ClaudeStatePoller::new() {
             Ok(poller) => {
-                tracing::info!("Using ClaudeStatePoller fallback for agent state (source: file-derived)");
+                tracing::info!(
+                    "Using ClaudeStatePoller fallback for agent state (source: file-derived)"
+                );
                 Some(poller)
             }
             Err(e) => {
@@ -554,14 +565,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         pending_title,
         keyboard: None,
         seat: None,
-        modifiers: Modifiers {
-            ctrl: false,
-            alt: false,
-            shift: false,
-            caps_lock: false,
-            logo: false,
-            num_lock: false,
-        },
+        modifiers: empty_modifiers(),
         pointer: None,
         cursor_shape_mgr,
         cursor_shape_device: None,
@@ -807,7 +811,6 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     Ok(())
 }
 
-
 // ── wgpu state ────────────────────────────────────────────────────────────────
 
 pub(super) struct WgpuState {
@@ -917,6 +920,37 @@ pub(super) struct ConductorWindow {
     pub(super) bell_flash_until: Option<Instant>,
 }
 
+impl ConductorWindow {
+    pub(super) fn reset_keyboard_state(&mut self) {
+        self.repeat_key = None;
+        self.repeat_next = None;
+        self.modifiers = empty_modifiers();
+    }
+
+    pub(super) fn reset_pointer_state(&mut self) {
+        if self.mouse_left_held {
+            self.selection_finalize();
+        }
+        self.mouse_left_held = false;
+    }
+
+    fn release_keyboard_capability(&mut self) {
+        self.reset_keyboard_state();
+        if let Some(kb) = self.keyboard.take() {
+            kb.release();
+        }
+    }
+
+    fn release_pointer_capability(&mut self) {
+        self.reset_pointer_state();
+        if let Some(device) = self.cursor_shape_device.take() {
+            device.destroy();
+        }
+        if let Some(pointer) = self.pointer.take() {
+            pointer.release();
+        }
+    }
+}
 
 // ── Compositor handler ────────────────────────────────────────────────────────
 
@@ -1096,8 +1130,7 @@ impl SeatHandler for ConductorWindow {
                 Ok(pointer) => {
                     // Create the cursor shape device if the compositor supports it.
                     if let Some(ref mgr) = self.cursor_shape_mgr {
-                        self.cursor_shape_device =
-                            Some(mgr.get_shape_device(&pointer, qh));
+                        self.cursor_shape_device = Some(mgr.get_shape_device(&pointer, qh));
                     }
                     self.pointer = Some(pointer);
                 }
@@ -1113,22 +1146,19 @@ impl SeatHandler for ConductorWindow {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Keyboard
-            && let Some(kb) = self.keyboard.take()
-        {
-            kb.release();
+        if capability == Capability::Keyboard {
+            self.release_keyboard_capability();
         }
-        if capability == Capability::Pointer
-            && let Some(pointer) = self.pointer.take()
-        {
-            if let Some(device) = self.cursor_shape_device.take() {
-                device.destroy();
-            }
-            pointer.release();
+        if capability == Capability::Pointer {
+            self.release_pointer_capability();
         }
     }
 
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {
+        self.release_keyboard_capability();
+        self.release_pointer_capability();
+        self.seat = None;
+    }
 }
 
 // ── Delegate macros ───────────────────────────────────────────────────────────
@@ -1162,4 +1192,4 @@ mod url_detection;
 
 use claude_session::find_matching_session;
 use daemon_reader::{apply_session_state_to_term, spawn_daemon_reader_task};
-use session_mode::{BellMode, BELL_FLASH_DURATION, SessionMode, setup_standalone_session};
+use session_mode::{BELL_FLASH_DURATION, BellMode, SessionMode, setup_standalone_session};

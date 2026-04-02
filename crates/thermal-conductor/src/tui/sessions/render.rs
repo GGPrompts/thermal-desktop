@@ -7,9 +7,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
-    },
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
 use thermal_core::{ClaudeStatus, palette::ThermalPalette};
@@ -88,9 +86,18 @@ impl SessionsPage {
                     continue;
                 }
                 let n = match row.session.agent_type.as_deref() {
-                    Some("codex") => { codex_n += 1; codex_n }
-                    Some("copilot") => { copilot_n += 1; copilot_n }
-                    _ => { claude_n += 1; claude_n }
+                    Some("codex") => {
+                        codex_n += 1;
+                        codex_n
+                    }
+                    Some("copilot") => {
+                        copilot_n += 1;
+                        copilot_n
+                    }
+                    _ => {
+                        claude_n += 1;
+                        claude_n
+                    }
                 };
                 agent_numbers[i] = Some(n);
             }
@@ -165,9 +172,7 @@ impl SessionsPage {
                 // Build the agent badge: colored robot emoji + number
                 let agent_num = agent_numbers[row_idx];
                 let agent_badge_line = {
-                    let num_str = agent_num
-                        .map(|n| n.to_string())
-                        .unwrap_or_default();
+                    let num_str = agent_num.map(|n| n.to_string()).unwrap_or_default();
                     Line::from(vec![
                         Span::styled("\u{1F916}", Style::default().fg(agent_color)),
                         Span::styled(num_str, Style::default().fg(agent_color)),
@@ -263,8 +268,7 @@ impl SessionsPage {
             let timeline_line = if let Some(idx) = self.table_state.selected() {
                 if let Some(row) = self.display_rows.get(idx) {
                     let sid = &row.session.session_id;
-                    let label_span =
-                        Span::styled(" \u{2502} ", Style::default().fg(TEXT_MUTED));
+                    let label_span = Span::styled(" \u{2502} ", Style::default().fg(TEXT_MUTED));
                     let bar = self.build_timeline_line(sid, bar_width.saturating_sub(3));
                     let mut spans = vec![label_span];
                     spans.extend(bar.spans);

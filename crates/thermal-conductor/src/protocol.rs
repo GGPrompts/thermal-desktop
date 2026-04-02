@@ -179,19 +179,13 @@ pub enum SemanticEventKind {
         reason: String,
     },
     /// Terminal title changed.
-    SessionRetitled {
-        title: String,
-    },
+    SessionRetitled { title: String },
     /// Working directory changed.
-    SessionCwdChanged {
-        cwd: String,
-    },
+    SessionCwdChanged { cwd: String },
 
     // ── Agent/runtime ────────────────────────────────────────────────────────
     /// Agent runtime was identified.
-    RuntimeDetected {
-        runtime: AgentRuntime,
-    },
+    RuntimeDetected { runtime: AgentRuntime },
     /// Agent activity state changed.
     AgentActivityChanged {
         activity: AgentActivity,
@@ -205,9 +199,7 @@ pub enum SemanticEventKind {
 
     // ── Tool ─────────────────────────────────────────────────────────────────
     /// A tool invocation started.
-    ToolStarted {
-        tool_name: String,
-    },
+    ToolStarted { tool_name: String },
     /// A tool invocation completed successfully.
     ToolCompleted {
         tool_name: String,
@@ -223,9 +215,7 @@ pub enum SemanticEventKind {
 
     // ── Context ──────────────────────────────────────────────────────────────
     /// Context/token usage was updated.
-    ContextUpdated {
-        state: ContextState,
-    },
+    ContextUpdated { state: ContextState },
     /// Context saturation crossed a warning or critical threshold.
     ContextThresholdCrossed {
         level: ContextThreshold,
@@ -316,9 +306,7 @@ pub enum Request {
     /// The daemon responds with `SnapshotSync` for each in-scope session,
     /// then streams `EventBatch` messages as events occur.
     /// Implementation deferred to therm-6yqa.
-    SubscribeEvents {
-        scope: EventScope,
-    },
+    SubscribeEvents { scope: EventScope },
 
     /// Connection health check — daemon responds with `Pong`.
     Ping,

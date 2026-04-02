@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 /// Per-component configuration summary extracted from settings.toml.
@@ -160,34 +161,77 @@ pub fn load_settings() -> ServiceSettings {
 ///
 /// Returns `Ok(true)` if the editor ran successfully, `Err` on failure.
 pub fn open_in_editor() -> Result<bool, String> {
+    struct EditorSuspendGuard {
+        suspended: bool,
+    }
+
+    impl EditorSuspendGuard {
+        fn suspend() -> Result<Self, String> {
+            crossterm::execute!(
+                io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen,
+                crossterm::event::DisableMouseCapture
+            )
+            .map_err(|e| format!("failed to leave alternate screen: {e}"))?;
+
+            if let Err(e) = crossterm::terminal::disable_raw_mode() {
+                let _ = crossterm::execute!(
+                    io::stdout(),
+                    crossterm::terminal::EnterAlternateScreen,
+                    crossterm::event::EnableMouseCapture,
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+                );
+                return Err(format!("failed to disable raw mode: {e}"));
+            }
+
+            Ok(Self { suspended: true })
+        }
+
+        fn resume(&mut self) -> Result<(), String> {
+            if !self.suspended {
+                return Ok(());
+            }
+
+            crossterm::terminal::enable_raw_mode()
+                .map_err(|e| format!("failed to re-enable raw mode: {e}"))?;
+            crossterm::execute!(
+                io::stdout(),
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::event::EnableMouseCapture,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            )
+            .map_err(|e| format!("failed to re-enter alternate screen: {e}"))?;
+
+            self.suspended = false;
+            Ok(())
+        }
+    }
+
+    impl Drop for EditorSuspendGuard {
+        fn drop(&mut self) {
+            if !self.suspended {
+                return;
+            }
+
+            let _ = crossterm::terminal::enable_raw_mode();
+            let _ = crossterm::execute!(
+                io::stdout(),
+                crossterm::terminal::EnterAlternateScreen,
+                crossterm::event::EnableMouseCapture,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            );
+        }
+    }
+
     let path = ensure_settings_file();
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "micro".to_string());
-
-    // Leave alternate screen so the editor has a normal terminal.
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
-    )
-    .map_err(|e| format!("failed to leave alternate screen: {e}"))?;
-    crossterm::terminal::disable_raw_mode()
-        .map_err(|e| format!("failed to disable raw mode: {e}"))?;
+    let mut suspended = EditorSuspendGuard::suspend()?;
 
     let status = std::process::Command::new(&editor)
         .arg(path.to_str().unwrap_or(""))
         .status()
         .map_err(|e| format!("failed to launch {editor}: {e}"))?;
-
-    // Re-enter alternate screen for TUI.
-    crossterm::terminal::enable_raw_mode()
-        .map_err(|e| format!("failed to re-enable raw mode: {e}"))?;
-    crossterm::execute!(
-        std::io::stdout(),
-        crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture,
-        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
-    )
-    .map_err(|e| format!("failed to re-enter alternate screen: {e}"))?;
+    suspended.resume()?;
 
     Ok(status.success())
 }

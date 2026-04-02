@@ -45,6 +45,8 @@ const TEXT_MUTED: Color = pal(ThermalPalette::TEXT_MUTED);
 const ACCENT_COLD: Color = pal(ThermalPalette::ACCENT_COLD);
 const WARM: Color = pal(ThermalPalette::WARM);
 const SEARING: Color = pal(ThermalPalette::SEARING);
+const STATUS_OK: Color = pal(ThermalPalette::STATUS_OK);
+const STATUS_ERROR: Color = pal(ThermalPalette::STATUS_ERROR);
 
 // Agent type → color mapping for badges.
 fn agent_color(agent_type: &str) -> Color {
@@ -416,12 +418,9 @@ impl TuiPage for ChatPage {
 
         // -- Title row --
         let conn_indicator = if connected {
-            Span::styled(" [connected]", Style::default().fg(Color::Rgb(0, 200, 80)))
+            Span::styled(" [connected]", Style::default().fg(STATUS_OK))
         } else {
-            Span::styled(
-                " [disconnected]",
-                Style::default().fg(Color::Rgb(200, 50, 50)),
-            )
+            Span::styled(" [disconnected]", Style::default().fg(STATUS_ERROR))
         };
 
         let msg_count = self.entries.len();

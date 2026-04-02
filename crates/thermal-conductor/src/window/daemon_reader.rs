@@ -55,9 +55,7 @@ pub(super) fn spawn_daemon_reader_task(
                     } => {
                         // Apply dirty cells incrementally to the local term.
                         let mut term = term_handle.lock();
-                        let (screen_lines, screen_cols) = {
-                            (term.screen_lines(), term.columns())
-                        };
+                        let (screen_lines, screen_cols) = { (term.screen_lines(), term.columns()) };
 
                         for dc in &dirty_cells {
                             let row = dc.row as usize;
@@ -65,8 +63,10 @@ pub(super) fn spawn_daemon_reader_task(
                             if row >= screen_lines || col >= screen_cols {
                                 continue;
                             }
-                            let point =
-                                Point::new(alacritty_terminal::index::Line(row as i32), Column(col));
+                            let point = Point::new(
+                                alacritty_terminal::index::Line(row as i32),
+                                Column(col),
+                            );
                             let grid_cell = &mut term.grid_mut()[point];
                             grid_cell.c = dc.cell.ch;
                             grid_cell.flags = Flags::from_bits_truncate(dc.cell.flags);
@@ -236,7 +236,9 @@ pub(super) fn spawn_daemon_reader_task(
                 let mut client = shared_client.lock().await;
                 match client.reconnect().await {
                     Ok(true) => {
-                        tracing::info!("Reconnected to daemon, re-attaching to session {session_id}");
+                        tracing::info!(
+                            "Reconnected to daemon, re-attaching to session {session_id}"
+                        );
                         // Re-attach to the session. If the daemon restarted and
                         // the session no longer exists, this will fail.
                         match client.attach(&session_id, None).await {
@@ -295,9 +297,7 @@ pub(super) fn spawn_daemon_reader_task(
                 }
                 None => {
                     // Reconnect failed — exit cleanly.
-                    tracing::warn!(
-                        "Daemon reader: reconnect failed — signaling exit"
-                    );
+                    tracing::warn!("Daemon reader: reconnect failed — signaling exit");
                     exit_requested.store(true, Ordering::Release);
                     wake_render_loop(wakeup_write_fd);
                     break 'outer;

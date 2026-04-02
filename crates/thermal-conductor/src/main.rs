@@ -183,6 +183,47 @@ enum AudioAction {
     },
 }
 
+fn init_tui_tracing(env_filter: tracing_subscriber::EnvFilter) -> Option<std::path::PathBuf> {
+    let primary = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|dir| dir.join("thermal").join("conductor-tui.log"));
+    let fallback = std::path::PathBuf::from("/tmp/thermal-conductor-tui.log");
+
+    let mut candidates = Vec::new();
+    if let Some(path) = primary {
+        candidates.push(path);
+    }
+    if !candidates.iter().any(|path| path == &fallback) {
+        candidates.push(fallback);
+    }
+
+    for path in candidates {
+        if let Some(parent) = path.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            continue;
+        }
+
+        let log_file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter.clone())
+            .with_writer(log_file)
+            .with_ansi(false)
+            .init();
+        return Some(path);
+    }
+
+    None
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -196,45 +237,15 @@ fn main() -> Result<()> {
     let mut tui_log_path: Option<std::path::PathBuf> = None;
 
     // Doctor and Config are quick diagnostics — suppress tracing noise.
-    if matches!(command, Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }) {
+    if matches!(
+        command,
+        Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }
+    ) {
         // No tracing init — just run silently.
     } else if matches!(command, Commands::Tui) {
-    // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
-    // alternate screen. Other modes log to stderr as normal.
-        let log_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-        let log_path = std::path::PathBuf::from(log_dir)
-            .join("thermal")
-            .join("conductor-tui.log");
-        if let Some(parent) = log_path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!(
-                    "warning: could not create log directory {}: {e}",
-                    parent.display()
-                );
-            }
-        }
-        tui_log_path = Some(log_path.clone());
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-        {
-            Ok(log_file) => {
-                tracing_subscriber::fmt()
-                    .with_env_filter(env_filter)
-                    .with_writer(log_file)
-                    .with_ansi(false)
-                    .init();
-            }
-            Err(e) => {
-                eprintln!(
-                    "warning: failed to open TUI log file {}: {e}",
-                    log_path.display()
-                );
-                eprintln!("TUI logs will go to stderr (may corrupt TUI display)");
-                tracing_subscriber::fmt().with_env_filter(env_filter).init();
-            }
-        }
+        // In TUI mode, log only to files so tracing never corrupts the
+        // alternate screen. If all file paths fail, tracing stays disabled.
+        tui_log_path = init_tui_tracing(env_filter);
     } else {
         tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
@@ -254,7 +265,11 @@ fn main() -> Result<()> {
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
     // so it must run outside of #[tokio::main] to avoid nested runtime panic.
-    if let Commands::Window { ref session, ref command } = command {
+    if let Commands::Window {
+        ref session,
+        ref command,
+    } = command
+    {
         let cmd = if command.is_empty() {
             None
         } else {
@@ -693,7 +708,10 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
         .with_context(|| {
-            format!("cannot connect to audio daemon at {} — is thermal-audio running?", sock_path.display())
+            format!(
+                "cannot connect to audio daemon at {} — is thermal-audio running?",
+                sock_path.display()
+            )
         })?;
 
     let mut request = serde_json::json!({
@@ -907,12 +925,18 @@ impl DiagnosticReport {
                 Some(SocketStatus::Missing) => "  sock MISSING",
                 None => "",
             };
-            out.push_str(&format!("  {:<9} {:<24}{}{}\n", tag, d.name, pid_info, sock_info));
+            out.push_str(&format!(
+                "  {:<9} {:<24}{}{}\n",
+                tag, d.name, pid_info, sock_info
+            ));
         }
 
         // Section 2: Socket paths
         out.push_str("\n## Socket Paths\n\n");
-        out.push_str(&format!("  Runtime dir: {}\n\n", self.runtime_dir.display()));
+        out.push_str(&format!(
+            "  Runtime dir: {}\n\n",
+            self.runtime_dir.display()
+        ));
         if self.socket_files.is_empty() {
             out.push_str("  No socket files found.\n");
         } else {
@@ -1059,7 +1083,10 @@ impl DiagnosticReport {
         // Section 5: Log locations
         out.push_str("\n\x1b[1m## Log Locations\x1b[0m\n\n");
         for (component, location) in &self.log_locations {
-            out.push_str(&format!("  {:<24} \x1b[90m{}\x1b[0m\n", component, location));
+            out.push_str(&format!(
+                "  {:<24} \x1b[90m{}\x1b[0m\n",
+                component, location
+            ));
         }
 
         // Section 6: GPU info
@@ -1067,9 +1094,7 @@ impl DiagnosticReport {
         if let Some(ref info) = self.gpu_info {
             out.push_str(&format!("  {info}\n"));
         } else {
-            out.push_str(
-                "  \x1b[90mGPU adapter info not available (no wgpu instance).\x1b[0m\n",
-            );
+            out.push_str("  \x1b[90mGPU adapter info not available (no wgpu instance).\x1b[0m\n");
         }
 
         // Section 7: Compatibility state readers
@@ -1167,7 +1192,11 @@ async fn build_diagnostic_report() -> DiagnosticReport {
     }
 }
 
-fn doctor_execution_plan(fix: bool, report: bool, diagnostic: &DiagnosticReport) -> DoctorExecutionPlan {
+fn doctor_execution_plan(
+    fix: bool,
+    report: bool,
+    diagnostic: &DiagnosticReport,
+) -> DoctorExecutionPlan {
     let dead_count = diagnostic
         .daemon_results
         .iter()
@@ -1190,9 +1219,9 @@ fn doctor_execution_plan(fix: bool, report: bool, diagnostic: &DiagnosticReport)
 
 /// ANSI helpers for config output.
 mod config_colors {
-    pub const GREEN: &str = "\x1b[32m";   // env override
-    pub const YELLOW: &str = "\x1b[33m";  // toml value
-    pub const DIM: &str = "\x1b[2m";      // default
+    pub const GREEN: &str = "\x1b[32m"; // env override
+    pub const YELLOW: &str = "\x1b[33m"; // toml value
+    pub const DIM: &str = "\x1b[2m"; // default
     pub const BOLD: &str = "\x1b[1m";
     pub const RESET: &str = "\x1b[0m";
 }
@@ -1299,7 +1328,10 @@ async fn cmd_config() -> Result<()> {
     print_section("Font & Display");
 
     let (val, src) = resolve(
-        "THERMAL_FONT_FAMILY", None, None, &toml_table,
+        "THERMAL_FONT_FAMILY",
+        None,
+        None,
+        &toml_table,
         "JetBrainsMono Nerd Font Mono",
     );
     print_setting("font_family", &val, src);
@@ -1308,7 +1340,10 @@ async fn cmd_config() -> Result<()> {
     print_setting("font_size", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_FONT_FALLBACK", None, None, &toml_table,
+        "THERMAL_FONT_FALLBACK",
+        None,
+        None,
+        &toml_table,
         "Noto Color Emoji",
     );
     print_setting("font_fallback", &val, src);
@@ -1323,37 +1358,55 @@ async fn cmd_config() -> Result<()> {
     print_section("Audio & Voice");
 
     let (val, src) = resolve(
-        "THERMAL_AUDIO_VOICE", Some("audio"), Some("voice"), &toml_table,
+        "THERMAL_AUDIO_VOICE",
+        Some("audio"),
+        Some("voice"),
+        &toml_table,
         "en-US-GuyNeural",
     );
     print_setting("audio.voice", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_AUDIO_SPEED", Some("audio"), Some("speed"), &toml_table,
+        "THERMAL_AUDIO_SPEED",
+        Some("audio"),
+        Some("speed"),
+        &toml_table,
         "1.0",
     );
     print_setting("audio.speed", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_AUDIO_VOLUME", Some("audio"), Some("volume"), &toml_table,
+        "THERMAL_AUDIO_VOLUME",
+        Some("audio"),
+        Some("volume"),
+        &toml_table,
         "1.0",
     );
     print_setting("audio.volume", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_VOICE_MODE", Some("voice"), Some("mode"), &toml_table,
+        "THERMAL_VOICE_MODE",
+        Some("voice"),
+        Some("mode"),
+        &toml_table,
         "vad",
     );
     print_setting("voice.mode", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_VOICE_SENSITIVITY", Some("voice"), Some("sensitivity"), &toml_table,
+        "THERMAL_VOICE_SENSITIVITY",
+        Some("voice"),
+        Some("sensitivity"),
+        &toml_table,
         "0.6",
     );
     print_setting("voice.sensitivity", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_VOICE_STT_MODEL", Some("voice"), Some("stt_model"), &toml_table,
+        "THERMAL_VOICE_STT_MODEL",
+        Some("voice"),
+        Some("stt_model"),
+        &toml_table,
         "base.en",
     );
     print_setting("voice.stt_model", &val, src);
@@ -1362,13 +1415,19 @@ async fn cmd_config() -> Result<()> {
     print_section("Dispatcher");
 
     let (val, src) = resolve(
-        "THERMAL_DISPATCHER_BACKEND", Some("dispatcher"), Some("backend"), &toml_table,
+        "THERMAL_DISPATCHER_BACKEND",
+        Some("dispatcher"),
+        Some("backend"),
+        &toml_table,
         "ollama",
     );
     print_setting("dispatcher.backend", &val, src);
 
     let (val, src) = resolve(
-        "THERMAL_DISPATCHER_MODEL", Some("dispatcher"), Some("model"), &toml_table,
+        "THERMAL_DISPATCHER_MODEL",
+        Some("dispatcher"),
+        Some("model"),
+        &toml_table,
         "qwen3:8b",
     );
     print_setting("dispatcher.model", &val, src);
@@ -1474,13 +1533,26 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
             Ok(o) if o.status.success() => (true, None),
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                let last_lines: String = stderr.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                let last_lines: String = stderr
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 (false, Some(last_lines))
             }
             Err(e) => (false, Some(format!("failed to run cargo: {e}"))),
         };
         print_step_progress("cargo check", passed);
-        results.push(SmokeStepResult { name: "cargo check --workspace", passed, duration, detail });
+        results.push(SmokeStepResult {
+            name: "cargo check --workspace",
+            passed,
+            duration,
+            detail,
+        });
     }
 
     // Step 2: cargo test --workspace --lib
@@ -1499,13 +1571,26 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 let stdout = String::from_utf8_lossy(&o.stdout);
                 let combined = format!("{stderr}\n{stdout}");
-                let last_lines: String = combined.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                let last_lines: String = combined
+                    .lines()
+                    .rev()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 (false, Some(last_lines))
             }
             Err(e) => (false, Some(format!("failed to run cargo: {e}"))),
         };
         print_step_progress("cargo test --lib", passed);
-        results.push(SmokeStepResult { name: "cargo test --workspace --lib", passed, duration, detail });
+        results.push(SmokeStepResult {
+            name: "cargo test --workspace --lib",
+            passed,
+            duration,
+            detail,
+        });
     }
 
     // Step 3: doctor health checks
@@ -1534,7 +1619,12 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
         };
 
         print_step_progress("daemon health", passed);
-        results.push(SmokeStepResult { name: "daemon health (doctor)", passed, duration, detail });
+        results.push(SmokeStepResult {
+            name: "daemon health (doctor)",
+            passed,
+            duration,
+            detail,
+        });
 
         // If --fix and there are dead daemons, run fix logic
         if fix && dead_count > 0 {
@@ -1550,7 +1640,10 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
 
     // Summary table
     println!();
-    println!("  \x1b[1m{:<32} {:>6}  {:>8}\x1b[0m", "Step", "Result", "Duration");
+    println!(
+        "  \x1b[1m{:<32} {:>6}  {:>8}\x1b[0m",
+        "Step", "Result", "Duration"
+    );
     println!("  {}", "─".repeat(50));
 
     let mut all_passed = true;
@@ -1582,7 +1675,11 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
 
 /// Print a live progress indicator for a smoke step.
 fn print_step_progress(name: &str, passed: bool) {
-    let icon = if passed { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+    let icon = if passed {
+        "\x1b[32m✓\x1b[0m"
+    } else {
+        "\x1b[31m✗\x1b[0m"
+    };
     println!("  {icon} {name}");
 }
 
@@ -1768,9 +1865,7 @@ async fn gather_session_info() -> Option<String> {
 }
 
 /// Gather well-known log file locations.
-fn gather_log_locations(
-    run_dir: &std::path::Path,
-) -> Vec<(String, String)> {
+fn gather_log_locations(run_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut locs = Vec::new();
 
     // Conductor TUI log
@@ -1842,10 +1937,7 @@ fn scan_state_directories() -> Vec<StateDirectoryInfo> {
                     entries
                         .filter_map(|e| e.ok())
                         .filter(|e| {
-                            e.path()
-                                .extension()
-                                .and_then(|ext| ext.to_str())
-                                == Some("json")
+                            e.path().extension().and_then(|ext| ext.to_str()) == Some("json")
                         })
                         .count()
                 })
@@ -1941,10 +2033,7 @@ async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
                 println!("    \x1b[32m↻ restarted {}\x1b[0m", spec.name);
             }
             Err(e) => {
-                eprintln!(
-                    "    \x1b[31m! failed to restart {}: {e}\x1b[0m",
-                    spec.name
-                );
+                eprintln!("    \x1b[31m! failed to restart {}: {e}\x1b[0m", spec.name);
             }
         }
     }
@@ -2036,14 +2125,29 @@ mod doctor_tests {
 
         let plain = report.format_plain();
 
-        assert!(plain.contains("## Daemon Status"), "missing Daemon Status section");
+        assert!(
+            plain.contains("## Daemon Status"),
+            "missing Daemon Status section"
+        );
         assert!(plain.contains("[OK]"), "missing [OK] tag");
         assert!(plain.contains("[STALE]"), "missing [STALE] tag");
         assert!(plain.contains("[MISSING]"), "missing [MISSING] tag");
-        assert!(plain.contains("## Socket Paths"), "missing Socket Paths section");
-        assert!(plain.contains("## Backend Mode"), "missing Backend Mode section");
-        assert!(plain.contains("## Session Info"), "missing Session Info section");
-        assert!(plain.contains("## Log Locations"), "missing Log Locations section");
+        assert!(
+            plain.contains("## Socket Paths"),
+            "missing Socket Paths section"
+        );
+        assert!(
+            plain.contains("## Backend Mode"),
+            "missing Backend Mode section"
+        );
+        assert!(
+            plain.contains("## Session Info"),
+            "missing Session Info section"
+        );
+        assert!(
+            plain.contains("## Log Locations"),
+            "missing Log Locations section"
+        );
         assert!(plain.contains("## GPU / Adapter"), "missing GPU section");
         assert!(
             plain.contains("## Compatibility State Files"),
@@ -2079,8 +2183,14 @@ mod doctor_tests {
         };
 
         let colored = report.format_colored();
-        assert!(colored.contains("\x1b["), "colored output should have ANSI codes");
-        assert!(colored.contains("\x1b[32m"), "should have green for running daemon");
+        assert!(
+            colored.contains("\x1b["),
+            "colored output should have ANSI codes"
+        );
+        assert!(
+            colored.contains("\x1b[32m"),
+            "should have green for running daemon"
+        );
     }
 
     #[test]

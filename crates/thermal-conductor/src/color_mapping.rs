@@ -72,7 +72,7 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(), // color11 #f97316
         NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(), // color12 #818cf8
         NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(), // color13 #c4b5fd
-        NamedColor::BrightCyan => [0.18, 0.83, 0.75, 1.0],  // color14 #2dd4bf — bright teal (was MILD #0d9488, dimmer than Cyan)
+        NamedColor::BrightCyan => [0.18, 0.83, 0.75, 1.0], // color14 #2dd4bf — bright teal (was MILD #0d9488, dimmer than Cyan)
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
             PaletteColor::WHITE_HOT.to_f32_array() // color15 #fef3c7
         }
@@ -231,6 +231,41 @@ pub(crate) fn pixel_rect_to_ndc(
             color,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rgba_to_palette_color(rgba: [f32; 4]) -> PaletteColor {
+        PaletteColor::from_rgba(
+            (rgba[0] * 255.0).round() as u8,
+            (rgba[1] * 255.0).round() as u8,
+            (rgba[2] * 255.0).round() as u8,
+            (rgba[3] * 255.0).round() as u8,
+        )
+    }
+
+    fn assert_wcag_text(name: &str, rgba: [f32; 4]) {
+        let color = rgba_to_palette_color(rgba);
+        let ratio = color.contrast_ratio(PaletteColor::BG);
+        assert!(
+            ratio >= 4.5,
+            "{name} contrast {ratio:.2}:1 is below 4.5:1 against BG"
+        );
+    }
+
+    #[test]
+    fn hardcoded_foreground_overrides_meet_wcag_text() {
+        assert_wcag_text("BrightBlack", named_to_thermal_fg(NamedColor::BrightBlack));
+        assert_wcag_text("BrightRed", named_to_thermal_fg(NamedColor::BrightRed));
+        assert_wcag_text("BrightGreen", named_to_thermal_fg(NamedColor::BrightGreen));
+        assert_wcag_text("BrightCyan", named_to_thermal_fg(NamedColor::BrightCyan));
+        assert_wcag_text("DimRed", named_to_thermal_fg(NamedColor::DimRed));
+        assert_wcag_text("DimGreen", named_to_thermal_fg(NamedColor::DimGreen));
+        assert_wcag_text("DimBlue", named_to_thermal_fg(NamedColor::DimBlue));
+        assert_wcag_text("DimCyan", named_to_thermal_fg(NamedColor::DimCyan));
+    }
 }
 
 /// Convert an [f32; 4] RGBA color to a glyphon Color.

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
     },
@@ -69,6 +70,34 @@ const TEXT_BRIGHT: Color = palette::TEXT_BRIGHT;
 const TEXT_MUTED: Color = palette::TEXT_MUTED;
 const ACCENT_COLD: Color = palette::ACCENT_COLD;
 
+struct TuiScreenGuard {
+    active: bool,
+}
+
+impl TuiScreenGuard {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            let _ = disable_raw_mode();
+            return Err(e);
+        }
+        Ok(Self { active: true })
+    }
+}
+
+impl Drop for TuiScreenGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture, Show);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Page trait
 // ---------------------------------------------------------------------------
@@ -83,9 +112,18 @@ pub struct KeyResult {
 }
 
 impl KeyResult {
-    pub const NONE: Self = Self { quit: false, needs_clear: false };
-    pub const QUIT: Self = Self { quit: true, needs_clear: false };
-    pub const CLEAR: Self = Self { quit: false, needs_clear: true };
+    pub const NONE: Self = Self {
+        quit: false,
+        needs_clear: false,
+    };
+    pub const QUIT: Self = Self {
+        quit: true,
+        needs_clear: false,
+    };
+    pub const CLEAR: Self = Self {
+        quit: false,
+        needs_clear: true,
+    };
 }
 
 /// Trait for a TUI page/tab. Each page manages its own state and rendering.
@@ -262,10 +300,8 @@ fn ui(f: &mut Frame, app: &mut App) {
 
 /// Launch the TUI dashboard. This blocks until the user quits.
 pub fn run(backend_pref: BackendPreference) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
+    let _screen = TuiScreenGuard::enter()?;
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(backend_pref)?;
@@ -403,12 +439,6 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
     terminal.show_cursor()?;
 
     Ok(())

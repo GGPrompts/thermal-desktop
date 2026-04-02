@@ -1587,8 +1587,8 @@ fn launch_window_for_session(session_id: &str) -> Result<(), String> {
     use std::process::Command;
 
     // Find our own binary (thc) to launch the window subcommand.
-    let thc_bin = std::env::current_exe()
-        .map_err(|e| format!("Failed to determine thc binary path: {e}"))?;
+    let thc_bin =
+        std::env::current_exe().map_err(|e| format!("Failed to determine thc binary path: {e}"))?;
 
     Command::new(&thc_bin)
         .args(["window", "--session", session_id])

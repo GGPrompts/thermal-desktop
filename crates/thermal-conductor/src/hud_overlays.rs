@@ -411,10 +411,11 @@ impl GridRenderer {
                     occlusion_query_set: None,
                 });
 
-                if let Err(e) = self
-                    .overlay_text_renderer
-                    .render(&self.overlay_atlas, &self.viewport, &mut pass)
-                {
+                if let Err(e) = self.overlay_text_renderer.render(
+                    &self.overlay_atlas,
+                    &self.viewport,
+                    &mut pass,
+                ) {
                     tracing::warn!("Command block label text render failed: {}", e);
                 }
             }

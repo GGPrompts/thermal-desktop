@@ -41,12 +41,6 @@ use crate::profiles_config::{Profile, load_profiles, save_profiles};
 
 use super::TuiPage;
 
-
-
-
-
-
-
 // ---------------------------------------------------------------------------
 // Panel focus
 // ---------------------------------------------------------------------------
@@ -261,7 +255,8 @@ impl SessionsPage {
             self.stale_since.entry(id.clone()).or_insert(now);
         }
         // Sessions that reappeared are no longer stale.
-        self.stale_since.retain(|id, _| !active_ids.contains(id.as_str()));
+        self.stale_since
+            .retain(|id, _| !active_ids.contains(id.as_str()));
 
         // Garbage-collect sessions that have been stale for >30s and have no
         // corresponding state file on disk.
@@ -639,7 +634,6 @@ impl SessionsPage {
     fn deselect_all(&mut self) {
         self.selected_set.clear();
     }
-
 }
 
 impl TuiPage for SessionsPage {
@@ -719,7 +713,11 @@ impl TuiPage for SessionsPage {
         let idx = self.table_state.selected()?;
         let row = self.display_rows.get(idx)?;
         let cwd = row.session.working_dir.as_deref().unwrap_or("").trim();
-        if cwd.is_empty() { None } else { Some(cwd.to_string()) }
+        if cwd.is_empty() {
+            None
+        } else {
+            Some(cwd.to_string())
+        }
     }
 }
 

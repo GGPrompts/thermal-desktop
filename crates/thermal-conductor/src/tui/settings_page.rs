@@ -296,16 +296,14 @@ fn setting_groups() -> Vec<(&'static str, Vec<SettingDef>)> {
         ),
         (
             "Notifications",
-            vec![
-                SettingDef {
-                    name: "Timeout (ms)",
-                    toml_section: "notify",
-                    toml_key: "timeout_ms",
-                    env_var: None,
-                    default: "5000",
-                    editable: true,
-                },
-            ],
+            vec![SettingDef {
+                name: "Timeout (ms)",
+                toml_section: "notify",
+                toml_key: "timeout_ms",
+                env_var: None,
+                default: "5000",
+                editable: true,
+            }],
         ),
         (
             "Messages",
@@ -427,10 +425,7 @@ impl SettingsPage {
                     .fg(TEXT_BRIGHT)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  (read-only)  ",
-                Style::default().fg(TEXT_MUTED),
-            ),
+            Span::styled("  (read-only)  ", Style::default().fg(TEXT_MUTED)),
         ]));
         lines.push(Line::from(Span::styled(
             " Source legend: ",
@@ -446,15 +441,10 @@ impl SettingsPage {
         ]));
         lines.push(Line::from(""));
 
-        let path_display = settings::settings_path()
-            .to_string_lossy()
-            .to_string();
+        let path_display = settings::settings_path().to_string_lossy().to_string();
         lines.push(Line::from(vec![
             Span::styled(" File: ", Style::default().fg(TEXT_MUTED)),
-            Span::styled(
-                path_display,
-                Style::default().fg(ACCENT_COLD),
-            ),
+            Span::styled(path_display, Style::default().fg(ACCENT_COLD)),
         ]));
         lines.push(Line::from(Span::styled(
             " Press 'e' to open in $EDITOR, 'r' to reload",
@@ -483,14 +473,8 @@ impl SettingsPage {
                     Span::styled(padded_name, Style::default().fg(TEXT)),
                     Span::styled(item.value.clone(), Style::default().fg(TEXT_BRIGHT)),
                     Span::styled("  ", Style::default()),
-                    Span::styled(
-                        source_tag,
-                        Style::default().fg(item.source.color()),
-                    ),
-                    Span::styled(
-                        editable_marker.to_string(),
-                        Style::default().fg(TEXT_MUTED),
-                    ),
+                    Span::styled(source_tag, Style::default().fg(item.source.color())),
+                    Span::styled(editable_marker.to_string(), Style::default().fg(TEXT_MUTED)),
                 ]));
             }
             lines.push(Line::from("")); // blank line between sections
@@ -556,7 +540,10 @@ impl TuiPage for SettingsPage {
                 width: 20.min(inner.width),
                 height: 1,
             };
-            f.render_widget(Paragraph::new(indicator_line).alignment(Alignment::Right), indicator_area);
+            f.render_widget(
+                Paragraph::new(indicator_line).alignment(Alignment::Right),
+                indicator_area,
+            );
         }
     }
 
@@ -574,10 +561,14 @@ impl TuiPage for SettingsPage {
                 self.scroll = self.scroll.saturating_sub(1);
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(self.visible_height.saturating_sub(2));
+                self.scroll = self
+                    .scroll
+                    .saturating_add(self.visible_height.saturating_sub(2));
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(self.visible_height.saturating_sub(2));
+                self.scroll = self
+                    .scroll
+                    .saturating_sub(self.visible_height.saturating_sub(2));
             }
             KeyCode::Home | KeyCode::Char('g') => {
                 self.scroll = 0;
@@ -590,12 +581,6 @@ impl TuiPage for SettingsPage {
             }
             KeyCode::Char('e') => {
                 if let Err(e) = settings::open_in_editor() {
-                    let _ = crossterm::terminal::enable_raw_mode();
-                    let _ = crossterm::execute!(
-                        std::io::stdout(),
-                        crossterm::terminal::EnterAlternateScreen,
-                        crossterm::event::EnableMouseCapture
-                    );
                     tracing::error!("open_in_editor failed: {e}");
                 }
                 self.reload();
@@ -606,7 +591,11 @@ impl TuiPage for SettingsPage {
         super::KeyResult::NONE
     }
 
-    fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, _poller: &mut ClaudeStatePoller) {
+    fn handle_mouse(
+        &mut self,
+        event: crossterm::event::MouseEvent,
+        _poller: &mut ClaudeStatePoller,
+    ) {
         use crossterm::event::MouseEventKind;
         match event.kind {
             MouseEventKind::ScrollDown => {
@@ -638,7 +627,11 @@ mod tests {
             for item in &group.items {
                 // Could be Env if the test runner has THERMAL_* set, so just
                 // check it resolved to *something*.
-                assert!(!item.value.is_empty(), "setting {} has empty value", item.name);
+                assert!(
+                    !item.value.is_empty(),
+                    "setting {} has empty value",
+                    item.name
+                );
             }
         }
     }
@@ -652,7 +645,11 @@ mod tests {
         );
         let groups = resolve_all(&toml_sections);
         let audio_group = groups.iter().find(|g| g.title == "Audio & Voice").unwrap();
-        let voice = audio_group.items.iter().find(|i| i.name == "TTS voice").unwrap();
+        let voice = audio_group
+            .items
+            .iter()
+            .find(|i| i.name == "TTS voice")
+            .unwrap();
         assert_eq!(voice.value, "en-GB-SoniaNeural");
         assert_eq!(voice.source, Source::Toml);
     }

@@ -387,7 +387,6 @@ impl Terminal {
     pub fn image_store(&self) -> Arc<Mutex<ImageStore>> {
         Arc::clone(&self.image_store)
     }
-
 }
 
 #[cfg(test)]

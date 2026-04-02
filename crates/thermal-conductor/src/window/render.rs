@@ -41,9 +41,13 @@ impl ConductorWindow {
                 });
 
         // ── Clear pass ───────────────────────────────────────────────────
-        // Palette BG (#0a0010) in linear space for the sRGB surface.
-        // Must match TERM_BG in grid_renderer.rs (after sRGB→linear conversion).
-        let bg: [f32; 4] = grid_renderer::clear_color();
+        // Palette BG (#0a0010) with compositor transparency.
+        // Pre-multiply RGB by alpha for PreMultiplied/Inherit modes.
+        let pre_mul = matches!(
+            self.wgpu.config.alpha_mode,
+            wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::Inherit
+        );
+        let bg: [f32; 4] = grid_renderer::clear_color_for_mode(pre_mul);
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("conductor clear pass"),

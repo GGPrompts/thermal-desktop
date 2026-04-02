@@ -35,14 +35,25 @@ pub(crate) const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // 
 const BG_OPACITY: f32 = 0.92;
 
 /// Return TERM_BG with reduced alpha for compositor transparency.
-/// RGB values are pre-multiplied by alpha for CompositeAlphaMode::PreMultiplied.
+/// `pre_multiplied`: true for PreMultiplied/Inherit, false for PostMultiplied/Auto.
+pub fn clear_color_for_mode(pre_multiplied: bool) -> [f32; 4] {
+    if pre_multiplied {
+        // RGB values scaled by alpha — compositor blends correctly.
+        [
+            TERM_BG[0] * BG_OPACITY,
+            TERM_BG[1] * BG_OPACITY,
+            TERM_BG[2] * BG_OPACITY,
+            BG_OPACITY,
+        ]
+    } else {
+        // Straight alpha — RGB unchanged, alpha signals transparency.
+        [TERM_BG[0], TERM_BG[1], TERM_BG[2], BG_OPACITY]
+    }
+}
+
+/// Return TERM_BG with reduced alpha (pre-multiplied, legacy default).
 pub fn clear_color() -> [f32; 4] {
-    [
-        TERM_BG[0] * BG_OPACITY,
-        TERM_BG[1] * BG_OPACITY,
-        TERM_BG[2] * BG_OPACITY,
-        BG_OPACITY,
-    ]
+    clear_color_for_mode(true)
 }
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────

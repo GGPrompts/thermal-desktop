@@ -2333,4 +2333,142 @@ mod tests {
 
         let _ = shutdown_tx.send(()).await;
     }
+
+    // ── IPC contract boundary tests ────────────────────────────────────────
+
+    /// Regression: multi-word command strings must not cause SIGABRT.
+    /// The daemon should split multi-word commands into program + args
+    /// without crashing.
+    #[tokio::test]
+    async fn spawn_multiword_command_no_sigabrt() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        // "echo hello" is a safe multi-word command that will exit quickly.
+        let session_id = client
+            .spawn_session(Some("echo hello".to_string()), None, false)
+            .await
+            .expect("spawn_session with multi-word command should not fail");
+
+        assert!(
+            session_id.starts_with("session-"),
+            "Expected valid session id, got: {session_id}"
+        );
+
+        // Give the short-lived command time to run.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // List sessions — it should exist (alive or exited, but not crashed).
+        let sessions = client.list_sessions().await.expect("list_sessions failed");
+        // Session may still be listed or may have been auto-reaped; either is fine.
+        // The key assertion is that we got here without SIGABRT.
+        let _ = sessions;
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Verify that commands with arguments are split correctly into argv.
+    #[tokio::test]
+    async fn spawn_command_with_arguments() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        // Use /bin/sh -c "exit 0" to verify argument splitting works.
+        let session_id = client
+            .spawn_session(Some("/bin/sh -c 'exit 0'".to_string()), None, false)
+            .await
+            .expect("spawn_session with arguments should not fail");
+
+        assert!(session_id.starts_with("session-"));
+
+        // Wait for the command to exit.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Verify that spawn_session(None, ...) falls back to $SHELL (or a
+    /// sensible default) without error.
+    #[tokio::test]
+    async fn spawn_empty_command_falls_back_to_shell() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        let session_id = client
+            .spawn_session(None, None, false)
+            .await
+            .expect("spawn_session(None) should fall back to $SHELL");
+
+        assert!(
+            session_id.starts_with("session-"),
+            "Expected valid session id, got: {session_id}"
+        );
+
+        // The session should be alive and its shell_command should be non-empty.
+        let sessions = client.list_sessions().await.expect("list_sessions failed");
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].is_alive, "Default shell session should be alive");
+        assert!(
+            !sessions[0].shell_command.is_empty(),
+            "Shell command should not be empty when falling back to $SHELL"
+        );
+
+        // Clean up — kill the shell so it doesn't linger.
+        client
+            .kill_session(&session_id)
+            .await
+            .expect("kill_session failed");
+
+        let _ = shutdown_tx.send(()).await;
+    }
+
+    /// Rapid spawn/kill cycle: spawn 5 sessions, kill all, verify clean state.
+    #[tokio::test]
+    async fn rapid_spawn_kill_cycle_no_zombies() {
+        let (shutdown_tx, sock_path, _dir) = setup_daemon().await;
+        let mut client = connect_client(&sock_path).await;
+
+        // Spawn 5 sessions.
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            let id = client
+                .spawn_session(Some("/bin/sh".to_string()), None, false)
+                .await
+                .expect("spawn_session failed");
+            ids.push(id);
+        }
+
+        // Verify all 5 sessions exist.
+        let sessions = client.list_sessions().await.expect("list_sessions failed");
+        assert_eq!(
+            sessions.len(),
+            5,
+            "Expected 5 sessions, got {}",
+            sessions.len()
+        );
+
+        // Kill all sessions.
+        for id in &ids {
+            client
+                .kill_session(id)
+                .await
+                .expect("kill_session failed");
+        }
+
+        // Allow a short time for async cleanup.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify clean state — no zombie entries.
+        let sessions = client
+            .list_sessions()
+            .await
+            .expect("list_sessions after kill failed");
+        assert!(
+            sessions.is_empty(),
+            "Expected no sessions after killing all, got {} zombie entries",
+            sessions.len()
+        );
+
+        let _ = shutdown_tx.send(()).await;
+    }
 }

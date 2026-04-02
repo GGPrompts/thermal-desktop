@@ -1104,42 +1104,27 @@ mod tests {
     }
 
     #[test]
-    fn agent_badge_with_subagent_count() {
-        let s = ClaudeSessionState {
-            subagent_count: Some(3),
-            ..ClaudeSessionState::default()
-        };
-        let (badge, _color) = agent_type_badge(&s);
-        assert!(
-            badge.contains("x3"),
-            "badge should contain subagent count: {badge}"
+    fn agent_color_returns_warm_for_claude() {
+        let s = ClaudeSessionState::default();
+        let color = agent_type_color(&s);
+        // Claude (default) should get ACCENT_WARM (orange)
+        assert_ne!(
+            color,
+            ratatui::style::Color::Reset,
+            "claude should get a non-reset color"
         );
     }
 
     #[test]
-    fn agent_badge_zero_subagents_no_count() {
-        let s = ClaudeSessionState {
-            subagent_count: Some(0),
+    fn agent_color_differs_by_type() {
+        let claude = ClaudeSessionState::default();
+        let codex = ClaudeSessionState {
+            agent_type: Some("codex".into()),
             ..ClaudeSessionState::default()
         };
-        let (badge, _color) = agent_type_badge(&s);
-        assert!(
-            !badge.contains('x'),
-            "zero subagents should not show count: {badge}"
-        );
-    }
-
-    #[test]
-    fn agent_badge_none_subagents_no_count() {
-        let s = ClaudeSessionState {
-            subagent_count: None,
-            ..ClaudeSessionState::default()
-        };
-        let (badge, _color) = agent_type_badge(&s);
-        assert!(
-            !badge.contains('x'),
-            "None subagent_count should not show count: {badge}"
-        );
+        let c1 = agent_type_color(&claude);
+        let c2 = agent_type_color(&codex);
+        assert_ne!(c1, c2, "claude and codex should have different colors");
     }
 
     #[test]
@@ -1547,17 +1532,7 @@ mod tests {
     // ── Agent badges ────────────────────────────────────────────────────────
 
     #[test]
-    fn agent_badge_uses_emoji() {
-        let claude = ClaudeSessionState::default();
-        let (badge, _) = agent_type_badge(&claude);
-        assert!(
-            badge.contains('\u{1F916}'),
-            "badge should contain robot emoji: {badge}"
-        );
-    }
-
-    #[test]
-    fn agent_badge_colors_differ_by_type() {
+    fn agent_color_all_three_types_differ() {
         let claude = ClaudeSessionState::default();
         let codex = ClaudeSessionState {
             agent_type: Some("codex".into()),
@@ -1567,9 +1542,9 @@ mod tests {
             agent_type: Some("copilot".into()),
             ..ClaudeSessionState::default()
         };
-        let (_, c1) = agent_type_badge(&claude);
-        let (_, c2) = agent_type_badge(&codex);
-        let (_, c3) = agent_type_badge(&copilot);
+        let c1 = agent_type_color(&claude);
+        let c2 = agent_type_color(&codex);
+        let c3 = agent_type_color(&copilot);
         assert_ne!(c1, c2);
         assert_ne!(c2, c3);
     }

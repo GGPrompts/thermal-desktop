@@ -76,6 +76,35 @@ impl SessionsPage {
         });
         let header_row = Row::new(header_cells).height(1);
 
+        // Build per-agent-type numbering: Claude sessions get 1,2,3; Codex 1,2; etc.
+        // Subagents inherit their parent's number (no own number assigned).
+        let mut agent_numbers: Vec<Option<usize>> = vec![None; self.display_rows.len()];
+        {
+            let mut claude_n: usize = 0;
+            let mut codex_n: usize = 0;
+            let mut copilot_n: usize = 0;
+            for (i, row) in self.display_rows.iter().enumerate() {
+                if row.is_subagent {
+                    continue;
+                }
+                let n = match row.session.agent_type.as_deref() {
+                    Some("codex") => { codex_n += 1; codex_n }
+                    Some("copilot") => { copilot_n += 1; copilot_n }
+                    _ => { claude_n += 1; claude_n }
+                };
+                agent_numbers[i] = Some(n);
+            }
+            // Subagents inherit parent number
+            let mut last_parent_num: Option<usize> = None;
+            for (i, row) in self.display_rows.iter().enumerate() {
+                if !row.is_subagent {
+                    last_parent_num = agent_numbers[i];
+                } else {
+                    agent_numbers[i] = last_parent_num;
+                }
+            }
+        }
+
         let rows: Vec<Row> = self
             .display_rows
             .iter()
@@ -85,7 +114,7 @@ impl SessionsPage {
                 let color = status_color(&s.status);
                 let label = status_label(&s.status);
                 let activity = format_activity(s);
-                let (agent_badge, agent_color) = agent_type_badge(s);
+                let agent_color = agent_type_color(s);
 
                 let checkbox = if self.selected_set.contains(&row_idx) {
                     "\u{2611}" // checked box
@@ -133,6 +162,18 @@ impl SessionsPage {
                     .map(format_duration_ms)
                     .unwrap_or_else(|| "\u{2014}".into());
 
+                // Build the agent badge: colored robot emoji + number
+                let agent_num = agent_numbers[row_idx];
+                let agent_badge_line = {
+                    let num_str = agent_num
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
+                    Line::from(vec![
+                        Span::styled("\u{1F916}", Style::default().fg(agent_color)),
+                        Span::styled(num_str, Style::default().fg(agent_color)),
+                    ])
+                };
+
                 if row.is_subagent {
                     let tree = if row.is_last_child {
                         "\u{2514}\u{2500}"
@@ -149,7 +190,7 @@ impl SessionsPage {
                     Row::new(vec![
                         Cell::from(""),
                         Cell::from(id_str).style(Style::default().fg(TEXT_MUTED)),
-                        Cell::from(agent_badge).style(Style::default().fg(agent_color)),
+                        Cell::from(agent_badge_line),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),
@@ -169,7 +210,7 @@ impl SessionsPage {
                     Row::new(vec![
                         Cell::from(checkbox).style(Style::default().fg(check_color)),
                         Cell::from(name_label).style(Style::default().fg(TEXT)),
-                        Cell::from(agent_badge).style(Style::default().fg(agent_color)),
+                        Cell::from(agent_badge_line),
                         Cell::from(label).style(Style::default().fg(color)),
                         Cell::from(activity).style(Style::default().fg(TEXT_BRIGHT)),
                         Cell::from(ctx_str).style(Style::default().fg(ctx_c)),

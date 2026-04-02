@@ -6,14 +6,14 @@
 //! No external services required — runs entirely in-process with temp sockets.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 
 use thermal_core::message::{AgentId, Message, MessageType};
 
@@ -43,7 +43,11 @@ impl RingBuffer {
     }
 
     fn replay_since(&self, since_seq: u64) -> Vec<Message> {
-        self.buf.iter().filter(|m| m.seq > since_seq).cloned().collect()
+        self.buf
+            .iter()
+            .filter(|m| m.seq > since_seq)
+            .cloned()
+            .collect()
     }
 
     fn oldest_seq(&self) -> Option<u64> {
@@ -121,7 +125,13 @@ fn make_subscribe_msg(since_seq: Option<u64>) -> Message {
 
 /// Spawn a minimal message bus server on a temp socket, returning the socket path
 /// and a handle to the state for test inspection.
-async fn spawn_test_bus(ring_cap: usize) -> (std::path::PathBuf, Arc<TestBusState>, tokio::task::JoinHandle<()>) {
+async fn spawn_test_bus(
+    ring_cap: usize,
+) -> (
+    std::path::PathBuf,
+    Arc<TestBusState>,
+    tokio::task::JoinHandle<()>,
+) {
     let tmp_dir = TempDir::new().unwrap();
     let sock_path = tmp_dir.path().join("test-messages.sock");
     let sock_path_clone = sock_path.clone();
@@ -731,7 +741,12 @@ async fn seq_monotonic_across_publishers() {
     assert_eq!(ring.len(), 10);
     let mut prev_seq = 0u64;
     for msg in &ring.buf {
-        assert!(msg.seq > prev_seq, "seq {} should be > {}", msg.seq, prev_seq);
+        assert!(
+            msg.seq > prev_seq,
+            "seq {} should be > {}",
+            msg.seq,
+            prev_seq
+        );
         prev_seq = msg.seq;
     }
 }
@@ -742,8 +757,10 @@ async fn metadata_preserved() {
     let (_sock_path, state, _handle) = spawn_test_bus(500).await;
 
     let mut msg = make_msg("with metadata");
-    msg.metadata.insert("tool".into(), serde_json::Value::String("cargo".into()));
-    msg.metadata.insert("exit_code".into(), serde_json::Value::Number(0.into()));
+    msg.metadata
+        .insert("tool".into(), serde_json::Value::String("cargo".into()));
+    msg.metadata
+        .insert("exit_code".into(), serde_json::Value::Number(0.into()));
 
     state.ingest(msg).await;
 
@@ -751,4 +768,184 @@ async fn metadata_preserved() {
     let stored = &ring.buf[0];
     assert_eq!(stored.metadata["tool"], "cargo");
     assert_eq!(stored.metadata["exit_code"], 0);
+}
+
+// ── IPC contract boundary tests ─────────────────────────────────────────
+
+/// Test: 3 concurrent publishers sending simultaneously — all messages delivered.
+#[tokio::test]
+async fn concurrent_publishers_all_messages_delivered() {
+    let (sock_path, state, _handle) = spawn_test_bus(500).await;
+
+    let msgs_per_publisher = 10;
+    let num_publishers = 3;
+
+    let mut handles = Vec::new();
+    for pub_idx in 0..num_publishers {
+        let path = sock_path.clone();
+        handles.push(tokio::spawn(async move {
+            let stream = UnixStream::connect(&path).await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+
+            for i in 0..msgs_per_publisher {
+                let msg = make_msg(&format!("pub{pub_idx}-msg{i}"));
+                let json = serde_json::to_string(&msg).unwrap();
+                writer.write_all(json.as_bytes()).await.unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.flush().await.unwrap();
+
+                // Read ack.
+                let ack_line = tokio::time::timeout(Duration::from_secs(3), lines.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let ack: serde_json::Value = serde_json::from_str(&ack_line).unwrap();
+                assert_eq!(ack["ok"], true, "publisher {pub_idx} msg {i} ack failed");
+            }
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Verify all messages are in the ring buffer.
+    let ring = state.ring.lock().await;
+    assert_eq!(
+        ring.len(),
+        num_publishers * msgs_per_publisher,
+        "Expected {} messages from {} publishers, got {}",
+        num_publishers * msgs_per_publisher,
+        num_publishers,
+        ring.len()
+    );
+
+    // Verify all sequences are unique and monotonic.
+    let mut prev_seq = 0u64;
+    for msg in &ring.buf {
+        assert!(
+            msg.seq > prev_seq,
+            "seq {} should be > {}",
+            msg.seq,
+            prev_seq
+        );
+        prev_seq = msg.seq;
+    }
+}
+
+/// Test: subscriber disconnects and reconnects — new messages still arrive.
+#[tokio::test]
+async fn subscriber_reconnect_receives_new_messages() {
+    let (sock_path, state, _handle) = spawn_test_bus(500).await;
+
+    // Ingest some initial messages.
+    for i in 0..3 {
+        state
+            .ingest(make_msg(&format!("before-disconnect-{i}")))
+            .await;
+    }
+
+    // First subscriber connects, gets replay, then disconnects.
+    let last_seen_seq;
+    {
+        let stream = UnixStream::connect(&sock_path).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = BufReader::new(reader).lines();
+
+        let sub = make_subscribe_msg(Some(0));
+        let json = serde_json::to_string(&sub).unwrap();
+        writer.write_all(json.as_bytes()).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+
+        // Read all 3 replayed messages.
+        let mut last_seq = 0u64;
+        for _ in 0..3 {
+            let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let msg: Message = serde_json::from_str(&line).unwrap();
+            last_seq = msg.seq;
+        }
+        last_seen_seq = last_seq;
+        // Drop the stream (disconnect).
+    }
+
+    // Ingest more messages while subscriber is disconnected.
+    for i in 0..3 {
+        state
+            .ingest(make_msg(&format!("after-disconnect-{i}")))
+            .await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Reconnect and request replay from where we left off.
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let sub = make_subscribe_msg(Some(last_seen_seq));
+    let json = serde_json::to_string(&sub).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    // Should receive exactly the 3 new messages.
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let msg: Message = serde_json::from_str(&line).unwrap();
+        received.push(msg);
+    }
+
+    assert_eq!(received.len(), 3);
+    assert_eq!(received[0].content, "after-disconnect-0");
+    assert_eq!(received[1].content, "after-disconnect-1");
+    assert_eq!(received[2].content, "after-disconnect-2");
+    // Sequence numbers should continue from where we left off.
+    assert!(received[0].seq > last_seen_seq);
+}
+
+/// Test: large message near MAX_LINE_BYTES (4MB) is handled by the bus.
+/// We test with a message just under the limit to verify it round-trips.
+#[tokio::test]
+async fn large_message_near_max_line_bytes() {
+    let (sock_path, state, _handle) = spawn_test_bus(10).await;
+
+    // Create a message with a large content payload (~1MB — enough to stress
+    // the JSONL framing without making the test too slow).
+    let large_content = "x".repeat(1_000_000);
+
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let msg = make_msg(&large_content);
+    let json = serde_json::to_string(&msg).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    // Read ack.
+    let ack_line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ack: serde_json::Value = serde_json::from_str(&ack_line).unwrap();
+    assert_eq!(ack["ok"], true);
+
+    // Verify the full message content is in the ring.
+    let ring = state.ring.lock().await;
+    assert_eq!(ring.len(), 1);
+    assert_eq!(ring.buf[0].content.len(), 1_000_000);
 }

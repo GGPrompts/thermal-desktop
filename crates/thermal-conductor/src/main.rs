@@ -156,6 +156,16 @@ enum Commands {
         #[arg(long)]
         report: bool,
     },
+
+    /// Show all effective settings with their sources (env, toml, default)
+    Config,
+
+    /// Run headless self-tests: cargo check, unit tests, daemon health
+    Smoke {
+        /// Auto-fix daemon issues discovered by doctor checks
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -183,8 +193,8 @@ fn main() -> Result<()> {
         .add_directive("thermal_conductor=info".parse().unwrap())
         .add_directive("thermal_core=info".parse().unwrap());
 
-    // Doctor is a quick diagnostic — suppress tracing noise.
-    if matches!(command, Commands::Doctor { .. }) {
+    // Doctor and Config are quick diagnostics — suppress tracing noise.
+    if matches!(command, Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }) {
         // No tracing init — just run silently.
     } else if matches!(command, Commands::Tui) {
     // In TUI mode, redirect logs to a file so they don't corrupt ratatui's
@@ -276,6 +286,8 @@ fn main() -> Result<()> {
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Say { text, voice } => cmd_say(text.join(" "), voice).await,
                 Commands::Doctor { fix, report } => cmd_doctor(fix, report).await,
+                Commands::Config => cmd_config().await,
+                Commands::Smoke { fix } => cmd_smoke(fix).await,
                 Commands::Window { .. } => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
@@ -1167,6 +1179,418 @@ fn doctor_execution_plan(fix: bool, report: bool, diagnostic: &DiagnosticReport)
         should_print_fix_hint: dead_count > 0 && !fix,
     }
 }
+
+// ── thc config ─────────────────────────────────────────────────────────────
+
+/// ANSI helpers for config output.
+mod config_colors {
+    pub const GREEN: &str = "\x1b[32m";   // env override
+    pub const YELLOW: &str = "\x1b[33m";  // toml value
+    pub const DIM: &str = "\x1b[2m";      // default
+    pub const BOLD: &str = "\x1b[1m";
+    pub const RESET: &str = "\x1b[0m";
+}
+
+/// Where a setting's effective value came from.
+#[derive(Clone, Copy)]
+enum ConfigSource {
+    Env,
+    Toml,
+    Default,
+}
+
+impl ConfigSource {
+    fn label(self) -> &'static str {
+        match self {
+            ConfigSource::Env => "env",
+            ConfigSource::Toml => "toml",
+            ConfigSource::Default => "default",
+        }
+    }
+
+    fn color(self) -> &'static str {
+        match self {
+            ConfigSource::Env => config_colors::GREEN,
+            ConfigSource::Toml => config_colors::YELLOW,
+            ConfigSource::Default => config_colors::DIM,
+        }
+    }
+}
+
+/// Print a single config line with colored source annotation.
+fn print_setting(key: &str, value: &str, source: ConfigSource) {
+    use config_colors::*;
+    let color = source.color();
+    println!(
+        "  {key:<30} = {color}{value:<30}{RESET} {DIM}[source: {}]{RESET}",
+        source.label()
+    );
+}
+
+/// Print a section header.
+fn print_section(title: &str) {
+    use config_colors::*;
+    println!("\n{BOLD}── {title} ──{RESET}");
+}
+
+/// Resolve a setting: check env var, then TOML section/key, then default.
+fn resolve(
+    env_var: &str,
+    toml_section: Option<&str>,
+    toml_key: Option<&str>,
+    toml_table: &toml::Table,
+    default: &str,
+) -> (String, ConfigSource) {
+    // 1. Environment variable wins.
+    if let Ok(val) = std::env::var(env_var) {
+        return (val, ConfigSource::Env);
+    }
+
+    // 2. TOML file value.
+    if let (Some(section), Some(key)) = (toml_section, toml_key) {
+        if let Some(toml::Value::Table(inner)) = toml_table.get(section) {
+            if let Some(v) = inner.get(key) {
+                let display = match v {
+                    toml::Value::String(s) => s.clone(),
+                    toml::Value::Integer(i) => i.to_string(),
+                    toml::Value::Float(f) => format!("{f:.2}"),
+                    toml::Value::Boolean(b) => b.to_string(),
+                    other => other.to_string(),
+                };
+                return (display, ConfigSource::Toml);
+            }
+        }
+    }
+
+    // 3. Default.
+    (default.to_string(), ConfigSource::Default)
+}
+
+async fn cmd_config() -> Result<()> {
+    use crate::tui::settings::{ensure_settings_file, settings_path};
+
+    // Load TOML once.
+    let toml_path = settings_path();
+    let _ = ensure_settings_file();
+    let toml_table: toml::Table = std::fs::read_to_string(&toml_path)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+
+    println!(
+        "{}Thermal Desktop — effective configuration{}\n",
+        config_colors::BOLD,
+        config_colors::RESET
+    );
+    println!(
+        "  {}Settings file:{} {}",
+        config_colors::DIM,
+        config_colors::RESET,
+        toml_path.display()
+    );
+
+    // ── Font & Display ─────────────────────────────────────────────────────
+    print_section("Font & Display");
+
+    let (val, src) = resolve(
+        "THERMAL_FONT_FAMILY", None, None, &toml_table,
+        "JetBrainsMono Nerd Font Mono",
+    );
+    print_setting("font_family", &val, src);
+
+    let (val, src) = resolve("THERMAL_FONT_SIZE", None, None, &toml_table, "17.0");
+    print_setting("font_size", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_FONT_FALLBACK", None, None, &toml_table,
+        "Noto Color Emoji",
+    );
+    print_setting("font_fallback", &val, src);
+
+    let (val, src) = resolve("THERMAL_SCROLLBACK", None, None, &toml_table, "50000");
+    print_setting("scrollback_lines", &val, src);
+
+    let (val, src) = resolve("THERMAL_BELL", None, None, &toml_table, "visual");
+    print_setting("bell_mode", &val, src);
+
+    // ── Audio & Voice ──────────────────────────────────────────────────────
+    print_section("Audio & Voice");
+
+    let (val, src) = resolve(
+        "THERMAL_AUDIO_VOICE", Some("audio"), Some("voice"), &toml_table,
+        "en-US-GuyNeural",
+    );
+    print_setting("audio.voice", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_AUDIO_SPEED", Some("audio"), Some("speed"), &toml_table,
+        "1.0",
+    );
+    print_setting("audio.speed", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_AUDIO_VOLUME", Some("audio"), Some("volume"), &toml_table,
+        "1.0",
+    );
+    print_setting("audio.volume", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_VOICE_MODE", Some("voice"), Some("mode"), &toml_table,
+        "vad",
+    );
+    print_setting("voice.mode", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_VOICE_SENSITIVITY", Some("voice"), Some("sensitivity"), &toml_table,
+        "0.6",
+    );
+    print_setting("voice.sensitivity", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_VOICE_STT_MODEL", Some("voice"), Some("stt_model"), &toml_table,
+        "base.en",
+    );
+    print_setting("voice.stt_model", &val, src);
+
+    // ── Dispatcher ─────────────────────────────────────────────────────────
+    print_section("Dispatcher");
+
+    let (val, src) = resolve(
+        "THERMAL_DISPATCHER_BACKEND", Some("dispatcher"), Some("backend"), &toml_table,
+        "ollama",
+    );
+    print_setting("dispatcher.backend", &val, src);
+
+    let (val, src) = resolve(
+        "THERMAL_DISPATCHER_MODEL", Some("dispatcher"), Some("model"), &toml_table,
+        "qwen3:8b",
+    );
+    print_setting("dispatcher.model", &val, src);
+
+    // ── Runtime Paths ──────────────────────────────────────────────────────
+    print_section("Runtime Paths");
+
+    let runtime = thermal_core::runtime::runtime_dir();
+    let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").ok();
+    let xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
+
+    if let Some(ref val) = xdg_config {
+        print_setting("XDG_CONFIG_HOME", val, ConfigSource::Env);
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "~".into());
+        print_setting(
+            "XDG_CONFIG_HOME",
+            &format!("{home}/.config"),
+            ConfigSource::Default,
+        );
+    }
+
+    if let Some(ref val) = xdg_runtime {
+        print_setting("XDG_RUNTIME_DIR", val, ConfigSource::Env);
+    } else {
+        print_setting(
+            "XDG_RUNTIME_DIR",
+            "(unset — using /run/user/<uid>)",
+            ConfigSource::Default,
+        );
+    }
+
+    print_setting(
+        "runtime_dir",
+        &runtime.display().to_string(),
+        if xdg_runtime.is_some() {
+            ConfigSource::Env
+        } else {
+            ConfigSource::Default
+        },
+    );
+    print_setting(
+        "settings_file",
+        &toml_path.display().to_string(),
+        if xdg_config.is_some() {
+            ConfigSource::Env
+        } else {
+            ConfigSource::Default
+        },
+    );
+
+    let socket_names = ["conductor", "voice", "dispatcher", "audio", "messages"];
+    for name in socket_names {
+        let sock = thermal_core::runtime::socket_path(name);
+        let exists = sock.exists();
+        let status = if exists { "exists" } else { "absent" };
+        println!(
+            "  {:<30} = {}{:<30}{} {}[{}]{}",
+            format!("{name}.sock"),
+            if exists {
+                config_colors::GREEN
+            } else {
+                config_colors::DIM
+            },
+            sock.display(),
+            config_colors::RESET,
+            config_colors::DIM,
+            status,
+            config_colors::RESET,
+        );
+    }
+
+    println!();
+    Ok(())
+}
+
+// ── thc smoke ─────────────────────────────────────────────────────────────
+
+/// A single step result in the smoke test pipeline.
+struct SmokeStepResult {
+    name: &'static str,
+    passed: bool,
+    duration: std::time::Duration,
+    detail: Option<String>,
+}
+
+async fn cmd_smoke(fix: bool) -> Result<()> {
+    println!("\n  \x1b[1;36m▸ thc smoke\x1b[0m — headless verification\n");
+
+    let mut results: Vec<SmokeStepResult> = Vec::new();
+
+    // Step 1: cargo check --workspace
+    {
+        let start = std::time::Instant::now();
+        let output = tokio::process::Command::new("cargo")
+            .args(["check", "--workspace"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await;
+        let duration = start.elapsed();
+        let (passed, detail) = match output {
+            Ok(o) if o.status.success() => (true, None),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let last_lines: String = stderr.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                (false, Some(last_lines))
+            }
+            Err(e) => (false, Some(format!("failed to run cargo: {e}"))),
+        };
+        print_step_progress("cargo check", passed);
+        results.push(SmokeStepResult { name: "cargo check --workspace", passed, duration, detail });
+    }
+
+    // Step 2: cargo test --workspace --lib
+    {
+        let start = std::time::Instant::now();
+        let output = tokio::process::Command::new("cargo")
+            .args(["test", "--workspace", "--lib"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await;
+        let duration = start.elapsed();
+        let (passed, detail) = match output {
+            Ok(o) if o.status.success() => (true, None),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let combined = format!("{stderr}\n{stdout}");
+                let last_lines: String = combined.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                (false, Some(last_lines))
+            }
+            Err(e) => (false, Some(format!("failed to run cargo: {e}"))),
+        };
+        print_step_progress("cargo test --lib", passed);
+        results.push(SmokeStepResult { name: "cargo test --workspace --lib", passed, duration, detail });
+    }
+
+    // Step 3: doctor health checks
+    {
+        let start = std::time::Instant::now();
+        let diagnostic = build_diagnostic_report().await;
+        let duration = start.elapsed();
+
+        let dead_count = diagnostic
+            .daemon_results
+            .iter()
+            .filter(|d| d.health == DaemonHealth::Dead)
+            .count();
+
+        let passed = dead_count == 0;
+        let detail = if !passed {
+            let dead_names: Vec<String> = diagnostic
+                .daemon_results
+                .iter()
+                .filter(|d| d.health == DaemonHealth::Dead)
+                .map(|d| d.name.clone())
+                .collect();
+            Some(format!("dead daemons: {}", dead_names.join(", ")))
+        } else {
+            None
+        };
+
+        print_step_progress("daemon health", passed);
+        results.push(SmokeStepResult { name: "daemon health (doctor)", passed, duration, detail });
+
+        // If --fix and there are dead daemons, run fix logic
+        if fix && dead_count > 0 {
+            println!("    \x1b[33m→ fixing dead daemons...\x1b[0m");
+            let run_dir = thermal_core::runtime::runtime_dir();
+            for (i, spec) in DAEMONS.iter().enumerate() {
+                if diagnostic.daemon_results[i].health == DaemonHealth::Dead {
+                    fix_daemon(spec, &run_dir).await;
+                }
+            }
+        }
+    }
+
+    // Summary table
+    println!();
+    println!("  \x1b[1m{:<32} {:>6}  {:>8}\x1b[0m", "Step", "Result", "Duration");
+    println!("  {}", "─".repeat(50));
+
+    let mut all_passed = true;
+    for r in &results {
+        let status = if r.passed {
+            "\x1b[32m PASS \x1b[0m"
+        } else {
+            all_passed = false;
+            "\x1b[31m FAIL \x1b[0m"
+        };
+        let dur = format_duration(r.duration);
+        println!("  {:<32} {}  {:>8}", r.name, status, dur);
+        if let Some(ref detail) = r.detail {
+            for line in detail.lines().take(4) {
+                println!("    \x1b[90m{line}\x1b[0m");
+            }
+        }
+    }
+
+    println!();
+    if all_passed {
+        println!("  \x1b[32;1m✓ All checks passed.\x1b[0m\n");
+        Ok(())
+    } else {
+        println!("  \x1b[31;1m✗ Some checks failed.\x1b[0m\n");
+        std::process::exit(1);
+    }
+}
+
+/// Print a live progress indicator for a smoke step.
+fn print_step_progress(name: &str, passed: bool) {
+    let icon = if passed { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+    println!("  {icon} {name}");
+}
+
+/// Format a duration as human-readable (e.g., "1.2s", "340ms").
+fn format_duration(d: std::time::Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", d.as_secs_f64())
+    }
+}
+
+// ── thc doctor ─────────────────────────────────────────────────────────────
 
 async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
     let diagnostic = build_diagnostic_report().await;

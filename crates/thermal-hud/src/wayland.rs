@@ -483,15 +483,35 @@ pub async fn run() -> anyhow::Result<()> {
                 sessions
                     .sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
 
-                // Clamp active tab index.
-                if !sessions.is_empty() && active_tab >= sessions.len() {
-                    active_tab = sessions.len() - 1;
+                // Partition into parent sessions and subagents.
+                // Only parent tabs are rendered full-width; subagents become
+                // compact emoji icons on their parent's tab.
+                let mut subagent_map: std::collections::HashMap<
+                    String,
+                    Vec<thermal_core::ClaudeSessionState>,
+                > = std::collections::HashMap::new();
+                let mut parents: Vec<thermal_core::ClaudeSessionState> = Vec::new();
+
+                for s in sessions {
+                    if let Some(ref parent_id) = s.parent_session_id {
+                        subagent_map
+                            .entry(parent_id.clone())
+                            .or_default()
+                            .push(s);
+                    } else {
+                        parents.push(s);
+                    }
                 }
 
-                // Rebuild click regions from session tab layout.
-                build_tab_click_regions(&sessions, hud.width as f32, &mut hud.click_regions);
+                // Clamp active tab index.
+                if !parents.is_empty() && active_tab >= parents.len() {
+                    active_tab = parents.len() - 1;
+                }
 
-                renderer.render_tabs(&sessions, active_tab)
+                // Rebuild click regions from parent session tab layout.
+                build_tab_click_regions(&parents, hud.width as f32, &mut hud.click_regions);
+
+                renderer.render_tabs(&parents, active_tab, &subagent_map)
             }
         };
 

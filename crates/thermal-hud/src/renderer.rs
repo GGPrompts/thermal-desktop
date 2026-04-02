@@ -103,6 +103,8 @@ const CONTEXT_BAR_HEIGHT: f32 = 4.0;
 const STATUS_DOT_SIZE: f32 = 8.0;
 /// Left margin before first tab.
 const LEFT_MARGIN: f32 = 8.0;
+/// Size of each subagent icon in the compact strip.
+const SUBAGENT_ICON_SIZE: f32 = 14.0;
 
 // ---------------------------------------------------------------------------
 // Renderer
@@ -281,6 +283,7 @@ impl Renderer {
         &mut self,
         sessions: &[ClaudeSessionState],
         active_tab: usize,
+        subagent_map: &HashMap<String, Vec<ClaudeSessionState>>,
     ) -> anyhow::Result<()> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
@@ -436,6 +439,57 @@ impl Renderer {
                 let bar_color = context_bar_color(ctx_pct);
                 if bar_width > 0.0 {
                     rect_quads.push(([tab_x, bar_y, bar_width, CONTEXT_BAR_HEIGHT], bar_color));
+                }
+
+                // Subagent icon strip — compact emoji indicators for child sessions.
+                if let Some(subagents) = subagent_map.get(&session.session_id) {
+                    if !subagents.is_empty() {
+                        let icon_y = bar_y - SUBAGENT_ICON_SIZE - 2.0;
+                        let icon_start_x =
+                            tab_x + tab_width - TAB_PADDING - (subagents.len() as f32 * (SUBAGENT_ICON_SIZE + 2.0));
+
+                        for (j, sub) in subagents.iter().enumerate() {
+                            let ix = icon_start_x + j as f32 * (SUBAGENT_ICON_SIZE + 2.0);
+
+                            // Determine if this subagent needs attention.
+                            let needs_attention =
+                                matches!(sub.status, ClaudeStatus::AwaitingInput)
+                                    || sub.consecutive_failures.unwrap_or(0) > 0;
+
+                            // Background highlight for attention-needing subagents.
+                            if needs_attention {
+                                rect_quads.push((
+                                    [ix - 1.0, icon_y - 1.0, SUBAGENT_ICON_SIZE + 2.0, SUBAGENT_ICON_SIZE + 2.0],
+                                    ThermalPalette::SEARING,
+                                ));
+                            }
+
+                            // Tool-specific emoji.
+                            let emoji = subagent_tool_emoji(sub.current_tool.as_deref());
+                            let mut icon_buf =
+                                Buffer::new(&mut self.font_system, Metrics::new(11.0, 14.0));
+                            icon_buf.set_size(
+                                &mut self.font_system,
+                                Some(SUBAGENT_ICON_SIZE),
+                                Some(SUBAGENT_ICON_SIZE),
+                            );
+                            icon_buf.set_text(
+                                &mut self.font_system,
+                                emoji,
+                                Attrs::new().family(Family::SansSerif),
+                                Shaping::Advanced,
+                            );
+                            icon_buf.shape_until_scroll(&mut self.font_system, false);
+                            let icon_idx = text_buffers.len();
+                            text_buffers.push(icon_buf);
+                            let icon_color = if needs_attention {
+                                ThermalPalette::BG
+                            } else {
+                                ThermalPalette::TEXT_MUTED
+                            };
+                            text_placements.push((icon_idx, ix, icon_y, icon_color));
+                        }
+                    }
                 }
             }
         }
@@ -1068,6 +1122,25 @@ fn display_name_for_session(
         session.session_id.clone()
     } else {
         format!("{}...", &session.session_id[..7])
+    }
+}
+
+/// Map a subagent's current_tool to a compact emoji indicator.
+///
+/// Tool categories:
+/// - Edit/Write → ✏️
+/// - Read → 📖
+/// - Grep/Glob → 🔍
+/// - Bash → 💻
+/// - No tool / thinking → ⏳
+fn subagent_tool_emoji(tool: Option<&str>) -> &'static str {
+    match tool {
+        Some(t) if t.contains("Edit") || t.contains("Write") => "\u{270F}\u{FE0F}",
+        Some(t) if t.contains("Read") => "\u{1F4D6}",
+        Some(t) if t.contains("Grep") || t.contains("Glob") => "\u{1F50D}",
+        Some(t) if t.contains("Bash") => "\u{1F4BB}",
+        Some(t) if t.contains("TodoWrite") || t.contains("Agent") => "\u{1F916}",
+        _ => "\u{23F3}",
     }
 }
 

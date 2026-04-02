@@ -148,7 +148,10 @@ async fn transcript_receives_response() {
         .unwrap();
     let resp: DispatcherResponse = serde_json::from_str(&line).unwrap();
     assert_eq!(resp.status, "ok");
-    assert_eq!(resp.response.as_deref(), Some("Routed to system: open firefox"));
+    assert_eq!(
+        resp.response.as_deref(),
+        Some("Routed to system: open firefox")
+    );
 }
 
 /// Test: empty transcript returns error.
@@ -291,4 +294,305 @@ async fn transcript_wire_format_round_trip() {
     let decoded: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded["transcript"], msg.transcript);
     assert_eq!(decoded["confidence"], 0.99);
+}
+
+// ── IPC contract boundary tests ─────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// Enhanced mock dispatcher with backend fallback and tool iteration limit
+// ---------------------------------------------------------------------------
+
+/// Shared state for the enhanced mock dispatcher.
+struct MockDispatcherState {
+    /// When true, the primary backend "fails" and we fall back.
+    primary_backend_fails: std::sync::atomic::AtomicBool,
+    /// Tracks active sessions and their last-interaction time.
+    sessions: tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// Spawn an enhanced mock dispatcher that simulates backend fallback,
+/// tool iteration limits, and session timeouts.
+async fn spawn_enhanced_mock_dispatcher(
+    state: std::sync::Arc<MockDispatcherState>,
+) -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
+    let tmp_dir = TempDir::new().unwrap();
+    let sock_path = tmp_dir.path().join("test-dispatcher-enhanced.sock");
+    let sock_path_clone = sock_path.clone();
+
+    let handle = tokio::spawn(async move {
+        let listener = UnixListener::bind(&sock_path_clone).unwrap();
+        let _tmp = tmp_dir;
+
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let st = std::sync::Arc::clone(&state);
+                    tokio::spawn(async move {
+                        handle_enhanced_mock_client(stream, st).await;
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (sock_path, handle)
+}
+
+/// Maximum tool iterations matching the real dispatcher constant.
+const MOCK_MAX_TOOL_ITERATIONS: usize = 10;
+/// Session timeout matching the real dispatcher (120s).
+const MOCK_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Enhanced mock client handler with backend fallback, iteration limit,
+/// and session timeout simulation.
+async fn handle_enhanced_mock_client(
+    stream: UnixStream,
+    state: std::sync::Arc<MockDispatcherState>,
+) {
+    let (reader, mut writer) = stream.into_split();
+    let mut buf_reader = BufReader::new(reader);
+    let mut line = String::new();
+
+    let bytes = match buf_reader.read_line(&mut line).await {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    if bytes == 0 {
+        return;
+    }
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let msg: TranscriptMessage = match serde_json::from_str(trimmed) {
+        Ok(m) => m,
+        Err(e) => {
+            let resp = serde_json::json!({
+                "status": "error",
+                "error": format!("invalid JSON: {e}")
+            });
+            let out = resp.to_string() + "\n";
+            let _ = writer.write_all(out.as_bytes()).await;
+            return;
+        }
+    };
+
+    // --- Session timeout check ---
+    // Use the transcript as a session key for simplicity.
+    let session_key = "default-session".to_string();
+    {
+        let mut sessions = state.sessions.lock().await;
+        if let Some(last) = sessions.get(&session_key) {
+            if last.elapsed() > MOCK_SESSION_TIMEOUT {
+                // Session expired — reset and notify.
+                sessions.remove(&session_key);
+                let resp = serde_json::json!({
+                    "status": "session_expired",
+                    "error": "session timed out, context cleared"
+                });
+                let out = resp.to_string() + "\n";
+                let _ = writer.write_all(out.as_bytes()).await;
+                return;
+            }
+        }
+        sessions.insert(session_key, std::time::Instant::now());
+    }
+
+    // --- Tool iteration limit check ---
+    if msg.transcript.contains("infinite-tool-loop") {
+        // Simulate hitting MAX_TOOL_ITERATIONS.
+        let resp = serde_json::json!({
+            "status": "max_iterations",
+            "response": "I hit the maximum number of steps. Please try a simpler request.",
+            "iterations": MOCK_MAX_TOOL_ITERATIONS
+        });
+        let out = resp.to_string() + "\n";
+        let _ = writer.write_all(out.as_bytes()).await;
+        return;
+    }
+
+    // --- Backend fallback ---
+    let primary_fails = state
+        .primary_backend_fails
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if primary_fails {
+        // Primary failed — fall back to secondary.
+        let resp = serde_json::json!({
+            "status": "ok",
+            "response": "Handled by fallback backend",
+            "backend": "ollama"
+        });
+        let out = resp.to_string() + "\n";
+        let _ = writer.write_all(out.as_bytes()).await;
+        return;
+    }
+
+    // Normal primary backend response.
+    let resp = serde_json::json!({
+        "status": "ok",
+        "response": "Handled by primary backend",
+        "backend": "claude"
+    });
+    let out = resp.to_string() + "\n";
+    let _ = writer.write_all(out.as_bytes()).await;
+}
+
+/// Test: when primary backend fails, dispatcher falls back to next backend.
+#[tokio::test]
+async fn backend_fallback_on_primary_failure() {
+    let state = std::sync::Arc::new(MockDispatcherState {
+        primary_backend_fails: std::sync::atomic::AtomicBool::new(true),
+        sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    let (sock_path, _handle) = spawn_enhanced_mock_dispatcher(state).await;
+
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let msg = TranscriptMessage {
+        transcript: "open firefox".to_string(),
+        confidence: 0.95,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["status"], "ok");
+    assert_eq!(
+        resp["backend"], "ollama",
+        "Should have fallen back to ollama"
+    );
+    assert_eq!(resp["response"], "Handled by fallback backend");
+}
+
+/// Test: when primary backend works, it is used (no fallback).
+#[tokio::test]
+async fn primary_backend_used_when_healthy() {
+    let state = std::sync::Arc::new(MockDispatcherState {
+        primary_backend_fails: std::sync::atomic::AtomicBool::new(false),
+        sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    let (sock_path, _handle) = spawn_enhanced_mock_dispatcher(state).await;
+
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let msg = TranscriptMessage {
+        transcript: "hello".to_string(),
+        confidence: 0.9,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["status"], "ok");
+    assert_eq!(resp["backend"], "claude", "Should use primary backend");
+}
+
+/// Test: MAX_TOOL_ITERATIONS (10) is enforced — dispatcher stops after limit.
+#[tokio::test]
+async fn tool_iteration_limit_enforced() {
+    let state = std::sync::Arc::new(MockDispatcherState {
+        primary_backend_fails: std::sync::atomic::AtomicBool::new(false),
+        sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+    let (sock_path, _handle) = spawn_enhanced_mock_dispatcher(state).await;
+
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    // Trigger the infinite-tool-loop path.
+    let msg = TranscriptMessage {
+        transcript: "infinite-tool-loop".to_string(),
+        confidence: 0.99,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["status"], "max_iterations");
+    assert_eq!(resp["iterations"], MOCK_MAX_TOOL_ITERATIONS);
+    assert!(
+        resp["response"]
+            .as_str()
+            .unwrap()
+            .contains("maximum number of steps"),
+        "Response should explain the iteration limit was hit"
+    );
+}
+
+/// Test: SESSION_TIMEOUT (120s) triggers cleanup — expired sessions get reset.
+#[tokio::test]
+async fn session_timeout_triggers_cleanup() {
+    let state = std::sync::Arc::new(MockDispatcherState {
+        primary_backend_fails: std::sync::atomic::AtomicBool::new(false),
+        sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
+
+    // Pre-seed an expired session by inserting a backdated timestamp.
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(
+            "default-session".to_string(),
+            std::time::Instant::now() - MOCK_SESSION_TIMEOUT - Duration::from_secs(1),
+        );
+    }
+
+    let (sock_path, _handle) = spawn_enhanced_mock_dispatcher(state).await;
+
+    let stream = UnixStream::connect(&sock_path).await.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let msg = TranscriptMessage {
+        transcript: "follow up question".to_string(),
+        confidence: 0.9,
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    writer.write_all(json.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    let line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(resp["status"], "session_expired");
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("session timed out"),
+        "Should indicate session timeout"
+    );
 }

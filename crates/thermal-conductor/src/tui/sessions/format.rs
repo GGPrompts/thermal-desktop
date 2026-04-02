@@ -45,24 +45,16 @@ pub(super) fn status_color(status: &ClaudeStatus) -> Color {
     }
 }
 
-/// Emoji badge and color for the agent type column.
-/// Subagent count renders next to the emoji: `\u{1F916}x3`.
-pub(super) fn agent_type_badge(session: &ClaudeSessionState) -> (String, Color) {
-    let (emoji, color) = match session.agent_type.as_deref() {
-        Some("copilot") => ("\u{1F916}", pal(ThermalPalette::ACCENT_HOT)),
-        Some("codex") => ("\u{1F916}", pal(ThermalPalette::ACCENT_COOL)),
-        _ => ("\u{1F916}", pal(ThermalPalette::ACCENT_WARM)),
-    };
-
-    let label = if let Some(n) = session.subagent_count
-        && n > 0
-    {
-        format!("{}x{}", emoji, n)
-    } else {
-        emoji.to_string()
-    };
-
-    (label, color)
+/// Color for the agent type column icon.
+/// Returns the robot emoji and the palette accent color for this agent type.
+/// Copilot uses ACCENT_NEUTRAL (teal-green) for better visual differentiation
+/// from searing red used elsewhere in the thermal palette.
+pub(super) fn agent_type_color(session: &ClaudeSessionState) -> Color {
+    match session.agent_type.as_deref() {
+        Some("copilot") => pal(ThermalPalette::ACCENT_NEUTRAL),
+        Some("codex") => pal(ThermalPalette::ACCENT_COOL),
+        _ => pal(ThermalPalette::ACCENT_WARM),
+    }
 }
 
 pub(super) fn status_label(status: &ClaudeStatus) -> &'static str {

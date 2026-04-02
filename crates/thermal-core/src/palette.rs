@@ -79,7 +79,7 @@ impl Color {
     pub const TEXT_MUTED: Color = Color::from_hex(0x9b8dd1);
 
     // Accents
-    pub const ACCENT_COLD: Color = Color::from_hex(0x6366f1);
+    pub const ACCENT_COLD: Color = Color::from_hex(0x818cf8);
     pub const ACCENT_COOL: Color = Color::from_hex(0x3b82f6);
     pub const ACCENT_NEUTRAL: Color = Color::from_hex(0x14b8a6);
     pub const ACCENT_WARM: Color = Color::from_hex(0xf59e0b);
@@ -540,7 +540,7 @@ impl ThermalPalette {
     pub const TEXT_MUTED: [f32; 4] = Self::hex(0x9b, 0x8d, 0xd1);
 
     // Accents
-    pub const ACCENT_COLD: [f32; 4] = Self::hex(0x63, 0x66, 0xf1);
+    pub const ACCENT_COLD: [f32; 4] = Self::hex(0x81, 0x8c, 0xf8);
     pub const ACCENT_COOL: [f32; 4] = Self::hex(0x3b, 0x82, 0xf6);
     pub const ACCENT_NEUTRAL: [f32; 4] = Self::hex(0x14, 0xb8, 0xa6);
     pub const ACCENT_WARM: [f32; 4] = Self::hex(0xf5, 0x9e, 0x0b);

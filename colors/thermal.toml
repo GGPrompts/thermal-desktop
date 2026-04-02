@@ -30,7 +30,7 @@ text_bright = "#e9e0ff"
 text_muted  = "#9b8dd1"
 
 [accent]
-accent_cold    = "#6366f1"
+accent_cold    = "#818cf8"
 accent_cool    = "#3b82f6"
 accent_neutral = "#14b8a6"
 accent_warm    = "#f59e0b"

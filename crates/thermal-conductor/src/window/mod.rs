@@ -145,13 +145,23 @@ pub fn run() -> anyhow::Result<()> {
         .unwrap_or_else(|| {
             *caps.formats.first().unwrap_or(&wgpu::TextureFormat::Bgra8Unorm)
         });
+    // Prefer PreMultiplied alpha for compositor transparency (wallpaper shows through).
+    // Fall back to Auto if the surface doesn't support it.
+    let alpha_mode = if caps
+        .alpha_modes
+        .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+    {
+        wgpu::CompositeAlphaMode::PreMultiplied
+    } else {
+        wgpu::CompositeAlphaMode::Auto
+    };
     let surface_config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         present_mode: wgpu::PresentMode::Fifo,
-        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        alpha_mode,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };

@@ -66,19 +66,19 @@ pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
         NamedColor::Cyan => PaletteColor::ACCENT_NEUTRAL.to_f32_array(), // color6  #14b8a6
         NamedColor::White | NamedColor::Foreground => PaletteColor::TEXT_BRIGHT.to_f32_array(), // color7 #e9e0ff
 
-        NamedColor::BrightBlack => [0.42, 0.35, 0.69, 1.0], // color8  #6b5aaf — lighter gray
-        NamedColor::BrightRed => PaletteColor::CRITICAL.to_f32_array(), // color9  #dc2626
-        NamedColor::BrightGreen => PaletteColor::MILD.to_f32_array(), // color10 #0d9488
+        NamedColor::BrightBlack => [0.53, 0.47, 0.78, 1.0], // color8  #8878c7 — brighter comment gray
+        NamedColor::BrightRed => [0.97, 0.45, 0.45, 1.0], // color9  #f87171 — lifted red (was #dc2626, dimmer than Red)
+        NamedColor::BrightGreen => [0.20, 0.83, 0.60, 1.0], // color10 #34d399 — bright mint (was MILD #0d9488, dimmer than Green)
         NamedColor::BrightYellow => PaletteColor::HOTTER.to_f32_array(), // color11 #f97316
         NamedColor::BrightBlue => PaletteColor::ACCENT_COLD.to_f32_array(), // color12 #818cf8
         NamedColor::BrightMagenta => PaletteColor::TEXT.to_f32_array(), // color13 #c4b5fd
-        NamedColor::BrightCyan => PaletteColor::MILD.to_f32_array(),  // color14 #0d9488
+        NamedColor::BrightCyan => [0.18, 0.83, 0.75, 1.0],  // color14 #2dd4bf — bright teal (was MILD #0d9488, dimmer than Cyan)
         NamedColor::BrightWhite | NamedColor::BrightForeground => {
             PaletteColor::WHITE_HOT.to_f32_array() // color15 #fef3c7
         }
 
         NamedColor::DimBlack => TERM_BG,
-        NamedColor::DimRed => PaletteColor::SEARING.to_f32_array(),
+        NamedColor::DimRed => PaletteColor::CRITICAL.to_f32_array(), // #dc2626 — darker than Red's SEARING
         NamedColor::DimGreen => [0.17, 0.72, 0.66, 1.0], // #2ab8a8 — brighter teal
         NamedColor::DimYellow => PaletteColor::HOTTER.to_f32_array(),
         NamedColor::DimBlue => [0.20, 0.47, 0.95, 1.0], // #3378f2 — slight lift over COOL

@@ -30,9 +30,19 @@ use crate::kitty_graphics::ImageStore;
 /// so they don't draw redundant bg rects over this clear color.
 pub(crate) const TERM_BG: [f32; 4] = [10.0 / 255.0, 0.0, 16.0 / 255.0, 1.0]; // #0a0010
 
-/// Return TERM_BG for use as the wgpu clear color.
+/// Background opacity (0.0 = fully transparent, 1.0 = fully opaque).
+/// Matches kitty's `background_opacity 0.90` — set slightly higher for subtlety.
+const BG_OPACITY: f32 = 0.92;
+
+/// Return TERM_BG with reduced alpha for compositor transparency.
+/// RGB values are pre-multiplied by alpha for CompositeAlphaMode::PreMultiplied.
 pub fn clear_color() -> [f32; 4] {
-    TERM_BG
+    [
+        TERM_BG[0] * BG_OPACITY,
+        TERM_BG[1] * BG_OPACITY,
+        TERM_BG[2] * BG_OPACITY,
+        BG_OPACITY,
+    ]
 }
 
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────

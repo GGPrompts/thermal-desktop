@@ -903,27 +903,27 @@ mod tests {
     // ── ctx_color thresholds ──────────────────────────────────────────────────
 
     #[test]
-    fn ctx_color_below_50_is_green() {
-        assert_eq!(ctx_color(0.0), Color::Green);
-        assert_eq!(ctx_color(49.9), Color::Green);
+    fn ctx_color_below_50_is_cold() {
+        assert_eq!(ctx_color(0.0), pal(ThermalPalette::COLD));
+        assert_eq!(ctx_color(49.9), pal(ThermalPalette::COLD));
     }
 
     #[test]
-    fn ctx_color_50_to_74_is_yellow() {
-        assert_eq!(ctx_color(50.0), Color::Yellow);
-        assert_eq!(ctx_color(74.9), Color::Yellow);
+    fn ctx_color_50_to_74_is_warm() {
+        assert_eq!(ctx_color(50.0), pal(ThermalPalette::WARM));
+        assert_eq!(ctx_color(74.9), pal(ThermalPalette::WARM));
     }
 
     #[test]
-    fn ctx_color_75_to_89_is_orange() {
-        assert_eq!(ctx_color(75.0), Color::Rgb(249, 115, 22));
-        assert_eq!(ctx_color(89.9), Color::Rgb(249, 115, 22));
+    fn ctx_color_75_to_89_is_hotter() {
+        assert_eq!(ctx_color(75.0), pal(ThermalPalette::HOTTER));
+        assert_eq!(ctx_color(89.9), pal(ThermalPalette::HOTTER));
     }
 
     #[test]
-    fn ctx_color_90_and_above_is_red() {
-        assert_eq!(ctx_color(90.0), Color::Red);
-        assert_eq!(ctx_color(100.0), Color::Red);
+    fn ctx_color_90_and_above_is_searing() {
+        assert_eq!(ctx_color(90.0), pal(ThermalPalette::SEARING));
+        assert_eq!(ctx_color(100.0), pal(ThermalPalette::SEARING));
     }
 
     // ── format_activity ───────────────────────────────────────────────────────

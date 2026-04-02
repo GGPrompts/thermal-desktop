@@ -494,14 +494,15 @@ impl ProfilesPage {
                                 // Create the daemon session for tracking /
                                 // state inference.
                                 let session_id = match client
-                                    .spawn_session(
+                                    .spawn_session_named(
                                         Some(command.clone()),
                                         Some(effective_cwd.clone()),
                                         worktree,
+                                        profile_clone.clone(),
                                     )
                                     .await
                                 {
-                                    Ok(id) => id,
+                                    Ok((id, _name)) => id,
                                     Err(e) => {
                                         tracing::error!("Daemon spawn failed: {e}");
                                         last_err = Some(format!("{e}"));
@@ -509,41 +510,34 @@ impl ProfilesPage {
                                     }
                                 };
 
-                                // Launch a visible terminal window so the
-                                // user can actually see the session.  Try
-                                // `kitty` first (new instance, no remote
-                                // control required), then fall back to common
-                                // terminal emulators.
-                                let title = format!("thc:{session_id}");
-                                let visible = launch_visible_terminal(
-                                    &command,
-                                    &effective_cwd,
-                                    &title,
-                                );
+                                // Launch a GPU terminal window that attaches
+                                // to the daemon session as a client.  The
+                                // daemon owns the PTY; the window only renders
+                                // its output and forwards input.
+                                let visible = launch_window_for_session(&session_id);
                                 match visible {
                                     Ok(()) => {
                                         spawned += 1;
                                         tracing::info!(
                                             session = %session_id,
-                                            "Daemon session + visible terminal launched"
+                                            "Daemon session + attached window launched"
                                         );
                                     }
                                     Err(e) => {
-                                        // The daemon session exists but is
-                                        // headless — still count it as
-                                        // spawned but warn the user.
+                                        // The daemon session exists but we
+                                        // couldn't open a window — still
+                                        // count it as spawned but warn.
                                         spawned += 1;
                                         tracing::warn!(
                                             session = %session_id,
                                             error = %e,
                                             "Daemon session spawned headless \
-                                             (no terminal emulator found)"
+                                             (failed to launch thc window)"
                                         );
                                         if last_err.is_none() {
                                             last_err = Some(format!(
                                                 "Session(s) spawned headless — \
-                                                 no terminal emulator available \
-                                                 to display them: {e}"
+                                                 failed to launch window: {e}"
                                             ));
                                         }
                                     }
@@ -1586,7 +1580,29 @@ impl ProfilesPage {
 /// 3. `foot`
 /// 4. `xterm` (last resort)
 ///
+/// Launch a `thc window --session <id>` process that attaches to an existing
+/// daemon session as a client.  The daemon owns the PTY; the window only
+/// renders output and forwards input — no double-execution.
+fn launch_window_for_session(session_id: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    // Find our own binary (thc) to launch the window subcommand.
+    let thc_bin = std::env::current_exe()
+        .map_err(|e| format!("Failed to determine thc binary path: {e}"))?;
+
+    Command::new(&thc_bin)
+        .args(["window", "--session", session_id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to launch thc window: {e}"))?;
+
+    Ok(())
+}
+
 /// The spawned process is detached (will not block the TUI).
+#[allow(dead_code)]
 fn launch_visible_terminal(command: &str, cwd: &str, title: &str) -> Result<(), String> {
     use std::process::Command;
 

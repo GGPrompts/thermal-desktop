@@ -71,7 +71,7 @@ const DEFAULT_HEIGHT: u32 = 800;
 
 
 /// Launch the SCTK + wgpu window with a live terminal.
-pub fn run() -> anyhow::Result<()> {
+pub fn run(attach_session_id: Option<String>) -> anyhow::Result<()> {
     tracing::info!("thermal-conductor window starting");
 
     // ── Wayland connection ────────────────────────────────────────────────────
@@ -253,32 +253,38 @@ pub fn run() -> anyhow::Result<()> {
 
                 tracing::info!("Session daemon available — entering client mode");
 
-                // List existing sessions.
-                let sessions = match client.list_sessions().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("Failed to list sessions: {e} — falling back to standalone");
-                        return setup_standalone_session(
-                            &mut terminal,
-                            init_cols,
-                            init_rows,
-                            Arc::clone(&pty_dirty),
-                            wakeup_write,
-                        );
-                    }
-                };
+                // If a specific session ID was requested (e.g. from the TUI
+                // profiles page), attach to it directly instead of spawning.
+                let session_id = if let Some(ref requested_id) = attach_session_id {
+                    tracing::info!(id = %requested_id, "Attaching to existing daemon session");
+                    requested_id.clone()
+                } else {
+                    // List existing sessions.
+                    let sessions = match client.list_sessions().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!("Failed to list sessions: {e} — falling back to standalone");
+                            return setup_standalone_session(
+                                &mut terminal,
+                                init_cols,
+                                init_rows,
+                                Arc::clone(&pty_dirty),
+                                wakeup_write,
+                            );
+                        }
+                    };
 
-                // Always spawn a fresh session. Reusing orphaned sessions from
-                // previous windows leads to stale shells with wrong terminal
-                // size and leftover state. Orphaned sessions (alive but 0
-                // connected clients) are cleaned up below.
-                for orphan in sessions.iter().filter(|s| s.is_alive && s.connected_client_count == 0) {
-                    tracing::info!(id = %orphan.id, "Killing orphaned daemon session");
-                    let _ = client.send(crate::protocol::Request::KillSession {
-                        id: orphan.id.clone(),
-                    }).await;
-                }
-                let session_id = {
+                    // Always spawn a fresh session. Reusing orphaned sessions from
+                    // previous windows leads to stale shells with wrong terminal
+                    // size and leftover state. Orphaned sessions (alive but 0
+                    // connected clients) are cleaned up below.
+                    for orphan in sessions.iter().filter(|s| s.is_alive && s.connected_client_count == 0) {
+                        tracing::info!(id = %orphan.id, "Killing orphaned daemon session");
+                        let _ = client.send(crate::protocol::Request::KillSession {
+                            id: orphan.id.clone(),
+                        }).await;
+                    }
+
                     let shell =
                         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                     match client.spawn_session(Some(shell), None, false).await {

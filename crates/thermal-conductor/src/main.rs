@@ -127,7 +127,13 @@ enum Commands {
     },
 
     /// Launch the GPU-rendered terminal window
-    Window,
+    Window {
+        /// Attach to an existing daemon session instead of spawning a new one.
+        /// Used by the TUI profiles page to connect a visible window to a
+        /// daemon-owned PTY session.
+        #[arg(long)]
+        session: Option<String>,
+    },
 
     /// Start the session daemon (PTY ownership, Unix socket server)
     Daemon,
@@ -227,8 +233,8 @@ fn main() -> Result<()> {
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
     // so it must run outside of #[tokio::main] to avoid nested runtime panic.
-    if matches!(command, Commands::Window) {
-        return window::run();
+    if let Commands::Window { ref session } = command {
+        return window::run(session.clone());
     }
 
     // Daemon subcommand runs a long-lived async event loop.
@@ -260,7 +266,7 @@ fn main() -> Result<()> {
                 Commands::Audio { action } => cmd_audio(action).await,
                 Commands::Say { text, voice } => cmd_say(text.join(" "), voice).await,
                 Commands::Doctor { fix, report } => cmd_doctor(fix, report).await,
-                Commands::Window => unreachable!(),
+                Commands::Window { .. } => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
             }

@@ -39,6 +39,8 @@ pub struct DaemonClient {
     socket_path: PathBuf,
     /// Request timeout duration.
     timeout: Duration,
+    /// Handles for the reader and writer IO tasks, aborted on reconnect.
+    io_task_handles: Option<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)>,
 }
 
 #[allow(dead_code)]
@@ -96,19 +98,28 @@ impl DaemonClient {
 
         info!(path = %socket_path.display(), "Connected to session daemon");
 
-        let (request_tx, response_rx) = Self::spawn_io_tasks(stream);
+        let (request_tx, response_rx, writer_handle, reader_handle) =
+            Self::spawn_io_tasks(stream);
 
         Ok(Some(Self {
             request_tx,
             response_rx,
             socket_path,
             timeout: DEFAULT_TIMEOUT,
+            io_task_handles: Some((writer_handle, reader_handle)),
         }))
     }
 
     /// Spawn reader and writer tasks for a connected stream.
-    /// Returns the (request_sender, response_receiver) pair.
-    fn spawn_io_tasks(stream: UnixStream) -> (mpsc::Sender<Request>, mpsc::Receiver<Response>) {
+    /// Returns the (request_sender, response_receiver, writer_handle, reader_handle).
+    fn spawn_io_tasks(
+        stream: UnixStream,
+    ) -> (
+        mpsc::Sender<Request>,
+        mpsc::Receiver<Response>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (reader, mut writer) = stream.into_split();
 
         // Channel for outgoing requests.
@@ -118,7 +129,7 @@ impl DaemonClient {
         let (response_tx, response_rx) = mpsc::channel::<Response>(64);
 
         // Spawn writer task: sends requests to the daemon.
-        tokio::spawn(async move {
+        let writer_handle = tokio::spawn(async move {
             while let Some(request) = request_rx.recv().await {
                 match protocol::encode_frame(&request) {
                     Ok(frame) => {
@@ -135,7 +146,7 @@ impl DaemonClient {
         });
 
         // Spawn reader task: reads responses from the daemon.
-        tokio::spawn(async move {
+        let reader_handle = tokio::spawn(async move {
             let mut reader = reader;
             loop {
                 match protocol::read_frame(&mut reader).await {
@@ -161,7 +172,7 @@ impl DaemonClient {
             }
         });
 
-        (request_tx, response_rx)
+        (request_tx, response_rx, writer_handle, reader_handle)
     }
 
     /// Set the request timeout duration.
@@ -189,9 +200,16 @@ impl DaemonClient {
                         path = %self.socket_path.display(),
                         "Reconnected to session daemon"
                     );
-                    let (request_tx, response_rx) = Self::spawn_io_tasks(stream);
+                    // Abort old IO tasks to prevent duplicate readers/writers.
+                    if let Some((wh, rh)) = self.io_task_handles.take() {
+                        wh.abort();
+                        rh.abort();
+                    }
+                    let (request_tx, response_rx, writer_handle, reader_handle) =
+                        Self::spawn_io_tasks(stream);
                     self.request_tx = request_tx;
                     self.response_rx = response_rx;
+                    self.io_task_handles = Some((writer_handle, reader_handle));
                     return Ok(true);
                 }
                 Err(e) => {

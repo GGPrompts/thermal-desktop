@@ -308,6 +308,7 @@ impl Daemon {
             let update_tx = update_tx.clone();
             let session_id = id.clone();
             let event_bus = Arc::clone(&self.event_bus);
+            let sessions_map = Arc::clone(&self.sessions);
 
             tokio::spawn(async move {
                 let wakeup_fd = {
@@ -322,14 +323,12 @@ impl Daemon {
                     // Wait a bit before checking dirty flag.
                     tokio::time::sleep(std::time::Duration::from_millis(8)).await;
 
-                    // Drain wakeup pipe.
+                    // Drain wakeup pipe. Use nix::unistd::read with the raw
+                    // fd directly — avoids the from_raw_fd + forget pattern
+                    // which can close the fd if cancelled at an await point.
                     {
-                        use std::io::Read;
-                        use std::os::fd::FromRawFd;
-                        let mut f = unsafe { std::fs::File::from_raw_fd(wakeup_fd) };
                         let mut buf = [0u8; 64];
-                        let _ = f.read(&mut buf);
-                        std::mem::forget(f);
+                        let _ = nix::unistd::read(wakeup_fd, &mut buf);
                     }
 
                     // A clean PTY exit does not necessarily produce one last
@@ -349,21 +348,45 @@ impl Daemon {
                                 Some(reason) => (None, reason.to_string()),
                                 None => (None, String::new()),
                             };
+                            // Clean up event log file (mirrors kill path).
                             if let Some(si) = session.terminal.state_inference() {
                                 let mut guard = si.lock();
                                 if let Some(log) = guard.event_log_mut() {
                                     log.log(&thermal_terminal::SessionEvent::PtyEof {
                                         reason: reason_str.clone(),
                                     });
+                                    thermal_terminal::EventLog::remove(log.path());
                                 }
                             }
+                            // Clean up worktree if present (mirrors kill path).
+                            let worktree_path = session.worktree_path.clone();
+                            drop(session);
+
                             let _ = update_tx.send(Response::SessionExited {
                                 id: session_id.clone(),
                                 exit_code,
                                 reason: reason_str.clone(),
                             });
-                            // Emit semantic session exit event.
+                            // Emit semantic session exit + removal events.
                             event_bus.session_exited(&session_id, exit_code, reason_str);
+                            event_bus.session_removed(&session_id);
+
+                            // Remove from sessions HashMap (mirrors kill path).
+                            sessions_map.lock().remove(&session_id);
+
+                            // Clean up sidecar entry (fire-and-forget).
+                            let sidecar_id = session_id.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = sidecar_remove_entry(&sidecar_id).await {
+                                    warn!("Failed to remove sidecar entry on exit: {e}");
+                                }
+                            });
+
+                            // Clean up worktree if present.
+                            if let Some(wt_path) = worktree_path {
+                                Daemon::remove_worktree(&wt_path);
+                            }
+
                             break;
                         }
                     }
@@ -1556,10 +1579,30 @@ pub async fn run_daemon() -> Result<()> {
         }
     };
 
-    // Bridge ctrl_c into an mpsc channel so we can reuse run_daemon_on().
+    // Bridge SIGINT (ctrl_c) and SIGTERM into an mpsc channel so we can
+    // reuse run_daemon_on(). Both signals trigger a clean shutdown with
+    // socket removal — without SIGTERM handling, `kill` or systemd stop
+    // would leave conductor.sock on disk.
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT — shutting down");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM — shutting down");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
         let _ = shutdown_tx.send(()).await;
     });
 

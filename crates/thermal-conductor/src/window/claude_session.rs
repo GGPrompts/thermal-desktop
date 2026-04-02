@@ -140,6 +140,12 @@ impl ConductorWindow {
     pub(super) fn spawn_continuation(&self) {
         tracing::info!("Spawning continuation session (Ctrl+Shift+N)");
 
+        // Read current CWD from the PTY child process so the continuation
+        // session starts in the same directory.
+        let current_cwd = std::fs::read_link(format!("/proc/{}/cwd", self.pty_child_pid))
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+
         match &self.session_mode {
             SessionMode::Client { client, .. } => {
                 let client_tx = client.request_tx_clone();
@@ -149,7 +155,7 @@ impl ConductorWindow {
                     if let Err(e) = client_tx
                         .send(crate::protocol::Request::SpawnSession {
                             shell: Some(shell),
-                            cwd: None,
+                            cwd: current_cwd,
                             worktree: false,
                             name: None,
                         })

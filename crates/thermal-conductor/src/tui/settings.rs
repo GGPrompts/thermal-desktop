@@ -16,6 +16,11 @@ pub struct ServiceSettings {
 }
 
 impl ServiceSettings {
+    /// Return a reference to the raw section data for direct key lookups.
+    pub fn sections_raw(&self) -> &HashMap<String, Vec<(String, String)>> {
+        &self.sections
+    }
+
     /// Return a one-line summary for a service binary name, or `None` if no
     /// section matches.
     pub fn summary_for(&self, binary: &str) -> Option<String> {

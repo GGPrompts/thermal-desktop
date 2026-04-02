@@ -9,6 +9,7 @@ pub mod profiles;
 pub mod services;
 pub mod sessions;
 pub mod settings;
+pub mod settings_page;
 
 use std::io;
 use std::time::Duration;
@@ -36,6 +37,7 @@ use self::chat::ChatPage;
 use self::profiles::ProfilesPage;
 use self::services::ServicesPage;
 use self::sessions::SessionsPage;
+use self::settings_page::SettingsPage;
 use crate::backend::BackendPreference;
 
 // ---------------------------------------------------------------------------
@@ -126,6 +128,7 @@ impl App {
             Box::new(SessionsPage::new(backend_pref)),
             Box::new(ProfilesPage::new(backend_pref)),
             Box::new(ServicesPage::new()),
+            Box::new(SettingsPage::new()),
             Box::new(ChatPage::new()),
         ];
 
@@ -275,6 +278,9 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                         }
                         KeyCode::Char('4') if !is_text_input_page(&app) => {
                             app.set_tab(3);
+                        }
+                        KeyCode::Char('5') if !is_text_input_page(&app) => {
+                            app.set_tab(4);
                         }
                         // Ctrl+C always quits
                         KeyCode::Char('c')

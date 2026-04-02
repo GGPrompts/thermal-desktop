@@ -1,6 +1,6 @@
 ---
 description: Rebuild and install all thermal components to ~/.cargo/bin, then restart running daemons
-argument-hint: [crate name or "all" — default: changed crates only]
+argument-hint: [crate name, "all", "nuke", or add "fast" to skip tests — e.g. "fast" or "all fast"]
 ---
 
 # Rebuild Thermal Components
@@ -32,6 +32,8 @@ Note: thermal-core and thermal-terminal are libraries (no binary).
 
 ## Strategy
 
+Arguments are parsed for modifiers first: "fast" anywhere in the argument skips the test step. The remaining word determines the mode.
+
 1. If argument is a specific crate name: rebuild just that crate
 2. If argument is "all": rebuild every binary crate
 3. If argument is "nuke": full reset — kill ALL thermal processes (including phantoms from debug builds and cargo run), rebuild everything, clean start all daemons
@@ -59,13 +61,19 @@ If the argument is "nuke", perform a full scorched-earth reset:
    rm -f /run/user/$UID/thermal/*.sock
    ```
 
-4. **Rebuild ALL binary crates** (same as "all" mode)
+4. **Run workspace tests** (unless "fast" modifier was passed):
+   ```bash
+   cargo test --workspace --lib
+   ```
+   If tests fail, abort the rebuild and show the failure output. Do NOT install broken binaries. Hint the user to use `/rebuild nuke fast` to skip tests if they know what they're doing.
 
-5. **Restart all standard daemons** in dependency order (don't wait for "was it running?" — start everything):
+5. **Rebuild ALL binary crates** (same as "all" mode)
+
+6. **Restart all standard daemons** in dependency order (don't wait for "was it running?" — start everything):
    - thermal-messages, thermal-audio, thermal-voice listen, thermal-dispatcher
    - thermal-bar, thermal-hud, thermal-notify, thermal-wallpaper, thermal-screensaver
 
-6. **Skip** interactive components (TUI, monitor, conductor window, lock, launch)
+7. **Skip** interactive components (TUI, monitor, conductor window, lock, launch)
 
 Then skip to Step 6 (verify).
 
@@ -75,6 +83,21 @@ Use `git diff --name-only HEAD~1` (or the range of recent commits) to find chang
 - `crates/thermal-core/` changes affect ALL binary crate consumers (rebuild everything)
 - `crates/thermal-terminal/` changes affect thermal-conductor
 - `crates/<crate>/` changes affect just that crate
+
+### Step 1.5: Run workspace tests (unless "fast" modifier)
+
+If "fast" was NOT passed as an argument, run lib tests before installing:
+
+```bash
+cargo test --workspace --lib
+```
+
+If tests fail:
+- **Abort the rebuild** — do NOT proceed to install
+- Show the test failure output clearly
+- Hint: "Tests failed. Use `/rebuild fast` to skip tests if you're iterating."
+
+If tests pass, proceed normally.
 
 ### Step 2: Check what's currently running
 
@@ -125,10 +148,6 @@ Restart order matters — dependencies first:
 
 Preserve original arguments: if `thermal-voice` was running with `listen`, restart as `thermal-voice listen`. If `thermal-messages` was running with `--persist`, include that flag. Check the original `pgrep -a` output for the full command line.
 
-After restarting, use the conductor doctor command as the canonical verification/repair path:
-- Run `thc doctor` to inspect pid/socket health without mutating runtime state
-- If stale artifacts remain, run `thc doctor --fix`
-
 Do NOT restart:
 - thermal-conductor TUI (interactive, user manages it)
 - thermal-monitor (interactive TUI)
@@ -136,12 +155,17 @@ Do NOT restart:
 - thermal-launch (on-demand)
 - thermal-lock (on-demand)
 
-### Step 6: Verify
+### Step 6: Verify and repair
 
-After a couple seconds:
-1. Run `pgrep -a 'thermal-'` again and confirm all previously-running daemons are back
-2. Run `thc doctor` to verify pid/socket health
-3. If needed, run `thc doctor --fix` to clean stale artifacts and restart core daemons
+Wait 2 seconds for daemons to initialize, then run the doctor verify/repair loop:
+
+1. `pgrep -a 'thermal-'` — confirm all previously-running daemons are back
+2. `thc doctor` — read-only health check (pid/socket liveness)
+3. If doctor reports issues (stale sockets, dead pids), automatically run `thc doctor --fix`
+4. After --fix, run `thc doctor` one final time to confirm clean state
+5. If still broken after fix, flag for manual investigation — do NOT loop forever
+
+Include doctor status in the final summary.
 
 ## Output
 
@@ -153,4 +177,7 @@ Show a summary table:
 | thermal-bar | Yes | Yes | 12345 |
 | thermal-hud | Yes | Yes | 12346 |
 | thermal-audio | No | No | 3448168 (unchanged) |
+
+Doctor: CLEAN (or list issues found/fixed)
+Tests: PASSED (or SKIPPED if fast mode)
 ```

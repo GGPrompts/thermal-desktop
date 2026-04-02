@@ -148,7 +148,7 @@ impl ConductorWindow {
 
         match &self.session_mode {
             SessionMode::Client { client, .. } => {
-                let client_tx = client.request_tx_clone();
+                let client_tx = client.blocking_lock().request_tx_clone();
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                 tokio::spawn(async move {
                     // Spawn a new session on the daemon.

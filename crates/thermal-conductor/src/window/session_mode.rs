@@ -21,6 +21,13 @@ use crate::terminal::Terminal;
 
 use super::ConductorWindow;
 
+/// Shared, async-safe handle to the daemon client.
+///
+/// Wrapped in `Arc<tokio::sync::Mutex>` so the daemon reader task can call
+/// `reconnect()` and `attach()` on connection loss without needing `&mut self`
+/// on the ConductorWindow.
+pub(crate) type SharedDaemonClient = std::sync::Arc<tokio::sync::Mutex<DaemonClient>>;
+
 // ── Bell configuration ──────────────────────────────────────────────────────
 
 /// How to handle BEL (0x07) from the terminal.
@@ -57,7 +64,8 @@ pub(crate) enum SessionMode {
     /// Connected to the session daemon.
     Client {
         /// Daemon client for sending requests (input, resize, detach).
-        client: DaemonClient,
+        /// Shared with the daemon reader task so it can reconnect on loss.
+        client: SharedDaemonClient,
         /// The session ID we are attached to.
         session_id: String,
     },
@@ -191,7 +199,7 @@ impl ConductorWindow {
                 let id = session_id.clone();
                 // Fire-and-forget async send — input is latency-sensitive so
                 // we don't block the event loop waiting for a response.
-                let client_tx = client.request_tx_clone();
+                let client_tx = client.blocking_lock().request_tx_clone();
                 tokio::spawn(async move {
                     if let Err(e) = client_tx
                         .send(crate::protocol::Request::SendInput { id, data })
@@ -212,7 +220,7 @@ impl ConductorWindow {
             }
             SessionMode::Client { client, session_id } => {
                 let id = session_id.clone();
-                let client_tx = client.request_tx_clone();
+                let client_tx = client.blocking_lock().request_tx_clone();
                 tokio::spawn(async move {
                     if let Err(e) = client_tx
                         .send(crate::protocol::Request::Resize { id, cols, rows })

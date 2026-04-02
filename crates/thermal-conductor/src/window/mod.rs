@@ -384,6 +384,12 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                 // The client retains the request sender for input/resize.
                 let response_rx = client.take_response_rx();
 
+                // Wrap the client in Arc<Mutex> so the daemon reader task
+                // can call reconnect() + attach() on connection loss.
+                let shared_client = std::sync::Arc::new(
+                    tokio::sync::Mutex::new(client),
+                );
+
                 // Dup the write end of the wakeup pipe for the daemon reader
                 // task. The original OwnedFd will drop when this async block
                 // ends (in the standalone path it's moved to spawn_byte_processor
@@ -405,10 +411,12 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                     Arc::clone(&daemon_exit_requested),
                     Arc::clone(&pending_title),
                     task_wakeup_fd,
+                    Arc::clone(&shared_client),
+                    session_id.clone(),
                 );
 
                 let mode = SessionMode::Client {
-                    client,
+                    client: shared_client,
                     session_id,
                 };
 
@@ -775,7 +783,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     // a fresh one.
     if let SessionMode::Client { client, session_id } = &state.session_mode {
         tracing::info!(session = %session_id, "Killing daemon session on window close");
-        let client_tx = client.request_tx_clone();
+        let client_tx = client.blocking_lock().request_tx_clone();
         let id = session_id.clone();
         let _ = state._tokio_rt.block_on(async {
             let _ = client_tx

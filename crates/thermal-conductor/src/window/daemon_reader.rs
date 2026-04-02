@@ -120,13 +120,17 @@ pub(super) fn spawn_daemon_reader_task(
                         // large for an incremental update.
                         let mut term = term_handle.lock();
 
-                        // Resize if needed.
+                        // Resize if needed. In client mode the daemon owns
+                        // the authoritative terminal — local scrollback is
+                        // meaningless. Clear it after resize so shrinking the
+                        // grid doesn't accumulate phantom scrollback lines.
                         let current_cols = term.columns();
                         let current_rows = term.screen_lines();
                         if current_cols != cols as usize || current_rows != rows as usize {
                             use crate::terminal::ConductorTerminalSize;
                             let size = ConductorTerminalSize::new(cols as usize, rows as usize);
                             term.resize(size);
+                            term.grid_mut().clear_history();
                         }
 
                         // Apply all cells.

@@ -895,6 +895,10 @@ impl Daemon {
                         session
                             .terminal
                             .resize(*cols as usize, *rows as usize, 8, 16);
+                        // Signal the update broadcaster so it sees the
+                        // TermDamage::Full produced by the resize and sends
+                        // a SessionState with the new dimensions to clients.
+                        session.pty_dirty.store(true, Ordering::Release);
                         match session.pty.resize(*cols, *rows) {
                             Ok(_) => Response::Ok,
                             Err(e) => Response::Error {

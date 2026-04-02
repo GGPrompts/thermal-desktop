@@ -1090,13 +1090,28 @@ impl WindowHandler for ConductorWindow {
                 effective_h = effective_h.saturating_sub(GRAPH_OVERLAY_HEIGHT);
             }
             let (cols, rows) = self.grid_renderer.grid_size(w, effective_h);
-            self.terminal.resize(
-                cols,
-                rows,
-                self.grid_renderer.cell_width as u16,
-                self.grid_renderer.cell_height as u16,
-            );
+
+            // In client mode, skip the local terminal resize — the daemon
+            // owns the authoritative terminal grid. We send the resize
+            // request and let the daemon's SessionState response (which
+            // carries cols/rows) drive the local terminal resize via
+            // daemon_reader. Resizing both sides independently causes a
+            // race: daemon broadcasts cells at the old dimensions while the
+            // local terminal has already resized, corrupting scrollback.
+            let is_client = matches!(self.session_mode, SessionMode::Client { .. });
+            if !is_client {
+                self.terminal.resize(
+                    cols,
+                    rows,
+                    self.grid_renderer.cell_width as u16,
+                    self.grid_renderer.cell_height as u16,
+                );
+            }
             self.resize_session(cols as u16, rows as u16);
+
+            // Force a full redraw — the grid_renderer.resize() cleared its
+            // row cache, so partial-damage fast paths would render black.
+            self.force_full_redraw.store(true, Ordering::Release);
 
             tracing::debug!("Window configured: {}x{} (grid: {}x{})", w, h, cols, rows);
 

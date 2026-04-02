@@ -148,19 +148,21 @@ impl ConductorWindow {
 
     /// Start a new text selection at the given grid position.
     pub(super) fn selection_start(&mut self, col: Column, line: Line, side: Side) {
-        let point = Point::new(line, col);
-        let selection = Selection::new(SelectionType::Simple, point, side);
         let term_handle = self.terminal.term_handle();
         let mut term = term_handle.lock();
+        let display_offset = term.renderable_content().display_offset as i32;
+        let point = Point::new(Line(line.0 - display_offset), col);
+        let selection = Selection::new(SelectionType::Simple, point, side);
         term.selection = Some(selection);
         tracing::debug!(?point, ?side, "Selection started");
     }
 
     /// Update the end point of an in-progress selection.
     pub(super) fn selection_update(&mut self, col: Column, line: Line, side: Side) {
-        let point = Point::new(line, col);
         let term_handle = self.terminal.term_handle();
         let mut term = term_handle.lock();
+        let display_offset = term.renderable_content().display_offset as i32;
+        let point = Point::new(Line(line.0 - display_offset), col);
         if let Some(ref mut sel) = term.selection {
             sel.update(point, side);
         }

@@ -193,6 +193,8 @@ fn main() -> Result<()> {
         .add_directive("thermal_conductor=info".parse().unwrap())
         .add_directive("thermal_core=info".parse().unwrap());
 
+    let mut tui_log_path: Option<std::path::PathBuf> = None;
+
     // Doctor and Config are quick diagnostics — suppress tracing noise.
     if matches!(command, Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }) {
         // No tracing init — just run silently.
@@ -211,7 +213,7 @@ fn main() -> Result<()> {
                 );
             }
         }
-        eprintln!("TUI logs → {}", log_path.display());
+        tui_log_path = Some(log_path.clone());
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -243,7 +245,11 @@ fn main() -> Result<()> {
 
     // TUI runs its own synchronous event loop — no tokio needed.
     if matches!(command, Commands::Tui) {
-        return tui::run(backend_pref);
+        let result = tui::run(backend_pref);
+        if let Some(ref path) = tui_log_path {
+            eprintln!("TUI logs → {}", path.display());
+        }
+        return result;
     }
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),

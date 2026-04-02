@@ -42,6 +42,27 @@ impl Color {
     pub fn to_ansi_escape(self) -> String {
         format!("\x1b[38;2;{};{};{}m", self.r, self.g, self.b)
     }
+
+    /// Relative luminance per WCAG 2.1 (sRGB linearization + BT.709 weights).
+    pub fn relative_luminance(self) -> f64 {
+        fn linearize(c: u8) -> f64 {
+            let s = c as f64 / 255.0;
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * linearize(self.r) + 0.7152 * linearize(self.g) + 0.0722 * linearize(self.b)
+    }
+
+    /// WCAG 2.1 contrast ratio between two colors (range 1.0–21.0).
+    pub fn contrast_ratio(self, other: Color) -> f64 {
+        let l1 = self.relative_luminance();
+        let l2 = other.relative_luminance();
+        let (lighter, darker) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -506,6 +527,78 @@ mod tests {
         for i in 0..4 {
             assert!((palette[i] - expected[i]).abs() < 1e-6);
         }
+    }
+
+    // --- WCAG contrast ratio ---
+
+    #[test]
+    fn contrast_ratio_black_white_is_21() {
+        let black = Color::from_hex(0x000000);
+        let white = Color::from_hex(0xFFFFFF);
+        let ratio = black.contrast_ratio(white);
+        assert!((ratio - 21.0).abs() < 0.1, "expected ~21:1, got {ratio:.2}:1");
+    }
+
+    #[test]
+    fn contrast_ratio_same_color_is_1() {
+        let ratio = Color::SEARING.contrast_ratio(Color::SEARING);
+        assert!((ratio - 1.0).abs() < 0.01, "expected 1:1, got {ratio:.2}:1");
+    }
+
+    #[test]
+    fn contrast_ratio_is_symmetric() {
+        let a = Color::TEXT.contrast_ratio(Color::BG);
+        let b = Color::BG.contrast_ratio(Color::TEXT);
+        assert!((a - b).abs() < 0.001);
+    }
+
+    // --- Palette contrast compliance ---
+    // WCAG AA: 4.5:1 for normal text, 3.0:1 for large text / UI elements.
+    // All foreground colors must meet at least 3.0:1 against BG.
+    // Text colors (TEXT, TEXT_BRIGHT, TEXT_MUTED) must meet 4.5:1.
+
+    const WCAG_AA_TEXT: f64 = 4.5;
+    const WCAG_AA_LARGE: f64 = 3.0;
+
+    /// Helper: assert a color meets a minimum contrast ratio against BG.
+    fn assert_contrast(name: &str, color: Color, min_ratio: f64) {
+        let ratio = color.contrast_ratio(Color::BG);
+        assert!(
+            ratio >= min_ratio,
+            "{name} ({:02x}{:02x}{:02x}) contrast {ratio:.2}:1 < {min_ratio}:1 against BG",
+            color.r, color.g, color.b,
+        );
+    }
+
+    #[test]
+    fn text_colors_meet_wcag_aa() {
+        assert_contrast("TEXT", Color::TEXT, WCAG_AA_TEXT);
+        assert_contrast("TEXT_BRIGHT", Color::TEXT_BRIGHT, WCAG_AA_TEXT);
+        assert_contrast("TEXT_MUTED", Color::TEXT_MUTED, WCAG_AA_TEXT);
+    }
+
+    #[test]
+    fn hot_spectrum_meets_wcag_aa_large() {
+        assert_contrast("HOT", Color::HOT, WCAG_AA_LARGE);
+        assert_contrast("HOTTER", Color::HOTTER, WCAG_AA_LARGE);
+        assert_contrast("SEARING", Color::SEARING, WCAG_AA_LARGE);
+        assert_contrast("CRITICAL", Color::CRITICAL, WCAG_AA_LARGE);
+        assert_contrast("WHITE_HOT", Color::WHITE_HOT, WCAG_AA_LARGE);
+    }
+
+    #[test]
+    fn neutral_spectrum_meets_wcag_aa_large() {
+        assert_contrast("MILD", Color::MILD, WCAG_AA_LARGE);
+        assert_contrast("WARM", Color::WARM, WCAG_AA_LARGE);
+    }
+
+    #[test]
+    fn accent_colors_meet_wcag_aa_large() {
+        assert_contrast("ACCENT_COLD", Color::ACCENT_COLD, WCAG_AA_LARGE);
+        assert_contrast("ACCENT_COOL", Color::ACCENT_COOL, WCAG_AA_LARGE);
+        assert_contrast("ACCENT_NEUTRAL", Color::ACCENT_NEUTRAL, WCAG_AA_LARGE);
+        assert_contrast("ACCENT_WARM", Color::ACCENT_WARM, WCAG_AA_LARGE);
+        assert_contrast("ACCENT_HOT", Color::ACCENT_HOT, WCAG_AA_LARGE);
     }
 }
 

@@ -695,8 +695,12 @@ impl TuiPage for SessionsPage {
         &mut self,
         key: crossterm::event::KeyEvent,
         poller: &mut ClaudeStatePoller,
-    ) -> bool {
-        self.handle_key_sessions(key, poller)
+    ) -> crate::tui::KeyResult {
+        if self.handle_key_sessions(key, poller) {
+            crate::tui::KeyResult::QUIT
+        } else {
+            crate::tui::KeyResult::NONE
+        }
     }
 
     fn has_text_focus(&self) -> bool {

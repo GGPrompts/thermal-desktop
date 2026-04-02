@@ -1012,7 +1012,7 @@ impl TuiPage for ServicesPage {
         &mut self,
         key: crossterm::event::KeyEvent,
         _poller: &mut ClaudeStatePoller,
-    ) -> bool {
+    ) -> super::KeyResult {
         use crossterm::event::KeyCode;
 
         // When the help overlay is visible, only allow dismiss and scroll.
@@ -1036,7 +1036,7 @@ impl TuiPage for ServicesPage {
                 }
                 _ => {}
             }
-            return false;
+            return super::KeyResult::NONE;
         }
 
         match key.code {
@@ -1070,6 +1070,7 @@ impl TuiPage for ServicesPage {
             }
             KeyCode::Char('e') => {
                 self.open_settings_editor();
+                return super::KeyResult::CLEAR;
             }
             KeyCode::Char('K') => {
                 self.force_kill_selected();
@@ -1094,7 +1095,7 @@ impl TuiPage for ServicesPage {
             }
             _ => {}
         }
-        false
+        super::KeyResult::NONE
     }
 
     fn handle_mouse(

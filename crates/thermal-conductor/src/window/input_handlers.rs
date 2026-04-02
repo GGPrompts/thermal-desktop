@@ -300,6 +300,12 @@ impl PointerHandler for ConductorWindow {
                 }
             }
 
+            if let PointerEventKind::Leave { .. } = event.kind {
+                if let Some(ref device) = self.cursor_shape_device {
+                    device.set_shape(self.pointer_enter_serial, super::CursorShape::Default);
+                }
+            }
+
             let (px, py) = event.position;
             let (col, line, _side) = self.pixel_to_grid(px, py);
             let cx = col.0 + 1; // SGR is 1-based

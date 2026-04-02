@@ -73,6 +73,21 @@ const ACCENT_COLD: Color = palette::ACCENT_COLD;
 // Page trait
 // ---------------------------------------------------------------------------
 
+/// Result from a key event handler.
+#[derive(Default)]
+pub struct KeyResult {
+    /// The app should quit.
+    pub quit: bool,
+    /// The terminal needs a full clear + redraw (e.g. after spawning an editor).
+    pub needs_clear: bool,
+}
+
+impl KeyResult {
+    pub const NONE: Self = Self { quit: false, needs_clear: false };
+    pub const QUIT: Self = Self { quit: true, needs_clear: false };
+    pub const CLEAR: Self = Self { quit: false, needs_clear: true };
+}
+
 /// Trait for a TUI page/tab. Each page manages its own state and rendering.
 pub trait TuiPage {
     /// Tab title shown in the tab bar.
@@ -84,12 +99,12 @@ pub trait TuiPage {
     /// Render the page into the given area.
     fn render(&mut self, f: &mut Frame, area: Rect);
 
-    /// Handle a key event. Return `true` if the app should quit.
+    /// Handle a key event. Returns flags indicating what the main loop should do.
     fn handle_key(
         &mut self,
         key: crossterm::event::KeyEvent,
         poller: &mut ClaudeStatePoller,
-    ) -> bool;
+    ) -> KeyResult;
 
     /// Handle a mouse event.
     fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, poller: &mut ClaudeStatePoller);
@@ -118,6 +133,7 @@ struct App {
     pages: Vec<Box<dyn TuiPage>>,
     active_tab: usize,
     should_quit: bool,
+    needs_clear: bool,
 }
 
 impl App {
@@ -137,6 +153,7 @@ impl App {
             pages,
             active_tab: 0,
             should_quit: false,
+            needs_clear: false,
         })
     }
 
@@ -257,6 +274,10 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
     app.tick();
 
     loop {
+        if app.needs_clear {
+            terminal.clear()?;
+            app.needs_clear = false;
+        }
         terminal.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -298,9 +319,12 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                             } else {
                                 // Let the page handle BackTab for field switching
                                 if let Some(page) = app.pages.get_mut(app.active_tab) {
-                                    let quit = page.handle_key(key, &mut app.poller);
-                                    if quit {
+                                    let result = page.handle_key(key, &mut app.poller);
+                                    if result.quit {
                                         app.should_quit = true;
+                                    }
+                                    if result.needs_clear {
+                                        app.needs_clear = true;
                                     }
                                 }
                             }
@@ -323,9 +347,12 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                         _ => {
                             // Delegate to the active page.
                             if let Some(page) = app.pages.get_mut(app.active_tab) {
-                                let quit = page.handle_key(key, &mut app.poller);
-                                if quit {
+                                let result = page.handle_key(key, &mut app.poller);
+                                if result.quit {
                                     app.should_quit = true;
+                                }
+                                if result.needs_clear {
+                                    app.needs_clear = true;
                                 }
                             }
                         }

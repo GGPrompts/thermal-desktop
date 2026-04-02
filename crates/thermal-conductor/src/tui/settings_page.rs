@@ -564,7 +564,7 @@ impl TuiPage for SettingsPage {
         &mut self,
         key: crossterm::event::KeyEvent,
         _poller: &mut ClaudeStatePoller,
-    ) -> bool {
+    ) -> super::KeyResult {
         use crossterm::event::KeyCode;
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
@@ -589,12 +589,21 @@ impl TuiPage for SettingsPage {
                 self.reload();
             }
             KeyCode::Char('e') => {
-                let _ = settings::open_in_editor();
+                if let Err(e) = settings::open_in_editor() {
+                    let _ = crossterm::terminal::enable_raw_mode();
+                    let _ = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::terminal::EnterAlternateScreen,
+                        crossterm::event::EnableMouseCapture
+                    );
+                    tracing::error!("open_in_editor failed: {e}");
+                }
                 self.reload();
+                return super::KeyResult::CLEAR;
             }
             _ => {}
         }
-        false
+        super::KeyResult::NONE
     }
 
     fn handle_mouse(&mut self, event: crossterm::event::MouseEvent, _poller: &mut ClaudeStatePoller) {

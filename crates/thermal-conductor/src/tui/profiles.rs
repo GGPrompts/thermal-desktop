@@ -919,13 +919,13 @@ impl TuiPage for ProfilesPage {
         &mut self,
         key: crossterm::event::KeyEvent,
         _poller: &mut ClaudeStatePoller,
-    ) -> bool {
+    ) -> super::KeyResult {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         // Icon picker overlay intercepts all keys when open
         if self.icon_picker_open {
             self.handle_icon_picker_key(key);
-            return false;
+            return super::KeyResult::NONE;
         }
 
         // Ctrl+S saves (edit mode, works from any focus)
@@ -933,7 +933,7 @@ impl TuiPage for ProfilesPage {
             if self.mode == Mode::Edit {
                 self.do_save();
             }
-            return false;
+            return super::KeyResult::NONE;
         }
 
         match self.mode {
@@ -941,7 +941,7 @@ impl TuiPage for ProfilesPage {
             Mode::Edit => self.handle_edit_key(key),
         }
 
-        false
+        super::KeyResult::NONE
     }
 
     fn handle_mouse(

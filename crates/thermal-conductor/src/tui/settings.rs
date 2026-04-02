@@ -184,7 +184,8 @@ pub fn open_in_editor() -> Result<bool, String> {
     crossterm::execute!(
         std::io::stdout(),
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
     )
     .map_err(|e| format!("failed to re-enter alternate screen: {e}"))?;
 

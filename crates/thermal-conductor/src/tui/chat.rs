@@ -533,7 +533,7 @@ impl TuiPage for ChatPage {
         &mut self,
         key: crossterm::event::KeyEvent,
         _poller: &mut ClaudeStatePoller,
-    ) -> bool {
+    ) -> super::KeyResult {
         use crossterm::event::{KeyCode, KeyModifiers};
 
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -544,7 +544,7 @@ impl TuiPage for ChatPage {
             if !self.filter_active {
                 self.filter_text.clear();
             }
-            return false;
+            return super::KeyResult::NONE;
         }
 
         // If filter bar is active, handle filter input.
@@ -558,7 +558,7 @@ impl TuiPage for ChatPage {
                 KeyCode::Char(ch) => self.handle_char(ch),
                 _ => {}
             }
-            return false;
+            return super::KeyResult::NONE;
         }
 
         // Navigation keys (read-only log — no input bar).
@@ -604,7 +604,7 @@ impl TuiPage for ChatPage {
             }
             _ => {}
         }
-        false
+        super::KeyResult::NONE
     }
 
     fn handle_mouse(

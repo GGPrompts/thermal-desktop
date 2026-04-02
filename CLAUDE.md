@@ -23,7 +23,7 @@ Cargo workspace with shared dependencies. All components use `thermal-core` for 
 - **Observability**: tracing crate with env-filter (`RUST_LOG=debug thc tui 2>thc.log`)
 
 ### Color Palette
-All colors in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere.
+All colors in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants everywhere. Never hardcode `Color::Rgb(...)` in TUI code — use palette constants (includes `STATUS_OK`, `STATUS_WARN`, `STATUS_ERROR`). Palette colors are WCAG-tested against `Color::BG` via `Color::contrast_ratio()` in unit tests.
 
 ## Development
 

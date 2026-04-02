@@ -240,7 +240,7 @@ python3 scripts/generate-theme.py --check  # Verify in sync
 ## Hardware Setup
 
 - **Ultrawide**: 3440x1440 @ 100Hz (DP-1, primary)
-- **Portrait**: 1920x1080 @ 240Hz (HDMI-A-2, rotated)
+- **Portrait**: 1920x1080 @ 144Hz (HDMI-A-2, rotated)
 - **GPU**: NVIDIA (Vulkan backend for wgpu)
 
 ## File Locations

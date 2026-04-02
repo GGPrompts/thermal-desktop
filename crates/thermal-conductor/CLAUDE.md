@@ -55,8 +55,14 @@ Designed as a command center for a vertical monitor:
 
 **Panel focus**: Tri-state (`FocusedPanel` enum: AgentList/Preview/Chat). Tab/Shift+Tab cycles, click-to-focus, Esc returns to AgentList.
 
+## TUI Patterns
+- `handle_key()` returns `KeyResult` (not bool) — use `KeyResult::CLEAR` when spawning an external process that swaps the alternate screen (e.g. editor). The main loop calls `terminal.clear()` to force a full redraw.
+- `TuiScreenGuard` (RAII) manages raw mode + alternate screen lifecycle — don't manually call enable/disable raw mode in the main TUI loop.
+- `EditorSuspendGuard` in `settings.rs` handles editor launch/return — use `open_in_editor()` rather than spawning editors directly.
+- TUI logging goes to file only (`/run/user/$UID/thermal/conductor-tui.log`), never stderr.
+
 ## GPU Terminal Window
-`thermal-conductor window` — wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from `thc daemon` via `spawn_daemon_reader_task()`). Agent overlay HUD is decorative.
+`thermal-conductor window` — wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from `thc daemon` via `spawn_daemon_reader_task()`). Agent overlay HUD is decorative. Wayland input handlers (`input_handlers.rs`) clean up keyboard repeat/modifier state on focus loss and mouse button state on pointer leave — maintain this pattern when adding new input handling.
 
 ## Roadmap: GPU AI Terminal
 - Phase 1 (done): GPU terminal rendering single PTY

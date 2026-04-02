@@ -27,9 +27,6 @@ All colors in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants e
 
 ## Development
 
-### Dev Environment
-Dual-boot: WSL2 (Windows) for coding, Arch Linux for runtime testing (Wayland, PipeWire, GPU). WSL2 lacks native Wayland — compilation works but GPU windows, HUD, audio, and transparency require Arch. `libssl-dev`/`openssl` needed for thermal-voice/audio crates.
-
 ### Build Environment
 `CARGO_TARGET_DIR` is set to `~/.cargo-target` (keeps build artifacts outside the project tree). This means:
 - `cargo build` outputs go to `~/.cargo-target/debug/`, **not** `target/debug/`

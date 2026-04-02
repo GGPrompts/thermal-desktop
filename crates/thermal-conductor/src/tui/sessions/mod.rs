@@ -710,6 +710,13 @@ impl TuiPage for SessionsPage {
     ) {
         self.handle_mouse_sessions(event, poller);
     }
+
+    fn selected_session_cwd(&self) -> Option<String> {
+        let idx = self.table_state.selected()?;
+        let row = self.display_rows.get(idx)?;
+        let cwd = row.session.working_dir.as_deref().unwrap_or("").trim();
+        if cwd.is_empty() { None } else { Some(cwd.to_string()) }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

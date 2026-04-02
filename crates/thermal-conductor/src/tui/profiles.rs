@@ -1029,6 +1029,12 @@ impl TuiPage for ProfilesPage {
             ),
         }
     }
+
+    fn set_context_cwd(&mut self, cwd: &str) {
+        // Update the fallback cwd used when the profile and field are empty.
+        // This lets the Spawn tab inherit the selected session's working dir.
+        self.launch_cwd = cwd.to_string();
+    }
 }
 
 // ---------------------------------------------------------------------------

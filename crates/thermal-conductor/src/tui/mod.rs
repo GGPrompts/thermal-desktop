@@ -96,6 +96,15 @@ pub trait TuiPage {
     fn has_text_focus(&self) -> bool {
         false
     }
+
+    /// Hint the page with a working directory from the currently selected
+    /// session. Pages that spawn sessions can use this as the default cwd.
+    fn set_context_cwd(&mut self, _cwd: &str) {}
+
+    /// Return the cwd of the currently selected session, if any.
+    fn selected_session_cwd(&self) -> Option<String> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +139,7 @@ impl App {
 
     fn next_tab(&mut self) {
         self.active_tab = (self.active_tab + 1) % self.pages.len();
+        self.propagate_session_cwd();
     }
 
     fn prev_tab(&mut self) {
@@ -138,11 +148,22 @@ impl App {
         } else {
             self.active_tab -= 1;
         }
+        self.propagate_session_cwd();
     }
 
     fn set_tab(&mut self, idx: usize) {
         if idx < self.pages.len() {
             self.active_tab = idx;
+            self.propagate_session_cwd();
+        }
+    }
+
+    /// Pass the Sessions tab's selected cwd to the newly active page.
+    fn propagate_session_cwd(&mut self) {
+        // Grab cwd from the Sessions page (index 0).
+        let cwd = self.pages[0].selected_session_cwd();
+        if let Some(cwd) = cwd {
+            self.pages[self.active_tab].set_context_cwd(&cwd);
         }
     }
 

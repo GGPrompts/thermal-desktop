@@ -31,22 +31,48 @@ enum Request {
         #[serde(default)]
         name: Option<String>,
     },
-    KillSession { id: String },
-    SendInput { id: String, data: Vec<u8> },
-    SendText { id: String, text: String },
-    GetSessionState { id: String },
-    Attach { id: String, initial_size: Option<(u16, u16)> },
-    Detach { id: String },
-    Resize { id: String, cols: u16, rows: u16 },
+    KillSession {
+        id: String,
+    },
+    SendInput {
+        id: String,
+        data: Vec<u8>,
+    },
+    SendText {
+        id: String,
+        text: String,
+    },
+    GetSessionState {
+        id: String,
+    },
+    Attach {
+        id: String,
+        initial_size: Option<(u16, u16)>,
+    },
+    Detach {
+        id: String,
+    },
+    Resize {
+        id: String,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum Response {
     Pong,
     Ok,
-    Error { message: String },
-    SessionSpawned { id: String, name: String },
-    SessionList { sessions: Vec<SessionInfo> },
+    Error {
+        message: String,
+    },
+    SessionSpawned {
+        id: String,
+        name: String,
+    },
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
     SessionState {
         id: String,
         cols: u16,
@@ -65,7 +91,10 @@ enum Response {
         #[serde(default)]
         mode: u32,
     },
-    TitleChanged { id: String, title: String },
+    TitleChanged {
+        id: String,
+        title: String,
+    },
     SessionExited {
         id: String,
         exit_code: Option<i32>,
@@ -240,7 +269,11 @@ async fn handle_mock_daemon_client(mut stream: UnixStream) {
                 rows: 24,
                 cells: vec![CellData {
                     ch: '$',
-                    fg: ColorData { r: 0, g: 255, b: 100 },
+                    fg: ColorData {
+                        r: 0,
+                        g: 255,
+                        b: 100,
+                    },
                     bg: ColorData { r: 0, g: 0, b: 0 },
                     flags: 0,
                 }],
@@ -259,7 +292,11 @@ async fn handle_mock_daemon_client(mut stream: UnixStream) {
                     cols: 80,
                     rows: 24,
                     cells: Vec::new(),
-                    cursor: CursorData { col: 0, row: 0, visible: true },
+                    cursor: CursorData {
+                        col: 0,
+                        row: 0,
+                        visible: true,
+                    },
                     title: "zsh".into(),
                     mode: 0,
                 };
@@ -277,12 +314,20 @@ async fn handle_mock_daemon_client(mut stream: UnixStream) {
                         row: 0,
                         cell: CellData {
                             ch: '>',
-                            fg: ColorData { r: 255, g: 165, b: 0 },
+                            fg: ColorData {
+                                r: 255,
+                                g: 165,
+                                b: 0,
+                            },
                             bg: ColorData { r: 0, g: 0, b: 0 },
                             flags: 0,
                         },
                     }],
-                    cursor: CursorData { col: 1, row: 0, visible: true },
+                    cursor: CursorData {
+                        col: 1,
+                        row: 0,
+                        visible: true,
+                    },
                     mode: 0,
                 };
                 let frame = encode_frame(&update);
@@ -404,7 +449,14 @@ async fn get_session_state() {
     let payload = read_frame(&mut stream).await.unwrap();
     let resp: Response = decode_payload(&payload);
     match resp {
-        Response::SessionState { id, cols, rows, cells, cursor, .. } => {
+        Response::SessionState {
+            id,
+            cols,
+            rows,
+            cells,
+            cursor,
+            ..
+        } => {
             assert_eq!(id, "test-001");
             assert_eq!(cols, 80);
             assert_eq!(rows, 24);
@@ -437,7 +489,12 @@ async fn attach_receives_stream() {
     let payload = read_frame(&mut stream).await.unwrap();
     let resp: Response = decode_payload(&payload);
     match resp {
-        Response::ScreenUpdate { id, seq, dirty_cells, .. } => {
+        Response::ScreenUpdate {
+            id,
+            seq,
+            dirty_cells,
+            ..
+        } => {
             assert_eq!(id, "test-001");
             assert_eq!(seq, 1);
             assert_eq!(dirty_cells.len(), 1);
@@ -532,8 +589,15 @@ async fn msgpack_round_trip() {
             name: Some("test-session".into()),
         },
         Request::KillSession { id: "abc".into() },
-        Request::SendInput { id: "x".into(), data: vec![0x1b, 0x5b, 0x41] },
-        Request::Resize { id: "x".into(), cols: 120, rows: 40 },
+        Request::SendInput {
+            id: "x".into(),
+            data: vec![0x1b, 0x5b, 0x41],
+        },
+        Request::Resize {
+            id: "x".into(),
+            cols: 120,
+            rows: 40,
+        },
     ];
 
     for req in &requests {
@@ -546,8 +610,13 @@ async fn msgpack_round_trip() {
     let responses = vec![
         Response::Pong,
         Response::Ok,
-        Response::Error { message: "test error".into() },
-        Response::SessionSpawned { id: "s1".into(), name: "opus".into() },
+        Response::Error {
+            message: "test error".into(),
+        },
+        Response::SessionSpawned {
+            id: "s1".into(),
+            name: "opus".into(),
+        },
     ];
 
     for resp in &responses {

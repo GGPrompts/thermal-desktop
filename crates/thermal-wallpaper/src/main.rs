@@ -4,8 +4,8 @@
 /// modulated by real-time system metrics (CPU, GPU, memory). Low system load
 /// produces cool/blue drifting noise; high load produces hot/red turbulence.
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{
@@ -189,14 +189,16 @@ fn spawn_metrics_poller() {
 
     std::thread::Builder::new()
         .name("metrics-poller".into())
-        .spawn(move || loop {
-            let cpu = read_cpu_load();
-            let gpu = read_gpu_load();
-            let mem = read_mem_load();
-            store_f32(&SHARED_CPU, cpu);
-            store_f32(&SHARED_GPU, gpu);
-            store_f32(&SHARED_MEM, mem);
-            std::thread::sleep(Duration::from_secs(1));
+        .spawn(move || {
+            loop {
+                let cpu = read_cpu_load();
+                let gpu = read_gpu_load();
+                let mem = read_mem_load();
+                store_f32(&SHARED_CPU, cpu);
+                store_f32(&SHARED_GPU, gpu);
+                store_f32(&SHARED_MEM, mem);
+                std::thread::sleep(Duration::from_secs(1));
+            }
         })
         .expect("failed to spawn metrics poller thread");
 }

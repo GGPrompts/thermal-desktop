@@ -926,7 +926,12 @@ async fn dispatch_dispatcher(msg: &Message) -> Result<Message> {
 
     let stream = tokio::net::UnixStream::connect(&sock_path)
         .await
-        .with_context(|| format!("connecting to thermal-dispatcher at {}", sock_path.display()))?;
+        .with_context(|| {
+            format!(
+                "connecting to thermal-dispatcher at {}",
+                sock_path.display()
+            )
+        })?;
 
     let request = json!({
         "transcript": msg.content,

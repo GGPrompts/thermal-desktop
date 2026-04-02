@@ -457,4 +457,33 @@ mod tests {
         }
         assert_eq!(text, "Hello");
     }
+
+    #[test]
+    fn emoji_variation_sequence_expands_to_wide_cell() {
+        let terminal = Terminal::with_size(20, 2);
+        let term = terminal.term_handle();
+        let mut locked = term.lock();
+        let mut processor = ansi::Processor::<ansi::StdSyncHandler>::new();
+
+        processor.advance(&mut *locked, "⚙️x".as_bytes());
+
+        let row = &locked.grid()[alacritty_terminal::index::Line(0)];
+        let gear = &row[alacritty_terminal::index::Column(0)];
+        let spacer = &row[alacritty_terminal::index::Column(1)];
+        let next = &row[alacritty_terminal::index::Column(2)];
+
+        assert_eq!(gear.c, '⚙');
+        assert_eq!(gear.zerowidth(), Some(&['\u{fe0f}'][..]));
+        assert!(
+            gear.flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR),
+            "gear+VS16 should expand to a wide cell"
+        );
+        assert!(
+            spacer
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+        );
+        assert_eq!(next.c, 'x');
+    }
 }

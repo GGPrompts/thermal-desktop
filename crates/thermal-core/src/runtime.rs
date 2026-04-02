@@ -418,6 +418,9 @@ mod tests {
         }
         let result = try_connect_read_only("test", &path);
         assert!(result.is_err());
-        assert!(path.exists(), "read-only probe should not remove stale socket");
+        assert!(
+            path.exists(),
+            "read-only probe should not remove stale socket"
+        );
     }
 }

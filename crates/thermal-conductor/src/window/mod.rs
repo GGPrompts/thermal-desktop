@@ -775,9 +775,17 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
             {
                 continue;
             }
-            state.render_frame();
-            state.dirty = false;
-            state.render_deadline = None;
+            match state.render_frame() {
+                RenderStatus::Presented => {
+                    state.dirty = false;
+                    state.render_deadline = None;
+                }
+                RenderStatus::Retry => {}
+                RenderStatus::Fatal => {
+                    tracing::error!("Stopping window loop after unrecoverable render failure");
+                    break;
+                }
+            }
         }
 
         // Exit if the shell process died (e.g. user typed `exit`).
@@ -818,6 +826,12 @@ pub(super) struct WgpuState {
     pub(super) queue: wgpu::Queue,
     pub(super) surface: wgpu::Surface<'static>,
     pub(super) config: wgpu::SurfaceConfiguration,
+}
+
+pub(super) enum RenderStatus {
+    Presented,
+    Retry,
+    Fatal,
 }
 
 // ── Main window struct ────────────────────────────────────────────────────────

@@ -10,8 +10,8 @@
 //! The workspace uses wgpu 23, which matches glyphon 0.7's dependency.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextAtlas, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextAtlas, TextRenderer, Viewport,
 };
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
@@ -61,7 +61,13 @@ impl ThermalTextRenderer {
         // glyphon 0.7: Cache must be created before TextAtlas / Viewport.
         let cache = Cache::new(device);
 
-        let mut atlas = TextAtlas::new(device, queue, &cache, format);
+        let mut atlas = TextAtlas::with_color_mode(
+            device,
+            queue,
+            &cache,
+            format,
+            glyphon_color_mode_for_surface(format),
+        );
 
         let viewport = {
             let mut vp = Viewport::new(device, &cache);
@@ -118,5 +124,57 @@ impl ThermalTextRenderer {
         buffer.shape_until_scroll(&mut self.font_system, false);
 
         buffer
+    }
+}
+
+/// Choose the glyphon color mode that matches the surface color space.
+///
+/// glyphon expects `Accurate` for sRGB targets and `Web` for linear targets
+/// that still receive colors specified in the sRGB color space.
+pub fn glyphon_color_mode_for_surface(format: TextureFormat) -> ColorMode {
+    match format {
+        TextureFormat::Rgba8UnormSrgb
+        | TextureFormat::Bgra8UnormSrgb
+        | TextureFormat::Bc1RgbaUnormSrgb
+        | TextureFormat::Bc2RgbaUnormSrgb
+        | TextureFormat::Bc3RgbaUnormSrgb
+        | TextureFormat::Bc7RgbaUnormSrgb
+        | TextureFormat::Etc2Rgb8UnormSrgb
+        | TextureFormat::Etc2Rgb8A1UnormSrgb
+        | TextureFormat::Etc2Rgba8UnormSrgb
+        | TextureFormat::Astc {
+            channel: wgpu::AstcChannel::UnormSrgb,
+            ..
+        } => ColorMode::Accurate,
+        _ => ColorMode::Web,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srgb_surfaces_use_accurate_mode() {
+        assert_eq!(
+            glyphon_color_mode_for_surface(TextureFormat::Bgra8UnormSrgb),
+            ColorMode::Accurate
+        );
+        assert_eq!(
+            glyphon_color_mode_for_surface(TextureFormat::Rgba8UnormSrgb),
+            ColorMode::Accurate
+        );
+    }
+
+    #[test]
+    fn linear_surfaces_use_web_mode() {
+        assert_eq!(
+            glyphon_color_mode_for_surface(TextureFormat::Bgra8Unorm),
+            ColorMode::Web
+        );
+        assert_eq!(
+            glyphon_color_mode_for_surface(TextureFormat::Rgba16Float),
+            ColorMode::Web
+        );
     }
 }

@@ -69,6 +69,9 @@ const BG_SURFACE: Color = palette::BG_SURFACE;
 const TEXT_BRIGHT: Color = palette::TEXT_BRIGHT;
 const TEXT_MUTED: Color = palette::TEXT_MUTED;
 const ACCENT_COLD: Color = palette::ACCENT_COLD;
+const TAB_DIVIDER: &str = " | ";
+const TAB_PADDING_LEFT: &str = " ";
+const TAB_PADDING_RIGHT: &str = " ";
 
 struct TuiScreenGuard {
     active: bool,
@@ -96,6 +99,46 @@ impl Drop for TuiScreenGuard {
         let mut stdout = io::stdout();
         let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture, Show);
     }
+}
+
+fn tab_title_line(index: usize, title: &str) -> Line<'static> {
+    let num = format!("{}", index + 1);
+    Line::from(vec![
+        Span::styled(
+            num,
+            Style::default()
+                .fg(ACCENT_COLD)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(":", Style::default().fg(TEXT_MUTED)),
+        Span::styled(title.to_owned(), Style::default().fg(TEXT_BRIGHT)),
+    ])
+}
+
+fn tab_hit_index_for_titles(titles: &[&str], column: u16) -> Option<usize> {
+    let left_padding = Line::from(TAB_PADDING_LEFT).width() as u16;
+    let right_padding = Line::from(TAB_PADDING_RIGHT).width() as u16;
+    let divider_width = Span::raw(TAB_DIVIDER).width() as u16;
+    let mut x = 0u16;
+
+    for (i, title) in titles.iter().enumerate() {
+        let title_width = tab_title_line(i, title).width() as u16;
+        let tab_width = left_padding + title_width + right_padding;
+        if column >= x && column < x + tab_width {
+            return Some(i);
+        }
+        x += tab_width;
+        if i + 1 < titles.len() {
+            x += divider_width;
+        }
+    }
+
+    None
+}
+
+fn tab_hit_index(app: &App, column: u16) -> Option<usize> {
+    let titles: Vec<&str> = app.pages.iter().map(|page| page.title()).collect();
+    tab_hit_index_for_titles(&titles, column)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,19 +296,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .pages
         .iter()
         .enumerate()
-        .map(|(i, page)| {
-            let num = format!("{}", i + 1);
-            Line::from(vec![
-                Span::styled(
-                    num,
-                    Style::default()
-                        .fg(ACCENT_COLD)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(":", Style::default().fg(TEXT_MUTED)),
-                Span::styled(page.title(), Style::default().fg(TEXT_BRIGHT)),
-            ])
-        })
+        .map(|(i, page)| tab_title_line(i, page.title()))
         .collect();
 
     let tabs = Tabs::new(titles)
@@ -277,7 +308,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .bg(BG)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
-        .divider(Span::styled(" | ", Style::default().fg(TEXT_MUTED)))
+        .divider(Span::styled(TAB_DIVIDER, Style::default().fg(TEXT_MUTED)))
+        .padding(TAB_PADDING_LEFT, TAB_PADDING_RIGHT)
         .block(
             Block::default()
                 .title(" THERMAL CONDUCTOR ")
@@ -400,19 +432,8 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
                     if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
                         && mouse.row < 3
                     {
-                        // Tab labels are rendered as "{N}:{title}" separated by
-                        // " | " (3 chars). The Tabs widget sits inside a Block which
-                        // adds a 1-char left border/padding. Compute clickable regions
-                        // from the actual title lengths.
-                        let mut x = 1u16; // start after left border
-                        for (i, page) in app.pages.iter().enumerate() {
-                            // Rendered width: digit + ":" + title
-                            let tab_width = (1 + 1 + page.title().len()) as u16;
-                            if mouse.column >= x && mouse.column < x + tab_width {
-                                app.set_tab(i);
-                                break;
-                            }
-                            x += tab_width + 3; // " | " divider
+                        if let Some(idx) = tab_hit_index(&app, mouse.column) {
+                            app.set_tab(idx);
                         }
                     } else if mouse.row >= 3 {
                         // Delegate to the active page for clicks below the tab bar.
@@ -450,4 +471,37 @@ fn is_text_input_page(app: &App) -> bool {
     app.pages
         .get(app.active_tab)
         .is_some_and(|page| page.has_text_focus())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        TAB_DIVIDER, TAB_PADDING_LEFT, TAB_PADDING_RIGHT, tab_hit_index_for_titles, tab_title_line,
+    };
+    use ratatui::text::{Line, Span};
+
+    #[test]
+    fn tab_hit_testing_matches_rendered_widths() {
+        let titles = ["Sessions", "Profiles", "Services", "Settings", "Chat"];
+        let left_padding = Line::from(TAB_PADDING_LEFT).width() as u16;
+        let right_padding = Line::from(TAB_PADDING_RIGHT).width() as u16;
+        let divider_width = Span::raw(TAB_DIVIDER).width() as u16;
+
+        let mut x = 0u16;
+        for (i, title) in titles.iter().enumerate() {
+            let title_width = tab_title_line(i, title).width() as u16;
+            let tab_width = left_padding + title_width + right_padding;
+
+            assert_eq!(tab_hit_index_for_titles(&titles, x), Some(i));
+            assert_eq!(tab_hit_index_for_titles(&titles, x + tab_width - 1), Some(i));
+
+            x += tab_width;
+            if i + 1 < titles.len() {
+                for divider_col in x..x + divider_width {
+                    assert_eq!(tab_hit_index_for_titles(&titles, divider_col), None);
+                }
+                x += divider_width;
+            }
+        }
+    }
 }

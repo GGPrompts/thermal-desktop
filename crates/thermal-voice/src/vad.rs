@@ -6,12 +6,8 @@
 //!
 //! The `VadEvent` interface is preserved for callers in `main.rs`.
 
-use ndarray::{s, Array1, Array2, ArrayD, IxDyn};
-use ort::{
-    execution_providers::CPUExecutionProvider,
-    session::Session,
-    value::Tensor,
-};
+use ndarray::{Array1, Array2, ArrayD, IxDyn, s};
+use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
 use tracing::{debug, error};
 
 /// The bundled Silero VAD v5 ONNX model (opset 16, supports 8 kHz and 16 kHz).
@@ -120,7 +116,10 @@ impl VadDetector {
         let state_tensor = Tensor::from_array(self.state.clone()).ok()?;
         let sr_tensor = Tensor::from_array(sr_array).ok()?;
 
-        let outputs = match self.session.run(ort::inputs![input_tensor, state_tensor, sr_tensor]) {
+        let outputs = match self
+            .session
+            .run(ort::inputs![input_tensor, state_tensor, sr_tensor])
+        {
             Ok(o) => o,
             Err(e) => {
                 debug!("silero inference error: {e}");

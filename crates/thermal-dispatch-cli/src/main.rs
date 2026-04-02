@@ -82,9 +82,7 @@ async fn main() -> Result<()> {
                     sock.display()
                 );
             }
-            return Err(e).with_context(|| {
-                format!("could not connect to {}", sock.display())
-            });
+            return Err(e).with_context(|| format!("could not connect to {}", sock.display()));
         }
     };
 

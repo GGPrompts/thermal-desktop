@@ -75,3 +75,6 @@ raw-window-handle = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
 md-5 = "0.10"
 tempfile = "3"
+
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }

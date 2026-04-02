@@ -445,21 +445,26 @@ impl Renderer {
                 if let Some(subagents) = subagent_map.get(&session.session_id) {
                     if !subagents.is_empty() {
                         let icon_y = bar_y - SUBAGENT_ICON_SIZE - 2.0;
-                        let icon_start_x =
-                            tab_x + tab_width - TAB_PADDING - (subagents.len() as f32 * (SUBAGENT_ICON_SIZE + 2.0));
+                        let icon_start_x = tab_x + tab_width
+                            - TAB_PADDING
+                            - (subagents.len() as f32 * (SUBAGENT_ICON_SIZE + 2.0));
 
                         for (j, sub) in subagents.iter().enumerate() {
                             let ix = icon_start_x + j as f32 * (SUBAGENT_ICON_SIZE + 2.0);
 
                             // Determine if this subagent needs attention.
-                            let needs_attention =
-                                matches!(sub.status, ClaudeStatus::AwaitingInput)
-                                    || sub.consecutive_failures.unwrap_or(0) > 0;
+                            let needs_attention = matches!(sub.status, ClaudeStatus::AwaitingInput)
+                                || sub.consecutive_failures.unwrap_or(0) > 0;
 
                             // Background highlight for attention-needing subagents.
                             if needs_attention {
                                 rect_quads.push((
-                                    [ix - 1.0, icon_y - 1.0, SUBAGENT_ICON_SIZE + 2.0, SUBAGENT_ICON_SIZE + 2.0],
+                                    [
+                                        ix - 1.0,
+                                        icon_y - 1.0,
+                                        SUBAGENT_ICON_SIZE + 2.0,
+                                        SUBAGENT_ICON_SIZE + 2.0,
+                                    ],
                                     ThermalPalette::SEARING,
                                 ));
                             }

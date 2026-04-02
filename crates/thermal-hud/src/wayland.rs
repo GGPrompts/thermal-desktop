@@ -394,7 +394,9 @@ pub async fn run() -> anyhow::Result<()> {
         tracing::info!("Using daemon semantic subscription for agent state (source: daemon)");
         None
     } else {
-        tracing::info!("Daemon not available — using ClaudeStatePoller fallback (source: file-derived)");
+        tracing::info!(
+            "Daemon not available — using ClaudeStatePoller fallback (source: file-derived)"
+        );
         Some(
             ClaudeStatePoller::new()
                 .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?,
@@ -494,10 +496,7 @@ pub async fn run() -> anyhow::Result<()> {
 
                 for s in sessions {
                     if let Some(ref parent_id) = s.parent_session_id {
-                        subagent_map
-                            .entry(parent_id.clone())
-                            .or_default()
-                            .push(s);
+                        subagent_map.entry(parent_id.clone()).or_default().push(s);
                     } else {
                         parents.push(s);
                     }

@@ -7,26 +7,30 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::TermDamage;
 use alacritty_terminal::term::cell::Flags;
 
-use crate::grid_renderer::{self, RenderCell};
+use crate::grid_renderer::{self, RenderCell, cell_display_text};
 
-use super::ConductorWindow;
+use super::{ConductorWindow, RenderStatus};
 use super::url_detection::detect_urls_in_cells;
 
 impl ConductorWindow {
     /// Render a frame: clear to BG, then render the terminal grid.
     // TODO: [code-review] extract render_terminal_grid, render_overlays, render_hud sub-methods
-    pub(super) fn render_frame(&mut self) {
+    pub(super) fn render_frame(&mut self) -> RenderStatus {
         let output = match self.wgpu.surface.get_current_texture() {
             Ok(t) => t,
-            Err(wgpu::SurfaceError::Outdated) => {
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
                 self.wgpu
                     .surface
                     .configure(&self.wgpu.device, &self.wgpu.config);
-                return;
+                return RenderStatus::Retry;
             }
-            Err(e) => {
-                tracing::warn!("Failed to acquire surface texture: {}", e);
-                return;
+            Err(wgpu::SurfaceError::Timeout) => {
+                tracing::debug!("Timed out acquiring surface texture; retrying");
+                return RenderStatus::Retry;
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                tracing::error!("Out of memory while acquiring surface texture");
+                return RenderStatus::Fatal;
             }
         };
 
@@ -239,7 +243,7 @@ impl ConductorWindow {
 
                             self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                             output.present();
-                            return;
+                            return RenderStatus::Presented;
                         }
                         Some(set)
                     }
@@ -286,6 +290,7 @@ impl ConductorWindow {
                     row,
                     col: point.column.0,
                     c: cell.c,
+                    text: cell_display_text(cell.c, cell.zerowidth()),
                     fg: cell.fg,
                     bg: cell.bg,
                     flags: cell.flags,
@@ -423,5 +428,6 @@ impl ConductorWindow {
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        RenderStatus::Presented
     }
 }

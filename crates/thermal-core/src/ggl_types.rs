@@ -2,6 +2,10 @@
 //!
 //! The raw generated types are versioned (`AgentIdV1`, `TaskStateV1`).
 //! This module re-exports them under stable names for use across the codebase.
+//!
+//! NOTE: The `include!()` below pulls in Rust code generated at build time by
+//! `ggl-build` (see `build.rs`). rust-analyzer will only resolve these types if
+//! build scripts are enabled (`rust-analyzer.cargo.buildScripts.enable: true`).
 
 use std::fmt;
 use std::str::FromStr;

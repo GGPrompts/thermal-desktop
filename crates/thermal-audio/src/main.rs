@@ -809,9 +809,7 @@ async fn main() -> Result<()> {
         Some(stream) => {
             run_daemon_event_loop(stream, &mut audio, &mut voices, audio_state, sock_rx).await
         }
-        None => {
-            run_poll_loop(&mut audio, &mut voices, audio_state, sock_rx).await
-        }
+        None => run_poll_loop(&mut audio, &mut voices, audio_state, sock_rx).await,
     }
 }
 
@@ -1018,7 +1016,10 @@ fn daemon_session_label(snap: &daemon_client::SemanticSessionSnapshot) -> String
         }
     }
     if let Some(ref cwd) = snap.cwd {
-        if let Some(name) = std::path::Path::new(cwd).file_name().and_then(|n| n.to_str()) {
+        if let Some(name) = std::path::Path::new(cwd)
+            .file_name()
+            .and_then(|n| n.to_str())
+        {
             if !name.is_empty() {
                 return name.to_string();
             }
@@ -1029,7 +1030,11 @@ fn daemon_session_label(snap: &daemon_client::SemanticSessionSnapshot) -> String
 
 /// Short session ID for labels.
 fn short_id(id: &str) -> String {
-    if id.len() > 8 { id[..8].to_string() } else { id.to_string() }
+    if id.len() > 8 {
+        id[..8].to_string()
+    } else {
+        id.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,7 @@ use glyphon::{
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use thermal_core::palette::Color as PaletteColor;
+use thermal_core::text::glyphon_color_mode_for_surface;
 
 use crate::font_config::FontConfig;
 use crate::kitty_graphics::ImageStore;
@@ -68,6 +69,8 @@ pub struct RenderCell {
     pub col: usize,
     /// The character to display.
     pub c: char,
+    /// Full text for the cell, including attached zero-width codepoints.
+    pub text: String,
     /// Foreground color.
     pub fg: AnsiColor,
     /// Background color.
@@ -76,6 +79,16 @@ pub struct RenderCell {
     pub flags: Flags,
     /// Hyperlink URI from OSC 8 or regex URL detection.
     pub hyperlink: Option<String>,
+}
+
+/// Build the full rendered text for a terminal cell.
+pub(crate) fn cell_display_text(c: char, zerowidth: Option<&[char]>) -> String {
+    let mut text = String::with_capacity(1 + zerowidth.map_or(0, |extra| extra.len()));
+    text.push(if c == '\0' { ' ' } else { c });
+    for ch in zerowidth.into_iter().flatten() {
+        text.push(*ch);
+    }
+    text
 }
 
 // ── CachedRow — cached per-row cell data ─────────────────────────────────
@@ -274,8 +287,11 @@ impl GridRenderer {
         }
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
-        let mut atlas = TextAtlas::new(device, queue, &cache, surface_format);
-        let mut overlay_atlas = TextAtlas::new(device, queue, &cache, surface_format);
+        let color_mode = glyphon_color_mode_for_surface(surface_format);
+        let mut atlas =
+            TextAtlas::with_color_mode(device, queue, &cache, surface_format, color_mode);
+        let mut overlay_atlas =
+            TextAtlas::with_color_mode(device, queue, &cache, surface_format, color_mode);
         let viewport = {
             let mut vp = Viewport::new(device, &cache);
             vp.update(queue, Resolution { width, height });
@@ -582,6 +598,7 @@ impl GridRenderer {
                     row: cell.row,
                     col: cell.col,
                     c: cell.c,
+                    text: cell.text.clone(),
                     fg: cell.fg,
                     bg: cell.bg,
                     flags: cell.flags,
@@ -896,8 +913,6 @@ impl GridRenderer {
                     continue;
                 }
 
-                let ch = if cell.c == '\0' { ' ' } else { cell.c };
-
                 // Determine foreground color (with cursor inversion).
                 let is_block_cursor = cursor.shape == CursorShape::Block
                     && cursor_col == cell.col
@@ -915,7 +930,7 @@ impl GridRenderer {
 
                 // Skip pure spaces (no need to render — background handles them).
                 // Exception: cursor cell (needs inverted text rendered).
-                if ch == ' ' && !is_block_cursor {
+                if cell.c == ' ' && !is_block_cursor {
                     continue;
                 }
 
@@ -934,16 +949,15 @@ impl GridRenderer {
                     Some(self.cell_height + 4.0),
                 );
 
-                let s: String = ch.to_string();
                 let attrs = Attrs::new()
                     .family(Family::Name(&self.font_config.family))
                     .color(f32_to_glyph_color(fg));
-                let shaping = if ch.is_ascii() {
+                let shaping = if cell.text.is_ascii() {
                     Shaping::Basic
                 } else {
                     Shaping::Advanced
                 };
-                buf.set_text(&mut self.font_system, &s, attrs, shaping);
+                buf.set_text(&mut self.font_system, &cell.text, attrs, shaping);
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
         }
@@ -1103,3 +1117,19 @@ impl GridRenderer {
 }
 
 // (Color mapping helpers extracted to color_mapping.rs)
+
+#[cfg(test)]
+mod tests {
+    use super::cell_display_text;
+
+    #[test]
+    fn cell_display_text_preserves_zero_width_codepoints() {
+        assert_eq!(cell_display_text('⚙', Some(&['\u{fe0f}'])), "⚙️");
+        assert_eq!(cell_display_text('a', Some(&['\u{0301}'])), "á");
+    }
+
+    #[test]
+    fn cell_display_text_normalizes_nul_to_space() {
+        assert_eq!(cell_display_text('\0', None), " ");
+    }
+}

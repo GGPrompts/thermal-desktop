@@ -87,7 +87,9 @@ impl AgentType {
             .split_whitespace()
             .map(|token| {
                 token
-                    .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '/')
+                    .trim_matches(|c: char| {
+                        !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '/'
+                    })
                     .rsplit('/')
                     .next()
                     .unwrap_or(token)
@@ -96,10 +98,7 @@ impl AgentType {
             .filter(|token| !token.is_empty())
             .collect();
 
-        if tokens
-            .iter()
-            .any(|token| token == "gh")
-            && tokens.iter().any(|token| token == "copilot")
+        if tokens.iter().any(|token| token == "gh") && tokens.iter().any(|token| token == "copilot")
         {
             Some(AgentType::Copilot)
         } else if tokens.iter().any(|token| token.contains("claude")) {
@@ -841,9 +840,7 @@ impl AgentStateInference {
                                 trace!(field = "context_percent", value = pct, "state dirty");
                                 self.context_percent = Some(pct);
                                 self.dirty = true;
-                                self.emit(StateChangeNotification::ContextUpdated {
-                                    percent: pct,
-                                });
+                                self.emit(StateChangeNotification::ContextUpdated { percent: pct });
                             }
                             return;
                         }

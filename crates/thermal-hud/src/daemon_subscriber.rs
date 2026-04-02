@@ -229,7 +229,9 @@ pub enum Response {
     // 8: Ok
     Ok,
     // 9: Error
-    Error { message: String },
+    Error {
+        message: String,
+    },
     // 10: Pong
     Pong,
 }
@@ -446,8 +448,7 @@ pub fn try_spawn_subscriber() -> Option<watch::Receiver<Vec<ClaudeSessionState>>
             const GRACE_SECS: u64 = 8;
             const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-            let deadline =
-                tokio::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(GRACE_SECS);
             let mut reconnected = false;
 
             info!("Disconnect — entering {GRACE_SECS}s grace period (retaining last snapshot)");
@@ -498,9 +499,7 @@ pub fn try_spawn_subscriber() -> Option<watch::Receiver<Vec<ClaudeSessionState>>
     Some(rx)
 }
 
-async fn run_subscription(
-    tx: &watch::Sender<Vec<ClaudeSessionState>>,
-) -> anyhow::Result<()> {
+async fn run_subscription(tx: &watch::Sender<Vec<ClaudeSessionState>>) -> anyhow::Result<()> {
     let sock = socket_path();
     let stream = tokio::time::timeout(
         std::time::Duration::from_secs(3),

@@ -264,7 +264,9 @@ pub enum Response {
     // 8: Ok
     Ok,
     // 9: Error
-    Error { message: String },
+    Error {
+        message: String,
+    },
     // 10: Pong
     Pong,
 }
@@ -357,7 +359,10 @@ async fn connect_and_subscribe_inner(
     let stream = match UnixStream::connect(sock_path).await {
         Ok(s) => s,
         Err(e) => {
-            warn!("cannot connect to conductor daemon at {}: {e}", sock_path.display());
+            warn!(
+                "cannot connect to conductor daemon at {}: {e}",
+                sock_path.display()
+            );
             return Ok(None);
         }
     };

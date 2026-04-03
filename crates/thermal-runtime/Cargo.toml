@@ -1,0 +1,12 @@
+[package]
+name = "thermal-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Runtime path helpers, pidfile management, and socket cleanup for thermal daemons (no GPU deps)"
+
+[dependencies]
+nix = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

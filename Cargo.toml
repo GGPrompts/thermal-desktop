@@ -7,6 +7,8 @@ members = [
     "crates/thermal-lock",
     "crates/thermal-audio",
     "crates/thermal-core",
+    "crates/thermal-protocol",
+    "crates/thermal-runtime",
     "crates/thermal-commander",
     "crates/thermal-dispatcher",
     "crates/thermal-screensaver",

@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
 };
 
-use thermal_core::{ClaudeStatus, palette::ThermalPalette};
+use thermal_core::{ClaudeStatus, SessionStateExt, palette::ThermalPalette};
 
 use super::format::*;
 use super::{FocusedPanel, SessionsPage};

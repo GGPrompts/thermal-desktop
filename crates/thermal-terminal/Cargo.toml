@@ -12,6 +12,7 @@ default = []
 bell_detection = []
 
 [dependencies]
+thermal-protocol = { path = "../thermal-protocol" }
 anyhow = { workspace = true }
 nix = { workspace = true }
 tokio = { workspace = true }

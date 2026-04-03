@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use tokio::sync::broadcast;
 
-use thermal_core::ClaudeSessionState;
+use thermal_core::{ClaudeSessionState, SessionStateExt};
 use thermal_core::message::{AgentId, Message, MessageType};
 
 use super::SessionsPage;

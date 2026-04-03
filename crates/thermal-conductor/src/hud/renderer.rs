@@ -13,7 +13,7 @@ use glyphon::{
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use thermal_core::{ClaudeSessionState, ClaudeStatus, ThermalPalette};
+use thermal_core::{ClaudeSessionState, ClaudeStatus, SessionStateExt, ThermalPalette};
 
 use super::voice::{HudMode, RESULT_DIM_SECS, VoiceState};
 use wgpu::{

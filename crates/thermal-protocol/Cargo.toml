@@ -1,0 +1,12 @@
+[package]
+name = "thermal-protocol"
+version.workspace = true
+edition.workspace = true
+description = "Lightweight wire protocol types for the thermal desktop suite (no GPU deps)"
+
+[build-dependencies]
+ggl-build = { path = "../../../ggl/proto/ggl-build" }
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -64,12 +64,20 @@ pub use crate::ggl_types::{ClaudeStatus, ToolArgs, ToolDetails};
 /// codebase.
 pub type ClaudeSessionState = crate::ggl_types::SessionState;
 
-impl ClaudeSessionState {
+/// Extension trait adding display-name logic to `SessionState` / `ClaudeSessionState`.
+///
+/// Since `SessionState` is defined in `thermal-protocol`, we cannot add inherent
+/// methods in this crate. Import this trait to call `.model_display_name()`.
+pub trait SessionStateExt {
     /// Return a short, human-friendly display name derived from the `model` field.
     ///
     /// Delegates to the free function [`model_display_name`] for the actual
     /// mapping. Falls back to `agent_type` when no model is set.
-    pub fn model_display_name(&self) -> String {
+    fn model_display_name(&self) -> String;
+}
+
+impl SessionStateExt for ClaudeSessionState {
+    fn model_display_name(&self) -> String {
         let Some(raw) = self.model.as_deref() else {
             // No model field — fall back to agent_type
             return self.agent_type.as_deref().unwrap_or("unknown").to_string();

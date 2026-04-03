@@ -7,6 +7,8 @@ edition.workspace = true
 ggl-build = { path = "../../../ggl/proto/ggl-build" }
 
 [dependencies]
+thermal-protocol = { path = "../thermal-protocol" }
+thermal-runtime = { path = "../thermal-runtime" }
 wgpu = { workspace = true }
 glyphon = { workspace = true }
 serde = { workspace = true }

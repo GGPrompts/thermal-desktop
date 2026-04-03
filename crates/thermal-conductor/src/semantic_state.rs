@@ -35,7 +35,7 @@ use crate::protocol::{
     AgentActivity, AgentRuntime, ContextState, ContextThreshold, EventScope, SemanticEvent,
     SemanticEventKind, SemanticSessionSnapshot, SnapshotSync,
 };
-use thermal_core::{ClaudeSessionState, ClaudeStatus};
+use thermal_core::{ClaudeSessionState, ClaudeStatus, SessionStateExt};
 use thermal_terminal::StateChangeNotification;
 use thermal_terminal::state_inference::{AgentType, InferredStatus};
 

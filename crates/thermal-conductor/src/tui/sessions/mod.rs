@@ -33,7 +33,9 @@ use ratatui::{
 #[cfg(test)]
 use thermal_core::message::AgentId;
 
-use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, palette::ThermalPalette};
+use thermal_core::{
+    ClaudeSessionState, ClaudeStatePoller, ClaudeStatus, SessionStateExt, palette::ThermalPalette,
+};
 
 use crate::agent_timeline::{AgentTimeline, ToolCategory};
 use crate::backend::BackendPreference;

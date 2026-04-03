@@ -1,0 +1,130 @@
+-- thermal-protocol.ggl
+-- Core wire protocol types for the thermal message bus.
+-- Generated Rust types are included via build.rs + include!().
+
+-- AgentId: identifies a participant on the message bus.
+type AgentId {
+    @v1 {
+        agent_type: String,
+        key: String,
+    }
+}
+
+-- TaskState: lifecycle state for a tracked task.
+type TaskState {
+    @v1 enum {
+        Submitted,
+        Working,
+        Completed,
+        Failed,
+        InputRequired,
+    }
+}
+
+-- ClaudeStatus: status of an agent session.
+-- Per-type override in build.rs adds #[serde(rename_all = "snake_case")].
+type ClaudeStatus {
+    @v1 enum {
+        Idle,
+        Processing,
+        ToolUse,
+        AwaitingInput,
+    }
+}
+
+-- ToolArgs: argument details from a tool invocation.
+type ToolArgs {
+    @v1 {
+        file_path: Option<String>,
+        command: Option<String>,
+        pattern: Option<String>,
+        description: Option<String>,
+    }
+}
+
+-- ToolDetails: tool event metadata from the Claude state file.
+type ToolDetails {
+    @v1 {
+        event: Option<String>,
+        tool: Option<String>,
+        args: Option<ToolArgs@v1>,
+    }
+}
+
+-- SessionState: unified agent session state, read from /tmp/*-state/ JSON files.
+-- Replaces the previous split between StateFile (writer) and ClaudeSessionState (reader).
+type SessionState {
+    @v1 {
+        session_id: String,
+        parent_session_id: Option<String>,
+        agent_id: Option<String>,
+        agent_type: Option<String>,
+        model: Option<String>,
+        status: ClaudeStatus@v1,
+        current_tool: Option<String>,
+        subagent_count: Option<Int>,
+        context_percent: Option<Float>,
+        working_dir: Option<String>,
+        last_updated: Option<String>,
+        details: Option<ToolDetails@v1>,
+        hook_type: Option<String>,
+        tmux_pane: Option<String>,
+        pid: Option<Int>,
+        workspace: Option<Int>,
+        source: Option<String>,
+        last_command: Option<String>,
+        last_exit_code: Option<Int>,
+        last_command_started_at: Option<String>,
+        last_command_duration_ms: Option<Int>,
+        consecutive_failures: Option<Int>,
+    }
+}
+
+-- Layout: pane layout strategy for the thermal-conductor dashboard.
+type Layout {
+    @v1 enum {
+        Grid,
+        Sidebar,
+        Stack,
+    }
+}
+
+-- AgentState: operational state of a single agent pane.
+type AgentState {
+    @v1 enum {
+        Idle,
+        Running,
+        Thinking,
+        Warning,
+        Error,
+        Complete,
+    }
+}
+
+-- PaneInfo: snapshot of a single tmux/PTY pane's state and metadata.
+-- output_lines/created_at/updated_at are Int (i64) in codegen; callers use as usize/u64.
+type PaneInfo {
+    @v1 {
+        id: String,
+        title: String,
+        state: AgentState@v1,
+        command: String,
+        last_output_line: String,
+        output_lines: Int,
+        created_at: Int,
+        updated_at: Int,
+    }
+}
+
+-- ConductorConfig: top-level configuration for the thermal-conductor component.
+-- Note: max_panes and capture_fps are Int (i64) in codegen; callers use as usize/u32.
+type ConductorConfig {
+    @v1 {
+        tmux_session: String,
+        max_panes: Int,
+        capture_fps: Int,
+        layout: Layout@v1,
+        audio_enabled: Bool,
+        dbus_enabled: Bool,
+    }
+}

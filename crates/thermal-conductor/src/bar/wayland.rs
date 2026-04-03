@@ -1,7 +1,8 @@
-/// Wayland layer-shell surface for thermal-bar.
+/// Wayland layer-shell surface for the status bar.
 ///
 /// Uses smithay-client-toolkit 0.19 to create a wlr-layer-shell surface
 /// anchored to the top of the screen with a 32px exclusive zone.
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit as sctk;
@@ -31,14 +32,16 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
 };
 
-use crate::layout::BarLayout;
-use crate::modules::claude_module::ClaudeModule;
-use crate::modules::clock::ClockModule;
-use crate::modules::metrics_module::MetricsModule;
-use crate::modules::voice::VoiceModule;
-use crate::modules::workspace_map::WorkspaceMapModule;
-use crate::renderer::Renderer;
-use crate::sparkline::SparklineSet;
+use crate::semantic_state::SemanticEventBus;
+
+use super::layout::BarLayout;
+use super::modules::claude_module::ClaudeModule;
+use super::modules::clock::ClockModule;
+use super::modules::metrics_module::MetricsModule;
+use super::modules::voice::VoiceModule;
+use super::modules::workspace_map::WorkspaceMapModule;
+use super::renderer::Renderer;
+use super::sparkline::SparklineSet;
 
 /// Height of the bar in pixels.
 pub const BAR_HEIGHT: u32 = 32;
@@ -50,11 +53,8 @@ pub const BAR_HEIGHT: u32 = 32;
 /// An action to execute when a bar region is clicked.
 #[derive(Debug, Clone)]
 pub enum ClickAction {
-    /// Switch to workspace N via hyprctl.
     WorkspaceSwitch(i64),
-    /// Toggle voice mute via the thermal-voice Unix socket.
     VoiceMuteToggle,
-    /// Focus the session at the given workspace via hyprctl.
     SessionFocus(i64),
 }
 
@@ -69,7 +69,6 @@ pub struct ClickRegion {
 }
 
 impl ClickRegion {
-    /// Test whether a point falls within this region.
     fn hit_test(&self, px: f64, py: f64) -> bool {
         let px = px as f32;
         let py = py as f32;
@@ -77,35 +76,21 @@ impl ClickRegion {
     }
 }
 
-/// State for the thermal-bar Wayland client.
+/// State for the bar Wayland client.
 pub struct BarState {
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
 
-    /// The layer-shell surface representing the bar.
     pub layer: LayerSurface,
-    /// Current width, set after configure.
     pub width: u32,
-    /// Whether we have received and handled the first configure.
     pub configured: bool,
-    /// Set to true to exit the event loop.
     pub exit: bool,
 
-    // Pointer interaction state
     pointer: Option<WlPointer>,
     pointer_position: (f64, f64),
-    /// Click regions rebuilt each render cycle.
     pub click_regions: Vec<ClickRegion>,
-    /// Pending click action to execute after event dispatch.
     pub pending_click: Option<ClickAction>,
-}
-
-impl BarState {
-    /// Commit an empty (null) buffer so the compositor will send a configure.
-    pub fn commit_empty(&self) {
-        self.layer.commit();
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +123,6 @@ impl CompositorHandler for BarState {
         _surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        // Stub: rendering will be wired in task 2.
     }
 
     fn surface_enter(
@@ -203,8 +187,6 @@ impl LayerShellHandler for BarState {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        // Width 0 means "stretch to full output width" — compositor will pick.
-        // We still record whatever the compositor tells us.
         if configure.new_size.0 != 0 {
             self.width = configure.new_size.0;
         }
@@ -215,9 +197,6 @@ impl LayerShellHandler for BarState {
             "layer surface configured"
         );
 
-        // Only commit on the first configure to acknowledge and map the surface.
-        // Subsequent configures are handled by the render loop which commits
-        // with an actual buffer attached, avoiding an infinite configure loop.
         if !self.configured {
             self.configured = true;
             self.layer.wl_surface().commit();
@@ -318,36 +297,34 @@ impl ProvidesRegistryState for BarState {
 // ---------------------------------------------------------------------------
 
 /// Connect to the Wayland compositor, create a layer-shell bar surface, and
-/// enter the event loop.  Returns when the surface is closed or an error occurs.
-pub async fn run() -> anyhow::Result<()> {
-    // Connect to the Wayland compositor via WAYLAND_DISPLAY.
+/// enter the event loop. Returns when the surface is closed or an error occurs.
+///
+/// This runs on a dedicated thread -- it blocks on the Wayland event queue.
+/// Agent session state is read directly from the conductor's `SemanticEventBus`.
+pub fn run(event_bus: Arc<SemanticEventBus>) -> anyhow::Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
-    // Bind Wayland globals.
     let compositor = CompositorState::bind(&globals, &qh)
         .map_err(|e| anyhow::anyhow!("wl_compositor not available: {e}"))?;
     let layer_shell = LayerShell::bind(&globals, &qh)
         .map_err(|e| anyhow::anyhow!("wlr-layer-shell not available: {e}"))?;
 
-    // Create a Wayland surface and wrap it in a layer-shell surface.
     let wl_surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(
         &qh,
         wl_surface,
         Layer::Top,
         Some("thermal-bar"),
-        None, // no specific output → appears on all outputs / primary
+        None,
     );
 
-    // Configure bar geometry: full-width strip anchored to the top.
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(BAR_HEIGHT as i32);
-    layer.set_size(0, BAR_HEIGHT); // width 0 → full output width
+    layer.set_size(0, BAR_HEIGHT);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 
-    // Initial commit: no buffer attached — compositor will send a configure.
     layer.commit();
 
     let mut bar = BarState {
@@ -355,7 +332,7 @@ pub async fn run() -> anyhow::Result<()> {
         seat_state: SeatState::new(&globals, &qh),
         output_state: OutputState::new(&globals, &qh),
         layer,
-        width: 1920, // sane default until compositor configures us
+        width: 1920,
         configured: false,
         exit: false,
         pointer: None,
@@ -364,19 +341,16 @@ pub async fn run() -> anyhow::Result<()> {
         pending_click: None,
     };
 
-    tracing::info!("thermal-bar: waiting for compositor configure");
+    tracing::info!("Bar: waiting for compositor configure");
 
-    // Phase 1: Block until the compositor sends the first configure event,
-    // which tells us the actual surface dimensions.
     while !bar.configured {
         event_queue.blocking_dispatch(&mut bar)?;
         if bar.exit {
-            tracing::info!("thermal-bar: exit before configure");
+            tracing::info!("Bar: exit before configure");
             return Ok(());
         }
     }
 
-    // Phase 2: Initialize the wgpu renderer now that we know the surface size.
     let display_ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
     let surface_ptr = bar
         .layer
@@ -385,48 +359,50 @@ pub async fn run() -> anyhow::Result<()> {
         .as_ptr()
         .cast::<std::ffi::c_void>();
 
-    let mut renderer =
-        Renderer::new_from_wayland(display_ptr, surface_ptr, bar.width, BAR_HEIGHT).await?;
+    let mut renderer = pollster::block_on(Renderer::new_from_wayland(
+        display_ptr,
+        surface_ptr,
+        bar.width,
+        BAR_HEIGHT,
+    ))?;
 
     tracing::info!(
         width = bar.width,
         height = BAR_HEIGHT,
-        "thermal-bar: renderer initialized, entering render loop"
+        "Bar: renderer initialized, entering render loop"
     );
 
-    // Phase 3: Render loop — poll metrics, build layout, render, dispatch events.
+    // Initialize modules.
     let metrics_module = MetricsModule::new();
     let clock_module = ClockModule::new();
     let workspace_module = WorkspaceMapModule::new();
-    let mut claude_module = ClaudeModule::new();
+    let claude_module = ClaudeModule::new(Arc::clone(&event_bus));
     let voice_module = VoiceModule::new();
     let mut sparklines = SparklineSet::new();
     let mut last_metrics = Instant::now();
 
-    // Do an initial metrics poll to seed the CPU delta.
-    let _ = crate::metrics::SystemMetrics::poll_full();
+    // Seed the CPU delta.
+    let _ = super::metrics::SystemMetrics::poll_full();
 
     loop {
-        // Non-blocking dispatch of any pending Wayland events.
+        // Non-blocking dispatch of Wayland events.
         event_queue.dispatch_pending(&mut bar)?;
-        // Flush outgoing requests to the compositor.
         if let Err(e) = conn.flush() {
             tracing::warn!("Wayland conn.flush() failed (DPMS/idle?): {e}");
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
-        // Read any new events that arrived on the socket (non-blocking).
         if let Some(guard) = conn.prepare_read() {
             let _ = guard.read();
             event_queue.dispatch_pending(&mut bar)?;
         }
 
         if bar.exit {
-            tracing::info!("thermal-bar: exit requested");
+            tracing::info!("Bar: exit requested");
             break;
         }
 
-        // Execute any pending click action from the previous dispatch.
+        // Execute pending click action.
         if let Some(action) = bar.pending_click.take() {
             execute_click_action(&action);
         }
@@ -439,43 +415,32 @@ pub async fn run() -> anyhow::Result<()> {
         // Build layout from modules.
         let mut layout = BarLayout::new(bar.width);
 
-        // Left zone: system metrics.
         layout.left = metrics_module.render();
-
-        // Center zone: workspace map with window icons.
         layout.center = workspace_module.render();
 
-        // Right zone: voice status + Claude status + clock + date.
         let mut right_outputs = voice_module.render();
         right_outputs.extend(claude_module.render());
         right_outputs.extend(clock_module.render());
         layout.right = right_outputs;
 
-        // Rebuild click regions from the positioned module layout.
         build_click_regions(&layout, &mut bar.click_regions);
 
         // Update sparklines once per second.
         if last_metrics.elapsed() >= Duration::from_secs(1) {
-            let m = crate::metrics::SystemMetrics::poll_full();
+            let m = super::metrics::SystemMetrics::poll_full();
             sparklines.push_metrics(&m);
             last_metrics = Instant::now();
         }
 
-        // Build sparkline rects — positioned after the left-zone text labels.
         let spark_start_x = layout.left_zone_end() + 8.0;
         let spark_rects = sparklines.render_all(spark_start_x, 6.0);
 
-        // Request the next frame callback before rendering.  This must be done
-        // prior to wgpu's present() (which internally commits the wl_surface)
-        // so the compositor associates the callback with the upcoming frame.
-        // Without this the compositor may stop sending frame events when the
-        // surface is occluded, potentially stalling the render loop.
+        // Request the next frame callback before rendering.
         {
             let wl_surf = bar.layer.wl_surface();
             wl_surf.frame(&qh, wl_surf.clone());
         }
 
-        // Render the bar with sparklines in a single pass.
         match renderer.render_layout(&layout, &spark_rects) {
             Ok(()) => {}
             Err(e) => {
@@ -483,8 +448,6 @@ pub async fn run() -> anyhow::Result<()> {
             }
         }
 
-        // Sleep ~1 second between frames. A status bar doesn't need high FPS;
-        // 1 Hz is sufficient for metrics updates.
         std::thread::sleep(Duration::from_secs(1));
     }
 
@@ -495,13 +458,6 @@ pub async fn run() -> anyhow::Result<()> {
 // Click region helpers
 // ---------------------------------------------------------------------------
 
-/// Rebuild click regions from the current layout.
-///
-/// Maps positioned modules to clickable actions:
-/// - Center zone modules (workspace map): each module text starts with the
-///   workspace ID number, so we parse it and create a WorkspaceSwitch action.
-/// - Right zone voice module: first right-zone module is always the voice
-///   status — clicking it toggles mute.
 fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
     regions.clear();
 
@@ -510,9 +466,7 @@ fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
 
     for module in &positioned {
         match module.zone {
-            crate::layout::Zone::Center => {
-                // Workspace modules have text like "3 \u{f120} \u{f269}".
-                // The workspace ID is the first whitespace-delimited token.
+            super::layout::Zone::Center => {
                 if let Some(ws_id) = module
                     .text
                     .split_whitespace()
@@ -528,14 +482,11 @@ fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
                     });
                 }
             }
-            crate::layout::Zone::Right => {
-                // The voice module is always the first right-zone module
-                // (it renders before agent/clock modules in layout.right).
-                // Detect it by checking for known mic icon codepoints.
-                let is_voice = module.text.starts_with('\u{1F507}')   // muted
-                    || module.text.starts_with('\u{1F50E}')           // monitoring
-                    || module.text.starts_with('\u{1F3A4}')           // listening
-                    || module.text.starts_with('\u{1F525}'); // processing/fire
+            super::layout::Zone::Right => {
+                let is_voice = module.text.starts_with('\u{1F507}')
+                    || module.text.starts_with('\u{1F50E}')
+                    || module.text.starts_with('\u{1F3A4}')
+                    || module.text.starts_with('\u{1F525}');
                 if is_voice {
                     regions.push(ClickRegion {
                         x: module.x,
@@ -551,7 +502,6 @@ fn build_click_regions(layout: &BarLayout, regions: &mut Vec<ClickRegion>) {
     }
 }
 
-/// Execute a click action by spawning the appropriate command.
 fn execute_click_action(action: &ClickAction) {
     match action {
         ClickAction::WorkspaceSwitch(ws) => {
@@ -562,20 +512,20 @@ fn execute_click_action(action: &ClickAction) {
         }
         ClickAction::VoiceMuteToggle => {
             tracing::info!("click: toggling voice mute");
-            // Send toggle command to thermal-voice via its Unix socket.
             let Some(runtime_dir) = std::env::var("XDG_RUNTIME_DIR").ok() else {
                 tracing::warn!("XDG_RUNTIME_DIR not set, cannot toggle voice");
                 return;
             };
             let sock_path = format!("{runtime_dir}/thermal/voice.sock");
-            // Fire-and-forget: try to connect and send the toggle command.
-            // If the socket doesn't exist (daemon not running), silently ignore.
-            tokio::spawn(async move {
-                use tokio::io::AsyncWriteExt;
-                if let Ok(mut stream) = tokio::net::UnixStream::connect(&sock_path).await {
-                    let _ = stream.write_all(b"toggle\n").await;
-                }
-            });
+            // Fire-and-forget via a std thread since we're not on a tokio runtime.
+            let _ = std::thread::Builder::new()
+                .name("voice-toggle".into())
+                .spawn(move || {
+                    use std::io::Write;
+                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
+                        let _ = stream.write_all(b"toggle\n");
+                    }
+                });
         }
         ClickAction::SessionFocus(ws) => {
             tracing::info!(workspace = ws, "click: focusing session workspace");

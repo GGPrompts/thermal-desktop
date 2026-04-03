@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/thermal-conductor",
-    "crates/thermal-bar",
     "crates/thermal-launch",
     "crates/thermal-notify",
     "crates/thermal-lock",

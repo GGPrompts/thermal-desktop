@@ -102,14 +102,7 @@ const SERVICES: &[ServiceDef] = &[
         args: &["listen"],
         doc_content: Some(include_str!("../../../../docs/daemons/thermal-audio.md")),
     },
-    ServiceDef {
-        binary: "thermal-bar",
-        description: "Status bar",
-        pid_source: PidSource::Pgrep,
-        command: None,
-        args: &[],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-bar.md")),
-    },
+    // thermal-bar is now built into thermal-conductor (managed layer-shell surface).
     // thermal-hud is now built into thermal-conductor (managed layer-shell surface).
     ServiceDef {
         binary: "thermal-lock",
@@ -1153,7 +1146,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 8);
+        assert_eq!(SERVICES.len(), 7);
     }
 
     #[test]
@@ -1203,7 +1196,7 @@ mod tests {
         assert_eq!(audio.binary, "thermal-audio");
         assert!(matches!(audio.pid_source, PidSource::Pidfile("audio.pid")));
 
-        let codex = &SERVICES[4];
+        let codex = &SERVICES[3];
         assert_eq!(codex.binary, "codex-state-adapter");
         assert!(matches!(
             codex.pid_source,
@@ -1213,7 +1206,7 @@ mod tests {
 
     #[test]
     fn pgrep_services_use_pgrep_source() {
-        for def in &SERVICES[1..4] {
+        for def in &SERVICES[1..3] {
             assert!(
                 matches!(def.pid_source, PidSource::Pgrep),
                 "{} should use Pgrep source",
@@ -1224,7 +1217,7 @@ mod tests {
 
     #[test]
     fn codex_adapter_uses_script_launch() {
-        let codex = &SERVICES[4];
+        let codex = &SERVICES[3];
         assert_eq!(codex.binary, "codex-state-adapter");
         assert_eq!(codex.args, ["--daemon"]);
         assert!(

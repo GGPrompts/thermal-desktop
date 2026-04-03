@@ -1,10 +1,7 @@
-/// wgpu rendering pipeline for thermal-bar.
+/// wgpu rendering pipeline for the status bar layer-shell surface.
 ///
 /// Provides colored rect rendering (for background fills and separators) and
 /// glyphon-based text rendering with the thermal color palette.
-///
-/// NOTE: Surface creation requires a live Wayland compositor connection.
-///       This module can only be fully tested on bare-metal with a Wayland session.
 use std::ptr::NonNull;
 
 use bytemuck::{Pod, Zeroable};
@@ -26,21 +23,19 @@ use wgpu::{
     VertexBufferLayout, VertexState, VertexStepMode,
 };
 
-use crate::layout::ModuleOutput;
+use super::layout::ModuleOutput;
 
 // ---------------------------------------------------------------------------
 // Vertex layout
 // ---------------------------------------------------------------------------
 
-/// A single colored vertex for rectangle rendering.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct ColorVertex {
-    position: [f32; 2], // NDC coordinates
-    color: [f32; 4],    // RGBA
+    position: [f32; 2],
+    color: [f32; 4],
 }
 
-// Vertex attributes defined as static constants (avoids lifetime issues).
 static RECT_VERTEX_ATTRS: &[VertexAttribute] = &[
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x2,
@@ -49,7 +44,7 @@ static RECT_VERTEX_ATTRS: &[VertexAttribute] = &[
     },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x4,
-        offset: 8, // 2 * sizeof(f32)
+        offset: 8,
         shader_location: 1,
     },
 ];
@@ -116,23 +111,19 @@ impl Renderer {
     ///
     /// # Safety
     ///
-    /// - `wl_display` must be a valid `*mut wl_display` pointer that remains
-    ///   valid for the lifetime of this Renderer.
-    /// - `wl_surface` must be a valid `*mut wl_surface` pointer that remains
-    ///   valid for the lifetime of this Renderer.
+    /// - `wl_display` must be a valid `*mut wl_display` pointer.
+    /// - `wl_surface` must be a valid `*mut wl_surface` pointer.
     pub async fn new_from_wayland(
         wl_display: *mut std::ffi::c_void,
         wl_surface: *mut std::ffi::c_void,
         width: u32,
         height: u32,
     ) -> anyhow::Result<Self> {
-        // Instance::new takes value (not reference) in wgpu 23.
         let instance = Instance::new(InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
             ..Default::default()
         });
 
-        // Build raw window handles for Wayland.
         let raw_display_handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
             NonNull::new(wl_display).ok_or_else(|| anyhow::anyhow!("null wl_display pointer"))?,
         ));
@@ -140,7 +131,6 @@ impl Renderer {
             NonNull::new(wl_surface).ok_or_else(|| anyhow::anyhow!("null wl_surface pointer"))?,
         ));
 
-        // Safety: the caller guarantees the pointers remain valid.
         let surface = unsafe {
             instance.create_surface_unsafe(SurfaceTargetUnsafe::RawHandle {
                 raw_display_handle,
@@ -179,7 +169,6 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
-        // Build the colored-rect pipeline.
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rect_shader"),
             source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
@@ -265,17 +254,14 @@ impl Renderer {
     }
 
     /// Render all modules to the bar surface.
-    ///
-    /// Clears to ThermalPalette::BG, draws module backgrounds and text.
     pub fn render(
         &mut self,
         modules: &[ModuleOutput],
-        spark_rects: &[crate::sparkline::SparkRect],
+        spark_rects: &[super::sparkline::SparkRect],
     ) -> anyhow::Result<()> {
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
-        // Update viewport resolution for glyphon.
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -288,15 +274,11 @@ impl Renderer {
             .device
             .create_command_encoder(&CommandEncoderDescriptor { label: None });
 
-        // Collect text buffers and their placement info.
         let mut text_buffers: Vec<Buffer> = Vec::new();
-        // (buf_idx, x, y, color)
         let mut text_placements: Vec<(usize, f32, f32, [f32; 4])> = Vec::new();
-        // (pixel xywh, color)
         let mut rect_quads: Vec<([f32; 4], [f32; 4])> = Vec::new();
 
         for module in modules {
-            // Background rect.
             if let Some(bg) = module.bg_color {
                 rect_quads.push(([module.x, 0.0, module.width, self.height as f32], bg));
             }
@@ -321,7 +303,6 @@ impl Renderer {
             }
         }
 
-        // Build vertex list for all rect quads + sparkline rects.
         let mut rect_vertices: Vec<ColorVertex> = Vec::new();
         for (xywh, color) in &rect_quads {
             let (x, y, w, h) = (xywh[0], xywh[1], xywh[2], xywh[3]);
@@ -356,7 +337,6 @@ impl Renderer {
             None
         };
 
-        // Build glyphon TextAreas referencing the buffers we just created.
         let has_text = !text_buffers.is_empty();
         if has_text {
             let text_areas: Vec<TextArea<'_>> = text_placements
@@ -418,14 +398,12 @@ impl Renderer {
                 occlusion_query_set: None,
             });
 
-            // Draw background rects.
             if let Some((vbuf, count)) = &rect_vbuf {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, vbuf.slice(..));
                 pass.draw(0..*count, 0..1);
             }
 
-            // Render text.
             if has_text {
                 self.text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)?;
@@ -442,78 +420,11 @@ impl Renderer {
     /// Convenience: render a `BarLayout` with optional sparkline overlay.
     pub fn render_layout(
         &mut self,
-        layout: &crate::layout::BarLayout,
-        spark_rects: &[crate::sparkline::SparkRect],
+        layout: &super::layout::BarLayout,
+        spark_rects: &[super::sparkline::SparkRect],
     ) -> anyhow::Result<()> {
         let modules = layout.all_positioned();
         self.render(&modules, spark_rects)
-    }
-
-    /// Draw a batch of sparkline rects in a single render pass.
-    ///
-    /// This is called after the main `render()` pass to overlay sparkline bars
-    /// on top of the already-rendered bar. In production use, sparkline rects
-    /// would be merged into the main render call for efficiency.
-    pub fn draw_spark_rects(
-        &mut self,
-        rects: &[crate::sparkline::SparkRect],
-    ) -> anyhow::Result<()> {
-        if rects.is_empty() {
-            return Ok(());
-        }
-
-        let frame = self.surface.get_current_texture()?;
-        let view = frame.texture.create_view(&TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor { label: None });
-
-        let mut vertices: Vec<ColorVertex> = Vec::with_capacity(rects.len() * 6);
-        for r in rects {
-            let verts = pixel_rect_to_ndc(
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                self.width as f32,
-                self.height as f32,
-                r.color,
-            );
-            vertices.extend_from_slice(&verts);
-        }
-
-        let data = bytemuck::cast_slice::<ColorVertex, u8>(&vertices);
-        let vbuf = self.device.create_buffer(&BufferDescriptor {
-            label: Some("spark_vbuf"),
-            size: data.len() as u64,
-            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&vbuf, 0, data);
-
-        {
-            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("spark_pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Load, // preserve existing pixels
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.rect_pipeline);
-            pass.set_vertex_buffer(0, vbuf.slice(..));
-            pass.draw(0..vertices.len() as u32, 0..1);
-        }
-
-        self.queue.submit(Some(encoder.finish()));
-        frame.present();
-        Ok(())
     }
 }
 
@@ -521,7 +432,6 @@ impl Renderer {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a pixel-space rect to 6 NDC vertices (two triangles).
 fn pixel_rect_to_ndc(
     px: f32,
     py: f32,

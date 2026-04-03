@@ -1,8 +1,13 @@
 //! D-Bus interface for the session daemon: `org.thermal.Conductor`.
 //!
 //! Provides session lifecycle management (spawn, kill, list) over the session
-//! bus so that thermal-bar, thermal-hud, and other components can discover and
-//! interact with the daemon without a direct Unix socket connection.
+//! bus so that external tools and scripts can discover and interact with the
+//! daemon without a direct Unix socket connection.
+//!
+//! NOTE: thermal-bar and thermal-hud are now built into conductor as managed
+//! layer-shell surfaces and read session state directly from the in-process
+//! `SemanticEventBus`. The D-Bus interface is retained for external consumers
+//! (busctl, scripts, third-party integrations).
 //!
 //! High-frequency screen updates still flow over the Unix socket (see
 //! `protocol.rs`); D-Bus is used only for infrequent management calls and

@@ -4,8 +4,8 @@
 /// returns styled `ModuleOutput` items for the left zone.
 use thermal_core::{ThermalPalette, thermal_gradient_f32};
 
-use crate::layout::{ModuleOutput, Zone};
-use crate::metrics::SystemMetrics;
+use crate::bar::layout::{ModuleOutput, Zone};
+use crate::bar::metrics::SystemMetrics;
 
 pub struct MetricsModule;
 
@@ -19,7 +19,7 @@ impl MetricsModule {
         let m = SystemMetrics::poll_full();
         let mut modules = Vec::new();
 
-        // CPU usage — boost low values so text is always readable.
+        // CPU usage
         let cpu_heat = (m.cpu_usage_pct / 100.0).clamp(0.0, 1.0);
         let cpu_color = thermal_gradient_f32((cpu_heat * 0.5 + 0.5).clamp(0.5, 1.0));
         modules.push(ModuleOutput::new(
@@ -34,7 +34,7 @@ impl MetricsModule {
             let color = thermal_gradient_f32((heat * 0.5 + 0.5).clamp(0.5, 1.0));
             modules.push(ModuleOutput::new(
                 Zone::Left,
-                format!("{:>3.0}°C", temp),
+                format!("{:>3.0}\u{00B0}C", temp),
                 color,
             ));
         }
@@ -55,7 +55,7 @@ impl MetricsModule {
 
         // Network.
         if m.net_rx_kbps > 0.1 || m.net_tx_kbps > 0.1 {
-            let net_str = format!("↓{:.0}K ↑{:.0}K", m.net_rx_kbps, m.net_tx_kbps);
+            let net_str = format!("\u{2193}{:.0}K \u{2191}{:.0}K", m.net_rx_kbps, m.net_tx_kbps);
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 net_str,
@@ -69,7 +69,7 @@ impl MetricsModule {
             let gpu_color = thermal_gradient_f32((gpu_heat * 0.5 + 0.5).clamp(0.5, 1.0));
             modules.push(ModuleOutput::new(
                 Zone::Left,
-                format!("GPU {:>3.0}% {:>3.0}°C", gpu_pct, gpu_temp),
+                format!("GPU {:>3.0}% {:>3.0}\u{00B0}C", gpu_pct, gpu_temp),
                 gpu_color,
             ));
         }

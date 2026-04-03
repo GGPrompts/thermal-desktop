@@ -1,14 +1,11 @@
-/// Clock/date module for thermal-bar's right zone.
-///
-/// Reads the current time by invoking the `date` binary, which is always
-/// available on Linux and avoids pulling in a time crate.
+/// Clock/date module for the bar's right zone.
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use thermal_core::ThermalPalette;
 
-use crate::layout::{ModuleOutput, Zone};
+use crate::bar::layout::{ModuleOutput, Zone};
 
 // ---------------------------------------------------------------------------
 // Cached clock output
@@ -22,7 +19,6 @@ struct ClockCache {
 
 static CLOCK_CACHE: Mutex<Option<ClockCache>> = Mutex::new(None);
 
-/// Refresh the cached time strings if more than 500ms have passed.
 fn refresh_cache(guard: &mut MutexGuard<'_, Option<ClockCache>>) {
     let needs_refresh = match guard.as_ref() {
         None => true,
@@ -33,7 +29,6 @@ fn refresh_cache(guard: &mut MutexGuard<'_, Option<ClockCache>>) {
         return;
     }
 
-    // Call `date` for time and date separately.
     let time_str = run_date("+%H:%M:%S");
     let date_str = run_date("+%Y-%m-%d");
 
@@ -55,17 +50,12 @@ fn run_date(fmt: &str) -> String {
         .unwrap_or_else(|| "--:--:--".to_owned())
 }
 
-/// Resolve the local timezone string for passing to `date`.
-///
-/// Checks `TZ` env, then reads `/etc/localtime` symlink target, falling back
-/// to UTC if neither is available.
 fn detect_tz() -> String {
     if let Ok(tz) = std::env::var("TZ") {
         if !tz.is_empty() {
             return tz;
         }
     }
-    // /etc/localtime is typically a symlink like .../zoneinfo/America/New_York
     if let Ok(target) = std::fs::read_link("/etc/localtime") {
         let s = target.to_string_lossy();
         if let Some(pos) = s.find("zoneinfo/") {
@@ -79,7 +69,6 @@ fn detect_tz() -> String {
 // ClockModule
 // ---------------------------------------------------------------------------
 
-/// Renders a digital clock + date in the right zone.
 pub struct ClockModule;
 
 impl ClockModule {
@@ -87,18 +76,13 @@ impl ClockModule {
         Self
     }
 
-    /// Return module outputs for the current time and date.
-    ///
-    /// Results are cached and refreshed at most every 500ms.
     pub fn render(&self) -> Vec<ModuleOutput> {
         let mut guard = CLOCK_CACHE.lock().unwrap();
         refresh_cache(&mut guard);
 
         let cache = guard.as_ref().unwrap();
         vec![
-            // Time in warm green (like a digital readout)
             ModuleOutput::new(Zone::Right, &cache.time_str, ThermalPalette::WARM),
-            // Date in lighter text
             ModuleOutput::new(Zone::Right, &cache.date_str, ThermalPalette::TEXT),
         ]
     }

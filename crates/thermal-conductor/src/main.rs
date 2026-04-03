@@ -5,6 +5,7 @@
 
 mod agent_graph;
 mod agent_timeline;
+mod bar;
 pub(crate) mod backend;
 mod client;
 mod color_mapping;

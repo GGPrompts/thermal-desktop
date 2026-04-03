@@ -248,8 +248,14 @@ impl ConductorWindow {
 
                             // ── Agent overlay widgets ─────────────────────────────
                             if self.overlay.has_widgets() {
-                                self.overlay
-                                    .render(&mut encoder, &view, self.width, self.height);
+                                self.overlay.render(
+                                    &self.wgpu.device,
+                                    &self.wgpu.queue,
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
                             }
 
                             self.wgpu.queue.submit(std::iter::once(encoder.finish()));
@@ -439,8 +445,14 @@ impl ConductorWindow {
 
         // ── Agent overlay widgets ──────────────────────────────────────
         if self.overlay.has_widgets() {
-            self.overlay
-                .render(&mut encoder, &view, self.width, self.height);
+            self.overlay.render(
+                &self.wgpu.device,
+                &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
         }
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));

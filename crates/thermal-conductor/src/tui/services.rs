@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 7);
+        assert_eq!(SERVICES.len(), 3);
     }
 
     #[test]
@@ -1231,36 +1231,29 @@ mod tests {
         let audio = &SERVICES[0];
         assert_eq!(audio.binary, "thermal-audio");
         assert!(matches!(audio.pid_source, PidSource::Pidfile("audio.pid")));
-
-        let codex = &SERVICES[3];
-        assert_eq!(codex.binary, "codex-state-adapter");
-        assert!(matches!(
-            codex.pid_source,
-            PidSource::Pidfile("codex-state-adapter.pid")
-        ));
     }
 
     #[test]
     fn pgrep_services_use_pgrep_source() {
-        for def in &SERVICES[1..3] {
-            assert!(
-                matches!(def.pid_source, PidSource::Pgrep),
-                "{} should use Pgrep source",
-                def.binary
-            );
-        }
+        let dispatcher = &SERVICES[1];
+        assert_eq!(dispatcher.binary, "thermal-dispatcher");
+        assert!(
+            matches!(dispatcher.pid_source, PidSource::Pgrep),
+            "{} should use Pgrep source",
+            dispatcher.binary
+        );
     }
 
     #[test]
-    fn codex_adapter_uses_script_launch() {
-        let codex = &SERVICES[3];
-        assert_eq!(codex.binary, "codex-state-adapter");
-        assert_eq!(codex.args, ["--daemon"]);
-        assert!(
-            codex
-                .command
-                .is_some_and(|path| path.ends_with("scripts/codex-state-adapter.sh"))
-        );
+    fn conductor_uses_pgrep_pattern() {
+        let conductor = &SERVICES[2];
+        assert_eq!(conductor.binary, "thermal-conductor");
+        assert!(matches!(
+            conductor.pid_source,
+            PidSource::PgrepPattern("thc daemon")
+        ));
+        assert_eq!(conductor.command, Some("thc"));
+        assert_eq!(conductor.args, ["daemon"]);
     }
 
     #[test]

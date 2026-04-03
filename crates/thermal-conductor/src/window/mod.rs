@@ -215,6 +215,10 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
 
     // ── Environment effect pipeline ──────────────────────────────────────────
     let environment_effect = EnvironmentEffectPipeline::new(&device, surface_format);
+
+    // ── Overlay widget pipeline ─────────────────────────────────────────────
+    let overlay = overlay::OverlayManager::new_with_pipeline(&device, &queue, surface_format);
+
     let terminal_context = detect_context();
     tracing::info!(?terminal_context, "Detected terminal environment context");
 
@@ -587,7 +591,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         inject_watcher,
         context_warning_active: false,
         context_critical_active: false,
-        overlay: overlay::OverlayManager::new(),
+        overlay,
         agent_event_rx,
         agent_event_tx,
         agent_timeline: AgentTimeline::new(),

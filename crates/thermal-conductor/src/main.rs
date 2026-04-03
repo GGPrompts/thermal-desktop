@@ -869,6 +869,9 @@ struct DaemonSpec {
     has_pidfile: bool,
     has_socket: bool,
     restart_cmd: Option<&'static [&'static str]>,
+    /// Custom pgrep -f pattern for counting instances. Required when the
+    /// binary name is ambiguous (e.g. `thc` runs as tui/daemon/window).
+    pgrep_pattern: Option<&'static str>,
 }
 
 static DAEMONS: &[DaemonSpec] = &[
@@ -878,6 +881,8 @@ static DAEMONS: &[DaemonSpec] = &[
         has_pidfile: false,
         has_socket: true,
         restart_cmd: None,
+        // `thc` is ambiguous (tui/daemon/window) — match the daemon subcommand.
+        pgrep_pattern: Some("thermal-conductor daemon"),
     },
     DaemonSpec {
         name: "thermal-audio",
@@ -885,6 +890,7 @@ static DAEMONS: &[DaemonSpec] = &[
         has_pidfile: true,
         has_socket: true,
         restart_cmd: Some(&["thermal-audio"]),
+        pgrep_pattern: None,
     },
     DaemonSpec {
         name: "thermal-dispatcher",
@@ -892,6 +898,7 @@ static DAEMONS: &[DaemonSpec] = &[
         has_pidfile: true,
         has_socket: false,
         restart_cmd: Some(&["thermal-dispatcher"]),
+        pgrep_pattern: None,
     },
 ];
 
@@ -921,6 +928,8 @@ struct DaemonCheckResult {
     pid: Option<u32>,
     pid_status: Option<PidStatus>,
     sock_status: Option<SocketStatus>,
+    /// How many OS processes match this daemon (0 = not running, >1 = duplicates).
+    instance_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1005,9 +1014,14 @@ impl DiagnosticReport {
                 Some(SocketStatus::Missing) => "  sock MISSING",
                 None => "",
             };
+            let instance_info = if d.instance_count > 1 {
+                format!("  ({} instances -- expected 1)", d.instance_count)
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  {:<9} {:<24}{}{}\n",
-                tag, d.name, pid_info, sock_info
+                "  {:<9} {:<24}{}{}{}\n",
+                tag, d.name, pid_info, sock_info, instance_info
             ));
         }
 
@@ -1124,9 +1138,17 @@ impl DiagnosticReport {
                 Some(SocketStatus::Missing) => "  sock \x1b[90mmissing\x1b[0m",
                 None => "",
             };
+            let instance_info = if d.instance_count > 1 {
+                format!(
+                    "  \x1b[33m({} instances — expected 1)\x1b[0m",
+                    d.instance_count
+                )
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  {icon} {tag_color}[{tag}]\x1b[0m {:<24}{}{}\n",
-                d.name, pid_info, sock_info
+                "  {icon} {tag_color}[{tag}]\x1b[0m {:<24}{}{}{}\n",
+                d.name, pid_info, sock_info, instance_info
             ));
         }
 
@@ -1229,6 +1251,13 @@ async fn build_diagnostic_report() -> DiagnosticReport {
                 ));
             }
         }
+        if result.instance_count > 1 {
+            suggested_actions.push(format!(
+                "Run `thc doctor --fix` to kill {} duplicate {} instance(s)",
+                result.instance_count - 1,
+                spec.name
+            ));
+        }
         daemon_results.push(result);
     }
 
@@ -1277,11 +1306,9 @@ fn doctor_execution_plan(
     report: bool,
     diagnostic: &DiagnosticReport,
 ) -> DoctorExecutionPlan {
-    let dead_count = diagnostic
-        .daemon_results
-        .iter()
-        .filter(|d| d.health == DaemonHealth::Dead)
-        .count();
+    let has_problems = diagnostic.daemon_results.iter().any(|d| {
+        d.health == DaemonHealth::Dead || d.instance_count > 1
+    });
 
     DoctorExecutionPlan {
         report_filename: report.then(|| {
@@ -1291,7 +1318,7 @@ fn doctor_execution_plan(
             )
         }),
         should_run_fix: fix,
-        should_print_fix_hint: dead_count > 0 && !fix,
+        should_print_fix_hint: has_problems && !fix,
     }
 }
 
@@ -1684,16 +1711,34 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
             .iter()
             .filter(|d| d.health == DaemonHealth::Dead)
             .count();
+        let duplicate_count = diagnostic
+            .daemon_results
+            .iter()
+            .filter(|d| d.instance_count > 1)
+            .count();
 
-        let passed = dead_count == 0;
+        let passed = dead_count == 0 && duplicate_count == 0;
         let detail = if !passed {
+            let mut parts = Vec::new();
             let dead_names: Vec<String> = diagnostic
                 .daemon_results
                 .iter()
                 .filter(|d| d.health == DaemonHealth::Dead)
                 .map(|d| d.name.clone())
                 .collect();
-            Some(format!("dead daemons: {}", dead_names.join(", ")))
+            if !dead_names.is_empty() {
+                parts.push(format!("dead daemons: {}", dead_names.join(", ")));
+            }
+            let dup_names: Vec<String> = diagnostic
+                .daemon_results
+                .iter()
+                .filter(|d| d.instance_count > 1)
+                .map(|d| format!("{} ({})", d.name, d.instance_count))
+                .collect();
+            if !dup_names.is_empty() {
+                parts.push(format!("duplicates: {}", dup_names.join(", ")));
+            }
+            Some(parts.join("; "))
         } else {
             None
         };
@@ -1706,13 +1751,16 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
             detail,
         });
 
-        // If --fix and there are dead daemons, run fix logic
-        if fix && dead_count > 0 {
-            println!("    \x1b[33m→ fixing dead daemons...\x1b[0m");
+        // If --fix and there are problems, run fix logic
+        if fix && (dead_count > 0 || duplicate_count > 0) {
+            println!("    \x1b[33m→ fixing daemon issues...\x1b[0m");
             let run_dir = thermal_core::runtime::runtime_dir();
             for (i, spec) in DAEMONS.iter().enumerate() {
-                if diagnostic.daemon_results[i].health == DaemonHealth::Dead {
+                let result = &diagnostic.daemon_results[i];
+                if result.health == DaemonHealth::Dead {
                     fix_daemon(spec, &run_dir).await;
+                } else if result.instance_count > 1 {
+                    kill_duplicate_instances(spec);
                 }
             }
             cleanup_removed_daemon_artifacts(&run_dir);
@@ -1794,8 +1842,12 @@ async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
     if plan.should_run_fix {
         let run_dir = thermal_core::runtime::runtime_dir();
         for (i, spec) in DAEMONS.iter().enumerate() {
-            if diagnostic.daemon_results[i].health == DaemonHealth::Dead {
+            let result = &diagnostic.daemon_results[i];
+            if result.health == DaemonHealth::Dead {
                 fix_daemon(spec, &run_dir).await;
+            } else if result.instance_count > 1 {
+                // Daemon is healthy but has duplicates — kill extras only.
+                kill_duplicate_instances(spec);
             }
         }
         cleanup_removed_daemon_artifacts(&run_dir);
@@ -1807,6 +1859,131 @@ async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Count how many OS processes match this daemon.
+///
+/// Uses the same pgrep approach as `count_instances()` in tui/services.rs:
+/// - Custom `pgrep_pattern`: use `pgrep -cf <pattern>` (full cmdline regex)
+/// - Binary name >15 chars: use `pgrep -cf "(^|/){name}$"` (regex match)
+/// - Binary name ≤15 chars: use `pgrep -cx {name}` (exact match)
+fn count_daemon_instances(spec: &DaemonSpec) -> u32 {
+    use std::process::Command;
+
+    if let Some(pattern) = spec.pgrep_pattern {
+        return Command::new("pgrep")
+            .args(["-cf", pattern])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or(0);
+    }
+
+    let (flag, pattern) = if spec.name.len() > 15 {
+        ("-cf", format!("(^|/){name}$", name = spec.name))
+    } else {
+        ("-cx", spec.name.to_string())
+    };
+
+    Command::new("pgrep")
+        .arg(flag)
+        .arg(&pattern)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
+}
+
+/// List all PIDs matching a daemon spec (for targeted killing).
+fn list_daemon_pids(spec: &DaemonSpec) -> Vec<u32> {
+    use std::process::Command;
+
+    let (flag, pattern) = if let Some(pat) = spec.pgrep_pattern {
+        ("-f", pat.to_string())
+    } else if spec.name.len() > 15 {
+        ("-f", format!("(^|/){name}$", name = spec.name))
+    } else {
+        ("-x", spec.name.to_string())
+    };
+
+    Command::new("pgrep")
+        .arg(flag)
+        .arg(&pattern)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Kill duplicate instances of a daemon, keeping the one that owns the
+/// pidfile (or the lowest PID as a fallback). Sends SIGTERM first, then
+/// SIGKILL after a short delay.
+fn kill_duplicate_instances(spec: &DaemonSpec) {
+    use nix::sys::signal::{self, Signal};
+    use nix::unistd::Pid;
+
+    let pids = list_daemon_pids(spec);
+    if pids.len() <= 1 {
+        return;
+    }
+
+    // Determine which PID to keep: prefer the pidfile PID, else lowest.
+    let keep_pid = if spec.has_pidfile {
+        let path = thermal_core::runtime::pidfile_path(spec.short_name);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|p| pids.contains(p))
+            .unwrap_or_else(|| *pids.iter().min().unwrap())
+    } else {
+        // No pidfile — keep the lowest PID (typically the original).
+        *pids.iter().min().unwrap()
+    };
+
+    let kill_pids: Vec<u32> = pids.into_iter().filter(|p| *p != keep_pid).collect();
+    if kill_pids.is_empty() {
+        return;
+    }
+
+    println!(
+        "    \x1b[33m→ killing {} duplicate {} instance(s) (keeping pid {keep_pid})\x1b[0m",
+        kill_pids.len(),
+        spec.name
+    );
+
+    // SIGTERM first
+    for &pid in &kill_pids {
+        let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+    }
+
+    // Brief pause then SIGKILL any survivors
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    for &pid in &kill_pids {
+        if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            println!(
+                "    \x1b[31m  SIGKILL pid {pid} (did not respond to SIGTERM)\x1b[0m"
+            );
+        }
+    }
 }
 
 /// Check a single daemon using thermal_core::runtime helpers.
@@ -1855,6 +2032,8 @@ fn check_daemon(spec: &DaemonSpec) -> DaemonCheckResult {
         }
     }
 
+    let instance_count = count_daemon_instances(spec);
+
     let health = match (&pid_status, &sock_status) {
         (Some(PidStatus::Alive), _) => DaemonHealth::Running,
         (_, Some(SocketStatus::Connectable)) => DaemonHealth::Running,
@@ -1869,6 +2048,7 @@ fn check_daemon(spec: &DaemonSpec) -> DaemonCheckResult {
         pid: pid_val,
         pid_status,
         sock_status,
+        instance_count,
     }
 }
 
@@ -2059,6 +2239,8 @@ fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
 }
 
 async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
+    kill_duplicate_instances(spec);
+
     // Clean stale PID file
     if spec.has_pidfile {
         let path = run_dir.join(format!("{}.pid", spec.short_name));
@@ -2197,6 +2379,7 @@ mod doctor_tests {
                     pid: Some(9999),
                     pid_status: Some(PidStatus::Stale),
                     sock_status: Some(SocketStatus::Stale),
+                    instance_count: 1,
                 },
                 DaemonCheckResult {
                     name: "thermal-dispatcher".to_string(),
@@ -2204,6 +2387,7 @@ mod doctor_tests {
                     pid: None,
                     pid_status: Some(PidStatus::Missing),
                     sock_status: None,
+                    instance_count: 0,
                 },
             ],
             socket_files: vec![SocketFileInfo {
@@ -2274,6 +2458,7 @@ mod doctor_tests {
                 pid: Some(42),
                 pid_status: Some(PidStatus::Alive),
                 sock_status: None,
+                instance_count: 1,
             }],
             socket_files: vec![],
             backend_mode: "test".to_string(),
@@ -2306,6 +2491,7 @@ mod doctor_tests {
                 pid: Some(42),
                 pid_status: Some(PidStatus::Alive),
                 sock_status: None,
+                instance_count: 1,
             }],
             socket_files: vec![],
             backend_mode: "test".to_string(),
@@ -2348,6 +2534,7 @@ mod doctor_tests {
                 pid: Some(9999),
                 pid_status: Some(PidStatus::Stale),
                 sock_status: Some(SocketStatus::Stale),
+                instance_count: 1,
             }],
             socket_files: vec![],
             backend_mode: "test".to_string(),

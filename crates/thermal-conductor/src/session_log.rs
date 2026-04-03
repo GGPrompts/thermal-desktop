@@ -88,6 +88,18 @@ pub struct SessionLog {
 // ── Raw JSONL envelope ───────────────────────────────────────────────────────
 
 /// Flexible deserialization envelope for CC JSONL lines.
+///
+/// CC JSONL uses a nested format:
+/// - `{"type":"user",      "message":{"role":"user","content":"..." or [...]}, "timestamp":"..."}`
+/// - `{"type":"assistant",  "message":{"role":"assistant","content":[...]}, "timestamp":"..."}`
+/// - `{"type":"system",     "content":"...", "timestamp":"..."}`
+/// - `{"type":"permission-mode", ...}`
+/// - `{"type":"attachment", ...}`
+///
+/// User/assistant content is nested under `message.content`. Assistant content is
+/// an array of items: `{"type":"text","text":"..."}`, `{"type":"tool_use","name":"...","id":"...","input":{...}}`,
+/// or `{"type":"thinking","thinking":"..."}`. Tool results appear as user messages
+/// with content array items: `{"type":"tool_result","tool_use_id":"...","content":"..."}`.
 #[derive(Deserialize)]
 struct RawLine {
     #[serde(rename = "type")]
@@ -95,8 +107,13 @@ struct RawLine {
 
     #[serde(default)]
     timestamp: Option<String>,
+    /// Top-level content (used by `system` type and legacy flat format).
     #[serde(default)]
     content: Option<serde_json::Value>,
+    /// Nested message envelope (used by `user` and `assistant` types).
+    #[serde(default)]
+    message: Option<serde_json::Value>,
+    // Legacy flat fields (kept for backward compat with old/hypothetical format).
     #[serde(default)]
     tool: Option<String>,
     #[serde(default)]
@@ -109,8 +126,6 @@ struct RawLine {
     is_error: Option<bool>,
     #[serde(default)]
     status: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
 }
 
 // ── Implementation ───────────────────────────────────────────────────────────
@@ -136,9 +151,7 @@ impl SessionLog {
                 continue;
             }
 
-            if let Some(event) = parse_session_event(trimmed) {
-                events.push(event);
-            }
+            events.extend(parse_session_event(trimmed));
         }
 
         // Pair ToolUse -> ToolResult by tool_use_id to compute durations.
@@ -177,64 +190,221 @@ impl SessionLog {
 
 // ── Parsing helpers ──────────────────────────────────────────────────────────
 
-/// Parse a single JSONL line into a SessionEvent.
-pub fn parse_session_event(line: &str) -> Option<SessionEvent> {
-    let raw: RawLine = serde_json::from_str(line).ok()?;
-    let msg_type = raw.msg_type.as_deref()?;
+/// Parse a single JSONL line into one or more SessionEvents.
+///
+/// A single line may produce multiple events because CC nests multiple content
+/// items (text, tool_use, thinking) inside a single assistant message.
+pub fn parse_session_event(line: &str) -> Vec<SessionEvent> {
+    let raw: RawLine = match serde_json::from_str(line) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let msg_type = match raw.msg_type.as_deref() {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
 
     let timestamp = raw.timestamp.clone().unwrap_or_default();
     let epoch_ms = parse_iso8601_epoch_ms(&timestamp);
 
-    let (event_type, content, tool_name) = match msg_type {
+    // Helper to build an event with common fields.
+    let make_event = |event_type, content: String, tool_name: Option<String>, tool_use_id: Option<String>, is_error: bool| {
+        SessionEvent {
+            timestamp: timestamp.clone(),
+            epoch_ms,
+            event_type,
+            content,
+            tool_name,
+            duration: None,
+            tool_use_id,
+            is_error,
+        }
+    };
+
+    // Extract the message.content field (nested format used by user/assistant).
+    let msg_content = raw.message.as_ref().and_then(|m| m.get("content"));
+
+    match msg_type {
         "user" => {
-            let content = extract_content_string(&raw.content);
-            (SessionEventType::UserMessage, content, None)
+            // User messages can be:
+            // 1. Plain text: message.content is a string
+            // 2. Tool results: message.content is an array with tool_result items
+            // 3. System reminders: message.content is an array with text items
+            match msg_content {
+                Some(serde_json::Value::String(s)) => {
+                    vec![make_event(SessionEventType::UserMessage, s.clone(), None, None, false)]
+                }
+                Some(serde_json::Value::Array(arr)) => {
+                    let mut events = Vec::new();
+                    for item in arr {
+                        match item.get("type").and_then(|t| t.as_str()) {
+                            Some("tool_result") => {
+                                let content = item.get("content")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let tool_use_id = item.get("tool_use_id")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string());
+                                let is_error = item.get("is_error")
+                                    .and_then(|e| e.as_bool())
+                                    .unwrap_or(false);
+                                events.push(make_event(
+                                    SessionEventType::ToolResult,
+                                    content,
+                                    None, // tool name filled later via tool_use_id pairing
+                                    tool_use_id,
+                                    is_error,
+                                ));
+                            }
+                            Some("text") => {
+                                let text = item.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !text.is_empty() {
+                                    events.push(make_event(
+                                        SessionEventType::UserMessage,
+                                        text,
+                                        None,
+                                        None,
+                                        false,
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    events
+                }
+                // Fallback: try top-level content (old system messages).
+                None => {
+                    let content = extract_content_string(&raw.content);
+                    if content.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![make_event(SessionEventType::UserMessage, content, None, None, false)]
+                    }
+                }
+                _ => Vec::new(),
+            }
         }
+
         "assistant" => {
-            let content = extract_content_string(&raw.content);
-            (SessionEventType::AssistantText, content, None)
+            // Assistant content is always an array of items:
+            //   {"type":"text","text":"..."}
+            //   {"type":"tool_use","name":"...","id":"...","input":{...}}
+            //   {"type":"thinking","thinking":"..."}
+            match msg_content {
+                Some(serde_json::Value::Array(arr)) => {
+                    let mut events = Vec::new();
+                    for item in arr {
+                        match item.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                let text = item.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !text.is_empty() {
+                                    events.push(make_event(
+                                        SessionEventType::AssistantText,
+                                        text,
+                                        None,
+                                        None,
+                                        false,
+                                    ));
+                                }
+                            }
+                            Some("tool_use") => {
+                                let name = item.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("?")
+                                    .to_string();
+                                let id = item.get("id")
+                                    .and_then(|i| i.as_str())
+                                    .map(|s| s.to_string());
+                                let input_json = item.get("input")
+                                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                                    .unwrap_or_default();
+                                events.push(make_event(
+                                    SessionEventType::ToolUse,
+                                    input_json,
+                                    Some(name),
+                                    id,
+                                    false,
+                                ));
+                            }
+                            Some("thinking") => {
+                                let thinking = item.get("thinking")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !thinking.is_empty() {
+                                    events.push(make_event(
+                                        SessionEventType::Thinking,
+                                        thinking,
+                                        None,
+                                        None,
+                                        false,
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    events
+                }
+                // Fallback: try top-level content.
+                _ => {
+                    let content = extract_content_string(&raw.content);
+                    if content.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![make_event(SessionEventType::AssistantText, content, None, None, false)]
+                    }
+                }
+            }
         }
+
+        // System messages use flat top-level content.
+        "system" | "permission-mode" | "last-prompt" | "attachment" => {
+            let content = extract_content_string(&raw.content);
+            if content.is_empty() {
+                Vec::new()
+            } else {
+                vec![make_event(SessionEventType::SystemMessage, content, None, None, false)]
+            }
+        }
+
+        // Legacy flat format fields (kept for backward compat).
         "tool_use" => {
             let content = raw
                 .input
                 .as_ref()
                 .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
                 .unwrap_or_default();
-            (SessionEventType::ToolUse, content, raw.tool.clone())
+            vec![make_event(SessionEventType::ToolUse, content, raw.tool.clone(), raw.tool_use_id.clone(), false)]
         }
         "tool_result" => {
             let content = raw.output.clone().unwrap_or_default();
-            (SessionEventType::ToolResult, content, raw.tool.clone())
+            vec![make_event(SessionEventType::ToolResult, content, raw.tool.clone(), raw.tool_use_id.clone(), raw.is_error.unwrap_or(false))]
         }
         "thinking" => {
             let content = extract_content_string(&raw.content);
-            (SessionEventType::Thinking, content, None)
+            vec![make_event(SessionEventType::Thinking, content, None, None, false)]
         }
         "progress" => {
-            let content = raw
-                .message
-                .clone()
+            // Legacy progress: prefer `message` string, fall back to `status`.
+            let content = raw.message.as_ref()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
                 .or(raw.status.clone())
                 .unwrap_or_default();
-            (SessionEventType::Progress, content, raw.tool.clone())
+            vec![make_event(SessionEventType::Progress, content, raw.tool.clone(), None, false)]
         }
-        "system" | "permission-mode" | "last-prompt" | "attachment" => {
-            let content = extract_content_string(&raw.content);
-            (SessionEventType::SystemMessage, content, None)
-        }
-        _ => return None,
-    };
 
-    Some(SessionEvent {
-        timestamp,
-        epoch_ms,
-        event_type,
-        content,
-        tool_name,
-        duration: None,
-        tool_use_id: raw.tool_use_id,
-        is_error: raw.is_error.unwrap_or(false),
-    })
+        _ => Vec::new(),
+    }
 }
 
 /// Extract text content from CC's polymorphic `content` field.
@@ -257,25 +427,35 @@ fn extract_content_string(value: &Option<serde_json::Value>) -> String {
 }
 
 /// Pair ToolUse events with their ToolResult by `tool_use_id` and set durations.
+///
+/// Also backfills tool names on ToolResult events that lack them (the nested
+/// CC format stores tool names on ToolUse but not on corresponding ToolResults).
 fn pair_tool_durations(events: &mut [SessionEvent]) {
-    // Build a map of tool_use_id -> index of ToolUse event.
-    let mut tool_use_times: HashMap<String, u64> = HashMap::new();
+    // Build a map of tool_use_id -> (epoch_ms, tool_name).
+    let mut tool_use_info: HashMap<String, (Option<u64>, Option<String>)> = HashMap::new();
 
     for event in events.iter() {
         if event.event_type == SessionEventType::ToolUse {
-            if let (Some(id), Some(ms)) = (&event.tool_use_id, event.epoch_ms) {
-                tool_use_times.insert(id.clone(), ms);
+            if let Some(id) = &event.tool_use_id {
+                tool_use_info.insert(id.clone(), (event.epoch_ms, event.tool_name.clone()));
             }
         }
     }
 
-    // Now set durations on ToolResult events.
+    // Now set durations and backfill tool names on ToolResult events.
     for event in events.iter_mut() {
         if event.event_type == SessionEventType::ToolResult {
-            if let (Some(id), Some(result_ms)) = (&event.tool_use_id, event.epoch_ms) {
-                if let Some(&use_ms) = tool_use_times.get(id) {
-                    if result_ms >= use_ms {
-                        event.duration = Some(Duration::from_millis(result_ms - use_ms));
+            if let Some(id) = &event.tool_use_id {
+                if let Some((use_ms, tool_name)) = tool_use_info.get(id) {
+                    // Backfill tool name if missing.
+                    if event.tool_name.is_none() {
+                        event.tool_name = tool_name.clone();
+                    }
+                    // Set duration if both timestamps are available.
+                    if let (Some(use_ms), Some(result_ms)) = (use_ms, event.epoch_ms) {
+                        if result_ms >= *use_ms {
+                            event.duration = Some(Duration::from_millis(result_ms - use_ms));
+                        }
                     }
                 }
             }
@@ -516,5 +696,124 @@ mod tests {
         assert_eq!(log.events()[2].duration, Some(Duration::from_millis(3000)));
         // Bash took 4 seconds.
         assert_eq!(log.events()[3].duration, Some(Duration::from_millis(4000)));
+    }
+
+    // ── Tests for actual CC nested JSONL format ─────────────────────────
+
+    #[test]
+    fn nested_user_message_plain_string() {
+        let f = make_session_file(&[
+            r#"{"type":"user","message":{"role":"user","content":"Hello world"},"timestamp":"2026-04-02T00:13:52.232Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        let e = &log.events()[0];
+        assert_eq!(e.event_type, SessionEventType::UserMessage);
+        assert_eq!(e.content, "Hello world");
+    }
+
+    #[test]
+    fn nested_assistant_text() {
+        let f = make_session_file(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help you with that."}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        let e = &log.events()[0];
+        assert_eq!(e.event_type, SessionEventType::AssistantText);
+        assert_eq!(e.content, "I'll help you with that.");
+    }
+
+    #[test]
+    fn nested_tool_use_in_assistant() {
+        let f = make_session_file(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"toolu_01ABC","input":{"command":"ls -la"}}]},"timestamp":"2026-04-02T00:14:01.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        let e = &log.events()[0];
+        assert_eq!(e.event_type, SessionEventType::ToolUse);
+        assert_eq!(e.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(e.tool_use_id.as_deref(), Some("toolu_01ABC"));
+        assert!(e.content.contains("ls -la"));
+    }
+
+    #[test]
+    fn nested_tool_result_in_user() {
+        let f = make_session_file(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":"file.rs\nCargo.toml"}]},"timestamp":"2026-04-02T00:14:02.500Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        let e = &log.events()[0];
+        assert_eq!(e.event_type, SessionEventType::ToolResult);
+        assert_eq!(e.tool_use_id.as_deref(), Some("toolu_01ABC"));
+        assert_eq!(e.content, "file.rs\nCargo.toml");
+    }
+
+    #[test]
+    fn nested_tool_result_backfills_tool_name() {
+        let f = make_session_file(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","id":"toolu_01XYZ","input":{"file_path":"/tmp/test"}}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01XYZ","content":"file contents here"}]},"timestamp":"2026-04-02T00:14:03.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 2);
+
+        let result = &log.events()[1];
+        assert_eq!(result.event_type, SessionEventType::ToolResult);
+        // Tool name should be backfilled from the ToolUse event.
+        assert_eq!(result.tool_name.as_deref(), Some("Read"));
+        assert_eq!(result.duration, Some(Duration::from_millis(3000)));
+    }
+
+    #[test]
+    fn nested_mixed_assistant_content() {
+        // Assistant message with both text and tool_use in the same content array.
+        let f = make_session_file(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check that."},{"type":"tool_use","name":"Grep","id":"toolu_02DEF","input":{"pattern":"TODO"}}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 2);
+
+        let text_event = &log.events()[0];
+        assert_eq!(text_event.event_type, SessionEventType::AssistantText);
+        assert_eq!(text_event.content, "Let me check that.");
+
+        let tool_event = &log.events()[1];
+        assert_eq!(tool_event.event_type, SessionEventType::ToolUse);
+        assert_eq!(tool_event.tool_name.as_deref(), Some("Grep"));
+    }
+
+    #[test]
+    fn nested_tool_result_error() {
+        let f = make_session_file(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_ERR","content":"command not found","is_error":true}]},"timestamp":"2026-04-02T00:14:05.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        assert!(log.events()[0].is_error);
+    }
+
+    #[test]
+    fn nested_thinking_in_assistant() {
+        let f = make_session_file(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me analyze the structure..."}]},"timestamp":"2026-04-02T00:14:00.000Z"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        assert_eq!(log.len(), 1);
+        let e = &log.events()[0];
+        assert_eq!(e.event_type, SessionEventType::Thinking);
+        assert_eq!(e.content, "Let me analyze the structure...");
+    }
+
+    #[test]
+    fn permission_mode_skipped_gracefully() {
+        let f = make_session_file(&[
+            r#"{"type":"permission-mode","permissionMode":"default","sessionId":"abc"}"#,
+        ]);
+        let log = SessionLog::load(f.path()).unwrap();
+        // permission-mode has no content field, so it produces empty content and is skipped.
+        assert!(log.is_empty());
     }
 }

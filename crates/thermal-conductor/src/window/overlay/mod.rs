@@ -7,11 +7,8 @@
 //! Widget lifecycle is driven by [`AgentEvent`]s from the structured JSON
 //! output parser.
 
-#[allow(dead_code)]
 pub mod layout;
-#[allow(dead_code)]
 pub mod renderer;
-#[allow(dead_code)]
 pub mod widgets;
 
 use std::time::{Duration, Instant};
@@ -22,6 +19,8 @@ use widgets::{
 };
 
 use crate::structured_output::AgentEvent;
+
+use renderer::OverlayPipeline;
 
 /// Auto-dismiss duration for result cards.
 const RESULT_DISMISS_SECS: u64 = 5;
@@ -38,15 +37,32 @@ pub struct OverlayManager {
     passive_widgets: Vec<Widget>,
     /// Monotonically increasing widget ID counter.
     next_id: WidgetId,
+    /// GPU pipeline for rendering widget quads + text. `None` in test/headless mode.
+    pipeline: Option<OverlayPipeline>,
 }
 
 impl OverlayManager {
-    /// Create a new empty overlay manager.
+    /// Create a new overlay manager without a GPU pipeline (for tests).
     pub fn new() -> Self {
         Self {
             modal_stack: Vec::new(),
             passive_widgets: Vec::new(),
             next_id: 1,
+            pipeline: None,
+        }
+    }
+
+    /// Create a new overlay manager with a GPU pipeline for rendering.
+    pub fn new_with_pipeline(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self {
+            modal_stack: Vec::new(),
+            passive_widgets: Vec::new(),
+            next_id: 1,
+            pipeline: Some(OverlayPipeline::new(device, queue, surface_format)),
         }
     }
 
@@ -167,17 +183,30 @@ impl OverlayManager {
     /// Render all visible overlay widgets.
     ///
     /// Passive widgets are rendered first (bottom layer), then modal widgets
-    /// on top. Each widget gets a semi-transparent background quad and
-    /// (eventually) text content.
+    /// on top. Each widget gets a semi-transparent background quad with an
+    /// accent stripe, plus glyphon text labels.
     pub fn render(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         viewport_w: u32,
         viewport_h: u32,
     ) {
+        let pipeline = match self.pipeline.as_mut() {
+            Some(p) => p,
+            None => {
+                tracing::trace!("overlay render skipped: no GPU pipeline");
+                return;
+            }
+        };
+
         let vw = viewport_w as f32;
         let vh = viewport_h as f32;
+
+        // Build (widget, rect) pairs with correct stacking indices.
+        let mut widget_rects: Vec<(Widget, layout::WidgetRect)> = Vec::new();
 
         // Count tool cards and result cards separately for stacking.
         let mut tool_card_idx: usize = 0;
@@ -200,14 +229,16 @@ impl OverlayManager {
             };
 
             let rect = layout::layout_widget(&widget.kind, vw, vh, stack_idx);
-            renderer::render_widget_quad(widget, &rect, vw, vh, encoder, view);
+            widget_rects.push((widget.clone(), rect));
         }
 
         // Modal widgets render on top.
         for widget in &self.modal_stack {
             let rect = layout::layout_widget(&widget.kind, vw, vh, 0);
-            renderer::render_widget_quad(widget, &rect, vw, vh, encoder, view);
+            widget_rects.push((widget.clone(), rect));
         }
+
+        pipeline.render(&widget_rects, device, queue, encoder, view, viewport_w, viewport_h);
     }
 
     // ── AgentEvent handling ──────────────────────────────────────────

@@ -127,9 +127,8 @@ impl ViewerState {
                 continue;
             }
 
-            if let Some(event) = parse_session_event(trimmed) {
-                new_events.push(event);
-            }
+            let parsed = parse_session_event(trimmed);
+            new_events.extend(parsed);
         }
 
         if !new_events.is_empty() {

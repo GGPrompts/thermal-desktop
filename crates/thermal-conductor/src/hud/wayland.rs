@@ -43,6 +43,9 @@ use super::voice::{HudMode, VoiceStatePoller};
 /// Height of the HUD header bar in pixels.
 pub const HUD_HEIGHT: u32 = 48;
 
+/// Top margin to position HUD below the bar (Layer::Top, 32px).
+const BAR_MARGIN_TOP: i32 = crate::bar::wayland::BAR_HEIGHT as i32;
+
 // ---------------------------------------------------------------------------
 // Click interaction types
 // ---------------------------------------------------------------------------
@@ -380,14 +383,17 @@ pub fn run(event_bus: Arc<SemanticEventBus>) -> anyhow::Result<()> {
     let layer = layer_shell.create_layer_surface(
         &qh,
         wl_surface,
-        Layer::Top,
+        Layer::Overlay,
         Some("thermal-hud"),
         None, // no specific output
     );
 
-    // Configure HUD geometry: full-width strip anchored to the top.
+    // Configure HUD geometry: full-width strip anchored to the top, below the bar.
+    // Uses Overlay layer so it floats above the bar (Layer::Top).
+    // No exclusive zone — the bar already reserves top screen space.
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_exclusive_zone(HUD_HEIGHT as i32);
+    layer.set_exclusive_zone(0);
+    layer.set_margin(BAR_MARGIN_TOP, 0, 0, 0);
     layer.set_size(0, HUD_HEIGHT); // width 0 = full output width
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
 

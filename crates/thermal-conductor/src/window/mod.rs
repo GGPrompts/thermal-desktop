@@ -581,6 +581,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         claude_session: None,
         daemon_sub_rx,
         pty_child_pid,
+        output_mode: crate::protocol::SessionOutputMode::default(),
         inject_session_id,
         inject_watcher,
         context_warning_active: false,
@@ -913,6 +914,8 @@ pub(super) struct ConductorWindow {
     /// PID of the PTY child process, used to read cwd via /proc/<pid>/cwd.
     /// Zero in client mode (daemon owns the process).
     pub(super) pty_child_pid: i32,
+    /// How to interpret session output — updated from daemon SessionState responses.
+    pub(super) output_mode: crate::protocol::SessionOutputMode,
     // Cross-pane prompt injection
     /// Unique session ID for this window instance (used to ignore own inject files).
     pub(super) inject_session_id: String,

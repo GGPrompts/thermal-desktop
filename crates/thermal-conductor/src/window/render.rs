@@ -16,6 +16,13 @@ impl ConductorWindow {
     /// Render a frame: clear to BG, then render the terminal grid.
     // TODO: [code-review] extract render_terminal_grid, render_overlays, render_hud sub-methods
     pub(super) fn render_frame(&mut self) -> RenderStatus {
+        // When the session is in structured JSON mode, future work (therm-cgos)
+        // will render parsed AgentEvents as rich widgets here. For now, log and
+        // continue with normal ANSI rendering.
+        if self.output_mode == crate::protocol::SessionOutputMode::StructuredJson {
+            tracing::trace!("Session in StructuredJson output mode — widget rendering pending");
+        }
+
         let output = match self.wgpu.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {

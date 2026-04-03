@@ -59,6 +59,8 @@ pub enum StateChangeNotification {
         exit_code: Option<i32>,
         duration_ms: u64,
     },
+    /// Structured JSON output mode detected (agent launched with --output-format json).
+    StructuredJsonDetected,
 }
 
 // ── Agent types ─────────────────────────────────────────────────────────────
@@ -308,6 +310,10 @@ pub struct AgentStateInference {
     event_log: Option<EventLog>,
     /// Optional channel for emitting state change notifications to the daemon.
     change_tx: Option<std_mpsc::Sender<StateChangeNotification>>,
+    /// Whether structured JSON output mode has been detected.
+    structured_json_detected: bool,
+    /// Number of consecutive JSON object lines seen (for sniffing).
+    json_line_streak: u8,
 }
 
 /// Maximum number of recent lines to keep in the ring buffer.
@@ -345,6 +351,8 @@ impl AgentStateInference {
             consecutive_failures: 0,
             event_log: None,
             change_tx: None,
+            structured_json_detected: false,
+            json_line_streak: 0,
         }
     }
 
@@ -592,9 +600,91 @@ impl AgentStateInference {
     }
 
     fn push_line(&mut self, line: String) {
+        // Sniff for structured JSON output before pushing.
+        if !self.structured_json_detected {
+            self.sniff_structured_json(&line);
+        }
         self.recent_lines.push_back(line);
         if self.recent_lines.len() > MAX_RECENT_LINES {
             self.recent_lines.pop_front();
+        }
+    }
+
+    /// Sniff a line to detect structured JSON output mode.
+    ///
+    /// CC `--output-format json` emits JSONL where each line is a JSON object
+    /// with a `"type"` field. We require 3 consecutive JSON object lines with
+    /// a `"type"` key to confirm detection (avoids false positives from
+    /// occasional JSON in normal terminal output).
+    fn sniff_structured_json(&mut self, line: &str) {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') && trimmed.ends_with('}') {
+            // Quick check for `"type"` key without full JSON parsing.
+            if trimmed.contains("\"type\"") {
+                self.json_line_streak += 1;
+                if self.json_line_streak >= 3 {
+                    self.structured_json_detected = true;
+                    debug!(
+                        session = %self.config.session_id,
+                        "Detected structured JSON output mode (3 consecutive JSON lines)"
+                    );
+                    self.emit(StateChangeNotification::StructuredJsonDetected);
+                }
+                return;
+            }
+        }
+        // Non-JSON line resets the streak.
+        self.json_line_streak = 0;
+    }
+
+    /// Whether structured JSON output mode has been detected.
+    pub fn is_structured_json(&self) -> bool {
+        self.structured_json_detected
+    }
+
+    /// Check `/proc/<PID>/cmdline` for `--output-format` flags.
+    ///
+    /// Called once after agent type detection to eagerly detect structured
+    /// JSON mode from process arguments, before any output is parsed.
+    pub fn check_proc_cmdline_for_json_mode(&mut self) {
+        if self.structured_json_detected {
+            return;
+        }
+        let pid = self.config.child_pid;
+        let cmdline_path = format!("/proc/{pid}/cmdline");
+        if let Ok(data) = std::fs::read(&cmdline_path) {
+            // cmdline is NUL-separated.
+            let args: Vec<&str> = data
+                .split(|&b| b == 0)
+                .filter_map(|s| std::str::from_utf8(s).ok())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // Look for --output-format json (either as one arg or two).
+            for window in args.windows(2) {
+                if window[0] == "--output-format" && window[1] == "json" {
+                    self.structured_json_detected = true;
+                    debug!(
+                        session = %self.config.session_id,
+                        pid = pid,
+                        "Detected --output-format json from /proc cmdline"
+                    );
+                    self.emit(StateChangeNotification::StructuredJsonDetected);
+                    return;
+                }
+            }
+            // Also check for --output-format=json as a single arg.
+            for arg in &args {
+                if *arg == "--output-format=json" {
+                    self.structured_json_detected = true;
+                    debug!(
+                        session = %self.config.session_id,
+                        pid = pid,
+                        "Detected --output-format=json from /proc cmdline"
+                    );
+                    self.emit(StateChangeNotification::StructuredJsonDetected);
+                    return;
+                }
+            }
         }
     }
 

@@ -19,6 +19,22 @@ use serde::{Deserialize, Serialize};
 /// the wire format. Clients and daemons negotiate on connect via Hello/HelloAck.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+// ── Session output mode ─────────────────────────────────────────────────────
+
+/// How to interpret the output of a PTY session.
+///
+/// Most sessions emit raw ANSI terminal output. When an AI agent (e.g. Claude
+/// Code) is launched with `--output-format json`, the output is structured JSONL
+/// that can be parsed into semantic events for rich widget rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SessionOutputMode {
+    /// Default terminal rendering — raw ANSI escape sequences.
+    #[default]
+    Ansi,
+    /// Agent JSON output mode — each line is a JSON object with a `type` field.
+    StructuredJson,
+}
+
 // ── Socket path ──────────────────────────────────────────────────────────────
 
 /// Return the daemon socket path: `/run/user/<uid>/thermal/conductor.sock`
@@ -369,6 +385,10 @@ pub enum Response {
         /// Absent in messages from older daemons — defaults to zero.
         #[serde(default)]
         mode: u32,
+        /// How to interpret session output (ANSI vs structured JSON).
+        /// Absent in messages from older daemons — defaults to Ansi.
+        #[serde(default)]
+        output_mode: SessionOutputMode,
     },
 
     /// Incremental screen update (streamed to attached clients).
@@ -452,6 +472,9 @@ pub struct SessionInfo {
     /// If the session was spawned in a git worktree, the worktree path.
     #[serde(default)]
     pub worktree_path: Option<String>,
+    /// How to interpret session output (ANSI vs structured JSON).
+    #[serde(default)]
+    pub output_mode: SessionOutputMode,
 }
 
 /// A single terminal cell.
@@ -912,6 +935,7 @@ mod tests {
             connected_client_count: 2,
             is_alive: true,
             worktree_path: None,
+            output_mode: SessionOutputMode::default(),
         };
         let resp = Response::SessionList {
             sessions: vec![info],
@@ -962,6 +986,7 @@ mod tests {
             cursor: cursor.clone(),
             mode: 0x1234,
             title: "term".into(),
+            output_mode: SessionOutputMode::default(),
         };
         let decoded = rt_response(&resp);
         match decoded {
@@ -973,6 +998,7 @@ mod tests {
                 cursor: c,
                 mode,
                 title,
+                ..
             } => {
                 assert_eq!(id, "ss1");
                 assert_eq!(cols, 80);
@@ -1105,6 +1131,7 @@ mod tests {
             connected_client_count: 0,
             is_alive: false,
             worktree_path: None,
+            output_mode: SessionOutputMode::default(),
         };
         let bytes = rmp_serde::to_vec(&info).unwrap();
         let decoded: SessionInfo = rmp_serde::from_slice(&bytes).unwrap();
@@ -1278,6 +1305,7 @@ mod tests {
             },
             mode: 0,
             title: "test".into(),
+            output_mode: SessionOutputMode::default(),
         };
         let frame = encode_frame(&resp).expect("should encode large SessionState");
         let payload_len = u32::from_le_bytes(frame[..4].try_into().unwrap()) as usize;
@@ -1311,6 +1339,7 @@ mod tests {
             connected_client_count: 0,
             is_alive: true,
             worktree_path: None,
+            output_mode: SessionOutputMode::default(),
         };
         let bytes = rmp_serde::to_vec(&info_without_name).unwrap();
         let decoded: SessionInfo = rmp_serde::from_slice(&bytes).unwrap();

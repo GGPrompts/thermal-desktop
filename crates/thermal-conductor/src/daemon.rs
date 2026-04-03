@@ -25,7 +25,7 @@ use crate::kitty::{
 use crate::persist::{self, PersistedSession, PersistedState};
 use crate::protocol::{
     self, CellData, ColorData, CursorData, DirtyCellData, EventScope, Request, Response,
-    SessionInfo,
+    SessionInfo, SessionOutputMode,
 };
 use crate::pty::PtySession;
 use crate::semantic_state::{SemanticEventBus, event_matches_categories};
@@ -60,6 +60,8 @@ struct Session {
     /// Number of attached frontend clients.
     attached_count: Arc<AtomicU64>,
     created_at: SystemTime,
+    /// How to interpret session output (ANSI vs structured JSON).
+    output_mode: SessionOutputMode,
 }
 
 // ── Daemon state ─────────────────────────────────────────────────────────────
@@ -165,32 +167,14 @@ impl Daemon {
         // a relay task drains it into the SemanticEventBus via tokio.
         let (change_tx, change_rx) = std::sync::mpsc::channel();
         if let Some(si) = terminal.state_inference() {
-            si.lock().set_change_tx(change_tx);
+            let mut si_guard = si.lock();
+            si_guard.set_change_tx(change_tx);
+            // Eagerly check /proc/<PID>/cmdline for --output-format json.
+            si_guard.check_proc_cmdline_for_json_mode();
         }
 
-        // Spawn the notification relay task.
-        {
-            let event_bus = Arc::clone(&self.event_bus);
-            let session_id = id.clone();
-            tokio::spawn(async move {
-                loop {
-                    // Poll the std::sync::mpsc channel with a short sleep to
-                    // avoid busy-waiting.  The channel is populated from the
-                    // blocking byte processor thread.
-                    match change_rx.try_recv() {
-                        Ok(notif) => {
-                            event_bus.process_notification(&session_id, notif);
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                            break;
-                        }
-                    }
-                }
-            });
-        }
+        // Notification relay is spawned after session_arc is created (below)
+        // so we can update output_mode on StructuredJsonDetected.
 
         // Attach per-session JSONL event log for structured diagnostics.
         {
@@ -272,12 +256,44 @@ impl Daemon {
             title: Arc::clone(&title),
             attached_count: Arc::clone(&attached_count),
             created_at: SystemTime::now(),
+            output_mode: SessionOutputMode::default(),
         };
 
         let session_arc = Arc::new(Mutex::new(session));
         self.sessions
             .lock()
             .insert(id.clone(), Arc::clone(&session_arc));
+
+        // Spawn the notification relay task.
+        // Drains StateChangeNotifications from the byte processor thread into
+        // the SemanticEventBus, and updates session output_mode on detection.
+        {
+            let event_bus = Arc::clone(&self.event_bus);
+            let session_id = id.clone();
+            let session_ref_for_relay = Arc::clone(&session_arc);
+            tokio::spawn(async move {
+                loop {
+                    match change_rx.try_recv() {
+                        Ok(notif) => {
+                            if matches!(
+                                notif,
+                                thermal_terminal::state_inference::StateChangeNotification::StructuredJsonDetected
+                            ) {
+                                session_ref_for_relay.lock().output_mode =
+                                    SessionOutputMode::StructuredJson;
+                            }
+                            event_bus.process_notification(&session_id, notif);
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Spawn a task to handle terminal events (PtyWrite, title changes, etc.)
         {
@@ -532,6 +548,7 @@ impl Daemon {
                         let session = session_ref.lock();
                         let cells = snapshot_cells(&session.terminal, screen_lines, cols);
                         let title = session.title.lock().clone();
+                        let output_mode = session.output_mode;
                         drop(session);
 
                         let _ = update_tx.send(Response::SessionState {
@@ -542,6 +559,7 @@ impl Daemon {
                             cursor,
                             mode,
                             title,
+                            output_mode,
                         });
                         last_mode = Some(mode);
                     } else {
@@ -697,6 +715,7 @@ impl Daemon {
                     connected_client_count: session.attached_count.load(Ordering::Relaxed) as usize,
                     is_alive: !session.pty.has_exited(),
                     worktree_path: session.worktree_path.clone(),
+                    output_mode: session.output_mode,
                 }
             })
             .collect()
@@ -725,6 +744,7 @@ impl Daemon {
 
         let cells = snapshot_cells(&session.terminal, screen_lines, cols);
         let title = session.title.lock().clone();
+        let output_mode = session.output_mode;
 
         Some(Response::SessionState {
             id: id.to_string(),
@@ -734,6 +754,7 @@ impl Daemon {
             cursor,
             mode,
             title,
+            output_mode,
         })
     }
 

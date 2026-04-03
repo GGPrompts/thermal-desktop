@@ -493,6 +493,15 @@ impl SemanticEventBus {
                     }
                 }
             }
+
+            StateChangeNotification::StructuredJsonDetected => {
+                // Structured JSON output mode detected — logged for awareness.
+                // The daemon will update the session's output_mode separately.
+                tracing::debug!(
+                    session = %session_id,
+                    "Structured JSON output mode detected via state inference"
+                );
+            }
         }
     }
 

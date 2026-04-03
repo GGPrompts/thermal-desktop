@@ -4,7 +4,7 @@
 //! classification.  The bundled model (~2.3 MB) is embedded at compile time so no
 //! external files are needed at runtime.
 //!
-//! The `VadEvent` interface is preserved for callers in `main.rs`.
+//! Ported from thermal-voice — now part of the unified audio daemon.
 
 use ndarray::{Array1, Array2, ArrayD, IxDyn, s};
 use ort::{execution_providers::CPUExecutionProvider, session::Session, value::Tensor};
@@ -224,7 +224,7 @@ impl VadDetector {
 
 /// Compute the Root Mean Square energy of an audio buffer.
 ///
-/// Kept for the bar-level meter in main.rs (not used for VAD decisions).
+/// Kept for the bar-level meter (not used for VAD decisions).
 pub fn rms_energy(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;

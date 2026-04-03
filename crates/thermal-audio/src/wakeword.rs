@@ -1,4 +1,4 @@
-//! Rustpotter-based wake word detection for thermal-voice.
+//! Rustpotter-based wake word detection.
 //!
 //! Wraps the `rustpotter` crate to provide wake word detection ("Alfred") on
 //! raw audio chunks. The detector is fed the same f32 mono audio chunks that
@@ -6,8 +6,8 @@
 //! transitions from Monitoring to Listening.
 //!
 //! Wake word model files (.rpw) are loaded from `~/.config/thermal/wakewords/`.
-//! If no model file is found, a stub model is auto-generated on first run
-//! (users should re-train with `rustpotter-cli` for better accuracy).
+//!
+//! Ported from thermal-voice — now part of the unified audio daemon.
 
 use std::path::PathBuf;
 
@@ -90,8 +90,7 @@ impl WakeWordDetector {
     /// Process a chunk of f32 mono audio samples.
     ///
     /// Returns `Some(name)` if a wake word was detected in this chunk,
-    /// `None` otherwise. The audio should be at the sample rate configured
-    /// in `new()`.
+    /// `None` otherwise.
     pub fn process_samples(&mut self, samples: &[f32]) -> Option<String> {
         if !self.loaded {
             return None;
@@ -118,7 +117,7 @@ impl WakeWordDetector {
         }
     }
 
-    /// Reset the detector's internal state (e.g., after a detection or mode change).
+    /// Reset the detector's internal state.
     pub fn reset(&mut self) {
         self.detector.reset();
     }
@@ -162,9 +161,6 @@ mod tests {
 
     #[test]
     fn detector_creation() {
-        // Should succeed regardless of whether a model file is present.
-        // is_loaded() reflects reality: true when the .rpw file exists and
-        // loaded successfully, false otherwise.
         let det = WakeWordDetector::new(16000);
         assert!(det.is_ok());
         let det = det.unwrap();
@@ -179,7 +175,6 @@ mod tests {
     #[test]
     fn detector_process_without_model() {
         let mut det = WakeWordDetector::new(16000).unwrap();
-        // Should return None when no model is loaded
         let silence = vec![0.0f32; 800];
         assert!(det.process_samples(&silence).is_none());
     }
@@ -187,7 +182,6 @@ mod tests {
     #[test]
     fn detector_samples_per_frame() {
         let det = WakeWordDetector::new(16000).unwrap();
-        // Should return a reasonable frame size
         let spf = det.samples_per_frame();
         assert!(spf > 0);
     }

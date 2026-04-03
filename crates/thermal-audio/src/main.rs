@@ -1,12 +1,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::time::Instant;
 use std::{fs, thread};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
@@ -14,15 +14,49 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tracing::{debug, info, warn};
 
+mod capture;
 mod daemon_client;
+mod streaming;
+mod transcript_filter;
+mod vad;
+mod wakeword;
 
-/// Thermal Audio — TTS voice announcements for Claude session state changes.
+/// Thermal Audio — unified audio daemon (TTS playback + voice capture).
 #[derive(Parser)]
 #[command(name = "thermal-audio")]
 struct Cli {
     /// Speak the given text and exit (for testing).
     #[arg(long)]
     test: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<AudioCommand>,
+}
+
+#[derive(Subcommand)]
+enum AudioCommand {
+    /// Send start/stop toggle to the running daemon's voice capture.
+    /// Records voice -> transcribes -> types at cursor via wtype.
+    Toggle,
+    /// Start/stop recording and send transcript to thermal-dispatcher.
+    Dispatch,
+    /// Print current voice daemon state and exit.
+    VoiceStatus,
+    /// Run in always-listening mode with Voice Activity Detection.
+    Listen {
+        /// Silero VAD speech probability threshold (0.0-1.0, default 0.5).
+        #[arg(long, default_value = "0.5")]
+        threshold: f32,
+        /// Use WebSocket streaming STT instead of batch transcription.
+        #[arg(long)]
+        streaming: bool,
+        /// WebSocket URL of the WhisperLiveKit streaming STT server.
+        #[arg(long, default_value = streaming::DEFAULT_STREAMING_URL)]
+        streaming_url: String,
+        /// Disable wake word detection (revert to pure VAD mode).
+        #[arg(long)]
+        no_wake_word: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +156,23 @@ enum SocketMessage {
     SetVolume { value: f32 },
     /// Get current mute/volume status.
     GetStatus,
+    // -- Voice capture commands (merged from thermal-voice) --
+    /// Toggle PTT recording.
+    VoiceToggle,
+    /// Start voice recording (PTT).
+    VoiceStart,
+    /// Stop voice recording (PTT) and transcribe.
+    VoiceStop,
+    /// Start recording + dispatch to thermal-dispatcher.
+    VoiceDispatch,
+    /// Set voice capture mode.
+    VoiceSetMode {
+        #[serde(default)]
+        #[allow(dead_code)]
+        mode: String,
+    },
+    /// Get voice capture status.
+    VoiceGetStatus,
 }
 
 /// Response for control commands (mute/volume/status).
@@ -470,6 +521,17 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("/home/builder"))
 }
 
+/// Returns `~/.config/thermal` (XDG_CONFIG_HOME/thermal if set).
+/// Used by sub-modules (wakeword, capture) via `super::config_dir()`.
+fn config_dir() -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".config")
+        });
+    base.join("thermal")
+}
+
 /// Returns `~/.cache` (or XDG_CACHE_HOME if set).
 fn dirs_cache() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
@@ -495,22 +557,11 @@ fn socket_path() -> PathBuf {
 // Voice state check — suppress TTS while mic is active
 // ---------------------------------------------------------------------------
 
-// Voice state file: separate chain (not routed through conductor daemon).
-// Written by thermal-voice at ~5Hz, read here for TTS suppression.
-// See thermal-core/src/claude_state.rs header for state authority docs.
-const VOICE_STATE_PATH: &str = "/tmp/thermal-voice-state.json";
-
-/// Returns true if thermal-voice is actively listening, processing, or monitoring
-/// (PTT/VAD), so we can suppress TTS announcements that would interfere with
+/// Returns true if voice capture is actively listening/processing,
+/// so we can suppress TTS announcements that would interfere with
 /// recording or be picked up by the microphone.
 fn is_voice_active() -> bool {
-    let Ok(data) = std::fs::read_to_string(VOICE_STATE_PATH) else {
-        return false;
-    };
-    // Quick check without full deserialization
-    data.contains("\"listening\"")
-        || data.contains("\"processing\"")
-        || data.contains("\"monitoring\"")
+    capture::is_voice_active_from_state()
 }
 
 // ---------------------------------------------------------------------------
@@ -699,8 +750,130 @@ fn session_label(session: &ClaudeSessionState) -> String {
 // Main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() -> Result<()> {
+// ---------------------------------------------------------------------------
+// Voice subcommand client (sends to running daemon's voice.sock)
+// ---------------------------------------------------------------------------
+
+async fn send_voice_command(action: &str) -> Result<capture::VoiceSocketResponse> {
+    let sock = thermal_core::runtime::socket_path("voice");
+    let stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .with_context(|| format!("connecting to voice socket at {}", sock.display()))?;
+
+    let (reader, mut writer) = stream.into_split();
+
+    let cmd = capture::VoiceSocketCommand {
+        action: action.to_string(),
+    };
+    let mut msg = serde_json::to_string(&cmd)?;
+    msg.push('\n');
+    writer.write_all(msg.as_bytes()).await?;
+    writer.shutdown().await?;
+
+    let mut buf_reader = BufReader::new(reader);
+    let mut response_line = String::new();
+    buf_reader.read_line(&mut response_line).await?;
+
+    let resp: capture::VoiceSocketResponse = serde_json::from_str(response_line.trim())?;
+    Ok(resp)
+}
+
+async fn run_voice_toggle() -> Result<()> {
+    let status_resp = send_voice_command("status").await?;
+    let current_state = status_resp
+        .state
+        .as_deref()
+        .unwrap_or("muted");
+
+    match current_state {
+        "muted" | "monitoring" | "wake_word" => {
+            let resp = send_voice_command("start").await?;
+            if let Some(err) = resp.error {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+            println!("listening...");
+        }
+        "listening" => {
+            let resp = send_voice_command("stop").await?;
+            if let Some(transcript) = &resp.transcript {
+                println!("{transcript}");
+            } else if let Some(err) = &resp.error {
+                eprintln!("error: {err}");
+            }
+        }
+        "processing" => {
+            eprintln!("currently processing, please wait...");
+        }
+        _ => {
+            eprintln!("unknown voice state: {current_state}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_voice_dispatch() -> Result<()> {
+    let status_resp = send_voice_command("status").await?;
+    let current_state = status_resp
+        .state
+        .as_deref()
+        .unwrap_or("muted");
+
+    match current_state {
+        "muted" | "monitoring" | "wake_word" => {
+            let resp = send_voice_command("start").await?;
+            if let Some(err) = resp.error {
+                eprintln!("error: {err}");
+                std::process::exit(1);
+            }
+            println!("listening (dispatch mode)...");
+        }
+        "listening" => {
+            let resp = send_voice_command("dispatch").await?;
+            if let Some(transcript) = &resp.transcript {
+                println!("dispatched: {transcript}");
+            } else if let Some(err) = &resp.error {
+                eprintln!("error: {err}");
+            }
+        }
+        "processing" => {
+            eprintln!("currently processing, please wait...");
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+async fn run_voice_status() -> Result<()> {
+    match send_voice_command("status").await {
+        Ok(resp) => {
+            if let Some(state) = &resp.state {
+                println!("voice state: {state}");
+            }
+        }
+        Err(e) => {
+            println!("voice capture not running: {e}");
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -709,6 +882,14 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Handle voice subcommands (client-side, talk to running daemon).
+    match &cli.command {
+        Some(AudioCommand::Toggle) => return run_voice_toggle().await,
+        Some(AudioCommand::Dispatch) => return run_voice_dispatch().await,
+        Some(AudioCommand::VoiceStatus) => return run_voice_status().await,
+        _ => {} // Daemon mode or Listen — continue below
+    }
 
     // Load persisted audio state (mute/volume).
     let audio_state = Arc::new(Mutex::new(load_audio_state()));
@@ -733,7 +914,6 @@ async fn main() -> Result<()> {
                 if let Err(e) = audio.audio_tx.send(path) {
                     warn!("audio send failed: {e}");
                 }
-                // Wait for playback.
                 tokio::time::sleep(std::time::Duration::from_secs(4)).await;
             }
             Err(e) => {
@@ -752,23 +932,29 @@ async fn main() -> Result<()> {
 
     info!("thermal-audio daemon starting (pid {})", std::process::id());
 
+    // Shared playback-active flag for echo suppression (replaces file polling).
+    let playback_active = Arc::new(AtomicBool::new(false));
+
     // Set up the Unix socket listener.
     let sock_path = socket_path();
-    // Remove stale socket if present (checks whether a listener is alive).
     thermal_core::runtime::cleanup_stale_socket("thermal-audio", &sock_path);
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("binding socket {:?}", sock_path))?;
     info!("socket API listening on {}", sock_path.display());
 
-    // Use a tokio mpsc channel to forward TTS requests to the main loop,
-    // which owns the AudioManager (not Send-safe across tasks).
     let (sock_tx, sock_rx) = tokio::sync::mpsc::unbounded_channel::<TtsRequest>();
 
-    // Spawn a task that accepts socket connections and parses requests.
-    // Control messages (mute/volume/status) are handled directly in the
-    // socket handler — only TTS requests are forwarded via the channel.
+    // Voice capture command channel.
+    let (voice_cmd_tx, mut voice_cmd_rx) =
+        tokio::sync::mpsc::unbounded_channel::<capture::VoiceDaemonCommand>();
+
+    // Spawn voice.sock listener (accepts commands from `thermal-audio toggle` etc.)
+    let _voice_sock = capture::spawn_voice_socket_listener(voice_cmd_tx.clone()).await?;
+
+    // Spawn the audio.sock listener task.
     let socket_audio_state = Arc::clone(&audio_state);
     let socket_volume_pct = Arc::clone(&audio.volume_pct);
+    let socket_voice_cmd_tx = voice_cmd_tx.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -776,8 +962,9 @@ async fn main() -> Result<()> {
                     let tx = sock_tx.clone();
                     let state = Arc::clone(&socket_audio_state);
                     let vol_pct = Arc::clone(&socket_volume_pct);
+                    let voice_tx = socket_voice_cmd_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_socket_connection(stream, tx, state, vol_pct).await {
+                        if let Err(e) = handle_socket_connection(stream, tx, state, vol_pct, voice_tx).await {
                             warn!("socket connection error: {e}");
                         }
                     });
@@ -805,12 +992,55 @@ async fn main() -> Result<()> {
         }
     };
 
-    match daemon_stream {
-        Some(stream) => {
-            run_daemon_event_loop(stream, &mut audio, &mut voices, audio_state, sock_rx).await
+    // Voice capture runs on the main task (cpal::Stream is not Send).
+    // TTS playback also runs on the main task. Both are async and use
+    // tokio::select! internally, so we spawn_local the TTS loop and run
+    // voice capture directly.
+    let playback_active_clone = Arc::clone(&playback_active);
+
+    let tts_handle = tokio::task::spawn_local(async move {
+        let result = match daemon_stream {
+            Some(stream) => {
+                run_daemon_event_loop(stream, &mut audio, &mut voices, audio_state, sock_rx).await
+            }
+            None => run_poll_loop(&mut audio, &mut voices, audio_state, sock_rx).await,
+        };
+        if let Err(e) = result {
+            warn!("TTS loop error: {e}");
         }
-        None => run_poll_loop(&mut audio, &mut voices, audio_state, sock_rx).await,
+    });
+
+    // Run voice capture on this task (main thread, owns cpal::Stream).
+    match &cli.command {
+        Some(AudioCommand::Listen {
+            threshold,
+            streaming,
+            streaming_url,
+            no_wake_word,
+        }) => {
+            if let Err(e) = capture::run_listen_daemon(
+                *threshold,
+                *streaming,
+                streaming_url,
+                !*no_wake_word,
+                playback_active_clone,
+                &mut voice_cmd_rx,
+            )
+            .await
+            {
+                warn!("voice capture (listen) error: {e}");
+            }
+        }
+        _ => {
+            if let Err(e) = capture::run_ptt_daemon(&mut voice_cmd_rx).await {
+                warn!("voice capture (PTT) error: {e}");
+            }
+        }
     }
+
+    // If capture exits, wait for TTS to finish too
+    let _ = tts_handle.await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1195,6 +1425,7 @@ async fn handle_socket_connection(
     tx: tokio::sync::mpsc::UnboundedSender<TtsRequest>,
     audio_state: Arc<Mutex<AudioState>>,
     volume_pct: Arc<AtomicU8>,
+    voice_cmd_tx: tokio::sync::mpsc::UnboundedSender<capture::VoiceDaemonCommand>,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
@@ -1333,6 +1564,34 @@ async fn handle_socket_connection(
                 muted: state.muted,
                 volume: state.volume,
             })?;
+            writer.write_all(resp.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+        }
+        // Voice capture commands — forwarded to the capture module.
+        SocketMessage::VoiceToggle
+        | SocketMessage::VoiceStart
+        | SocketMessage::VoiceStop
+        | SocketMessage::VoiceDispatch
+        | SocketMessage::VoiceGetStatus
+        | SocketMessage::VoiceSetMode { .. } => {
+            let action = match &message {
+                SocketMessage::VoiceToggle => "start", // toggle logic is client-side
+                SocketMessage::VoiceStart => "start",
+                SocketMessage::VoiceStop => "stop",
+                SocketMessage::VoiceDispatch => "dispatch",
+                SocketMessage::VoiceGetStatus => "status",
+                SocketMessage::VoiceSetMode { .. } => "status", // placeholder
+                _ => unreachable!(),
+            };
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let _ = voice_cmd_tx.send(capture::VoiceDaemonCommand {
+                action: action.to_string(),
+                reply: reply_tx,
+            });
+            let voice_resp = reply_rx
+                .await
+                .unwrap_or_else(|_| capture::VoiceSocketResponse::error("voice capture not running"));
+            let resp = serde_json::to_string(&voice_resp)?;
             writer.write_all(resp.as_bytes()).await?;
             writer.write_all(b"\n").await?;
         }

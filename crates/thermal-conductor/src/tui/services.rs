@@ -96,10 +96,10 @@ struct ServiceStatus {
 const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         binary: "thermal-audio",
-        description: "TTS announcements",
+        description: "Audio daemon (TTS + voice capture)",
         pid_source: PidSource::Pidfile("audio.pid"),
         command: None,
-        args: &[],
+        args: &["listen"],
         doc_content: Some(include_str!("../../../../docs/daemons/thermal-audio.md")),
     },
     ServiceDef {
@@ -142,14 +142,7 @@ const SERVICES: &[ServiceDef] = &[
         args: &["--daemon"],
         doc_content: None,
     },
-    ServiceDef {
-        binary: "thermal-voice",
-        description: "Voice input (VAD + PTT)",
-        pid_source: PidSource::Pidfile("voice.pid"),
-        command: None,
-        args: &["listen"],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-voice.md")),
-    },
+    // thermal-voice is now merged into thermal-audio (voice capture module).
     ServiceDef {
         binary: "thermal-dispatcher",
         description: "Voice command router",

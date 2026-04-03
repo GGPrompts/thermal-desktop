@@ -2,6 +2,7 @@
 name = "thermal-audio"
 version.workspace = true
 edition.workspace = true
+description = "Unified audio daemon — TTS playback + voice capture (VAD, PTT, STT)"
 
 [[bin]]
 name = "thermal-audio"
@@ -20,3 +21,13 @@ clap = { workspace = true }
 md-5 = "0.10"
 rmp-serde = { workspace = true }
 nix = { workspace = true }
+# Voice capture dependencies (merged from thermal-voice)
+cpal = "0.15"
+toml = "0.8"
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+rustpotter = "3.0"
+# Pin half to a version compatible with candle-core 0.2.2's use of rand 0.8.
+half = ">=2.1, <2.5"
+ort = "2.0.0-rc.12"
+ndarray = "0.17.2"

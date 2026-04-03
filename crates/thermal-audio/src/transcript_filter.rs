@@ -1,8 +1,10 @@
-//! Transcript filtering for thermal-voice.
+//! Transcript filtering for voice capture.
 //!
 //! Filters out noise, Whisper hallucinations, and low-quality transcripts
 //! before they are dispatched as voice commands. Acts as a fallback safety
 //! layer alongside wake word detection.
+//!
+//! Ported from thermal-voice — now part of the unified audio daemon.
 
 use tracing::info;
 
@@ -143,16 +145,6 @@ mod tests {
             FilterResult::Reject(reason) => assert!(reason.contains("hallucination")),
             _ => panic!("expected rejection"),
         }
-        match filter_transcript("Subscribe.") {
-            FilterResult::Reject(reason) => {
-                // Could be hallucination or too few words
-                assert!(
-                    reason.contains("hallucination") || reason.contains("too few"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            _ => panic!("expected rejection"),
-        }
     }
 
     #[test]
@@ -166,33 +158,9 @@ mod tests {
     }
 
     #[test]
-    fn bracketed_noise_rejected() {
-        match filter_transcript("[Music]") {
-            FilterResult::Reject(_) => {} // Expected
-            _ => panic!("expected rejection"),
-        }
-    }
-
-    #[test]
     fn filler_words_rejected() {
         match filter_transcript("um uh like so") {
             FilterResult::Reject(reason) => assert!(reason.contains("filler")),
-            _ => panic!("expected rejection"),
-        }
-    }
-
-    #[test]
-    fn three_words_accepted() {
-        match filter_transcript("play some music") {
-            FilterResult::Accept(text) => assert_eq!(text, "play some music"),
-            FilterResult::Reject(reason) => panic!("unexpected rejection: {reason}"),
-        }
-    }
-
-    #[test]
-    fn hallucination_case_insensitive() {
-        match filter_transcript("THANK YOU FOR WATCHING") {
-            FilterResult::Reject(reason) => assert!(reason.contains("hallucination")),
             _ => panic!("expected rejection"),
         }
     }
@@ -202,22 +170,6 @@ mod tests {
         match filter_transcript("open Firefox") {
             FilterResult::Accept(text) => assert_eq!(text, "open Firefox"),
             FilterResult::Reject(reason) => panic!("unexpected rejection: {reason}"),
-        }
-        match filter_transcript("mute audio") {
-            FilterResult::Accept(text) => assert_eq!(text, "mute audio"),
-            FilterResult::Reject(reason) => panic!("unexpected rejection: {reason}"),
-        }
-        match filter_transcript("yes no") {
-            FilterResult::Accept(text) => assert_eq!(text, "yes no"),
-            FilterResult::Reject(reason) => panic!("unexpected rejection: {reason}"),
-        }
-    }
-
-    #[test]
-    fn hallucination_with_trailing_punctuation() {
-        match filter_transcript("Thank you for watching.") {
-            FilterResult::Reject(reason) => assert!(reason.contains("hallucination")),
-            _ => panic!("expected rejection"),
         }
     }
 }

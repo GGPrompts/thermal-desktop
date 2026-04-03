@@ -4,9 +4,11 @@
 //! in real-time, receiving partial and final transcript events as they arrive.
 //!
 //! Protocol (WhisperLiveKit JSON messages):
-//!   Server → Client: `{"type": "partial", "text": "hello"}`
-//!   Server → Client: `{"type": "final", "text": "hello world"}`
-//!   Client → Server: binary frames containing 16-bit PCM audio
+//!   Server -> Client: `{"type": "partial", "text": "hello"}`
+//!   Server -> Client: `{"type": "final", "text": "hello world"}`
+//!   Client -> Server: binary frames containing 16-bit PCM audio
+//!
+//! Ported from thermal-voice — now part of the unified audio daemon.
 
 use anyhow::{Context, Result};
 use futures_util::{FutureExt as _, SinkExt, StreamExt};

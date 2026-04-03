@@ -286,12 +286,14 @@ fn count_instances(def: &ServiceDef) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
-    // Use systemctl if this service has a systemd unit.
+    // Try systemctl first; fall through to direct start if the unit isn't available.
     if let Some(unit) = def.systemd_unit {
-        return systemctl_action("start", unit, def.binary);
+        if systemctl_action("start", unit, def.binary).is_ok() {
+            return Ok(());
+        }
     }
 
-    // Fallback: direct process management for non-systemd services.
+    // Fallback: direct process management.
     start_service_direct(def)
 }
 
@@ -373,9 +375,12 @@ fn start_service_direct(def: &ServiceDef) -> Result<(), String> {
 }
 
 fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> {
-    // Use systemctl if this service has a systemd unit.
+    // Try systemctl first; fall through to direct kill if the unit isn't active.
     if let Some(unit) = def.systemd_unit {
-        return systemctl_action("stop", unit, def.binary);
+        if systemctl_action("stop", unit, def.binary).is_ok() {
+            cleanup_stale_socket(def);
+            return Ok(());
+        }
     }
 
     // Fallback: direct process management.
@@ -398,10 +403,10 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
 
 /// Kill ALL instances of a service via pkill, then clean up stale socket.
 fn kill_all_instances(def: &ServiceDef) -> Result<(), String> {
-    let (flag, pattern) = if def.binary.len() > 15 {
-        ("-f", format!("(^|/){}", def.binary))
-    } else {
-        ("-x", def.binary.to_string())
+    let (flag, pattern) = match &def.pid_source {
+        PidSource::PgrepPattern(pat) => ("-f", pat.to_string()),
+        _ if def.binary.len() > 15 => ("-f", format!("(^|/){}", def.binary)),
+        _ => ("-x", def.binary.to_string()),
     };
     let result = Command::new("pkill").arg(flag).arg(&pattern).status();
     cleanup_stale_socket(def);
@@ -669,39 +674,32 @@ impl ServicesPage {
             return;
         }
 
-        // For systemd-managed services, use `systemctl --user kill --signal=KILL`.
+        // For systemd-managed services, try `systemctl --user kill` first.
+        // If the unit isn't active (process started outside systemd), fall through to pkill.
         if let Some(unit) = def.systemd_unit {
             let result = Command::new("systemctl")
                 .args(["--user", "kill", "--signal=KILL", unit])
                 .status();
-            // Also stop the unit so systemd doesn't restart it.
-            let _ = Command::new("systemctl")
-                .args(["--user", "stop", unit])
-                .status();
-            match result {
-                Ok(s) if s.success() => {
-                    self.status_msg = Some((
-                        format!("Force-killed {}", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
-                }
-                _ => {
-                    self.status_msg = Some((
-                        format!("Failed to force-kill {}", def.binary),
-                        true,
-                        Instant::now(),
-                    ));
-                }
+            if matches!(result, Ok(s) if s.success()) {
+                let _ = Command::new("systemctl")
+                    .args(["--user", "stop", unit])
+                    .status();
+                cleanup_stale_socket(def);
+                self.status_msg = Some((
+                    format!("Force-killed {}", def.binary),
+                    false,
+                    Instant::now(),
+                ));
+                self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
+                return;
             }
-            self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
-            return;
+            // systemctl kill failed — unit not active, fall through to pkill.
         }
 
-        let (flag, pattern) = if def.binary.len() > 15 {
-            ("-f", format!("(^|/){}", def.binary))
-        } else {
-            ("-x", def.binary.to_string())
+        let (flag, pattern) = match &def.pid_source {
+            PidSource::PgrepPattern(pat) => ("-f", pat.to_string()),
+            _ if def.binary.len() > 15 => ("-f", format!("(^|/){}", def.binary)),
+            _ => ("-x", def.binary.to_string()),
         };
         let result = Command::new("pkill")
             .arg("-9") // SIGKILL

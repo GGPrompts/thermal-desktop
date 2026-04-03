@@ -1120,6 +1120,12 @@ impl<T> Term<T> {
 
     /// Expand a single-cell grapheme into a wide cell after a zero-width
     /// modifier (for example VS16) changes its display width.
+    ///
+    /// Unlike stock alacritty which calls `insert_blank()` to shift cells
+    /// right, we directly overwrite the adjacent cell with a spacer. This
+    /// avoids corrupting content that TUI frameworks (ratatui) have already
+    /// positioned via explicit cursor movement — `insert_blank` would shift
+    /// those cells and produce ghost columns.
     fn expand_zerowidth_sequence(&mut self, point: Point)
     where
         T: EventListener,
@@ -1128,23 +1134,28 @@ impl<T> Term<T> {
             return;
         }
 
-        self.insert_blank(1);
+        // Mark the base cell as wide.
         self.grid[point.line][point.column]
             .flags
             .insert(Flags::WIDE_CHAR);
 
-        self.grid
-            .cursor
-            .template
-            .flags
-            .insert(Flags::WIDE_CHAR_SPACER);
-        self.write_at_cursor(' ');
-        self.grid
-            .cursor
-            .template
-            .flags
-            .remove(Flags::WIDE_CHAR_SPACER);
+        // Overwrite the next cell with a wide-char spacer (no insert_blank shift).
+        let spacer_col = point.column + 1;
+        let fg = self.grid.cursor.template.fg;
+        let bg = self.grid.cursor.template.bg;
+        let spacer = &mut self.grid[point.line][spacer_col];
+        spacer.c = ' ';
+        spacer.fg = fg;
+        spacer.bg = bg;
+        spacer.flags = Flags::WIDE_CHAR_SPACER;
+        spacer.extra = None;
 
+        // Damage the line so the renderer picks up the change.
+        self.damage
+            .damage_line(point.line.0 as usize, 0, self.columns() - 1);
+
+        // Advance cursor past the spacer.
+        self.grid.cursor.point.column = spacer_col;
         if self.grid.cursor.point.column + 1 < self.columns() {
             self.grid.cursor.point.column += 1;
         } else {

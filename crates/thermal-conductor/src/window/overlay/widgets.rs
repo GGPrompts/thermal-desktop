@@ -31,6 +31,9 @@ pub struct ToolCallCard {
     pub file: Option<String>,
     /// Brief summary of the tool input (truncated).
     pub input_preview: String,
+    /// Unique per-invocation identity from the agent (e.g., Claude Code `tool_use_id`).
+    /// Used to disambiguate concurrent calls to the same tool.
+    pub tool_use_id: Option<String>,
 }
 
 /// Animated thinking/reasoning indicator.

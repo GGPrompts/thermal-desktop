@@ -30,18 +30,21 @@ pub(crate) enum AgentEvent {
     ToolUse {
         tool: String,
         input: serde_json::Value,
+        tool_use_id: Option<String>,
     },
     /// Result of a tool execution.
     ToolResult {
         tool: String,
         output: String,
         is_error: bool,
+        tool_use_id: Option<String>,
     },
     /// Progress update for a running tool.
     Progress {
         tool: String,
         status: String,
         message: Option<String>,
+        tool_use_id: Option<String>,
     },
     /// Model thinking/reasoning content.
     Thinking { content: String },
@@ -68,6 +71,8 @@ struct RawEnvelope {
     status: Option<String>,
     #[serde(default)]
     message: Option<String>,
+    #[serde(default)]
+    tool_use_id: Option<String>,
 }
 
 /// Extract text content from CC's polymorphic `content` field.
@@ -112,16 +117,19 @@ pub(crate) fn parse_agent_event(line: &str) -> Option<AgentEvent> {
         "tool_use" => Some(AgentEvent::ToolUse {
             tool: envelope.tool.unwrap_or_default(),
             input: envelope.input.unwrap_or(serde_json::Value::Null),
+            tool_use_id: envelope.tool_use_id,
         }),
         "tool_result" => Some(AgentEvent::ToolResult {
             tool: envelope.tool.unwrap_or_default(),
             output: envelope.output.unwrap_or_default(),
             is_error: envelope.is_error.unwrap_or(false),
+            tool_use_id: envelope.tool_use_id,
         }),
         "progress" => Some(AgentEvent::Progress {
             tool: envelope.tool.unwrap_or_default(),
             status: envelope.status.unwrap_or_default(),
             message: envelope.message,
+            tool_use_id: envelope.tool_use_id,
         }),
         "thinking" => Some(AgentEvent::Thinking {
             content: extract_content_string(&envelope.content),
@@ -163,12 +171,17 @@ mod tests {
 
     #[test]
     fn parse_tool_use() {
-        let line = r#"{"type":"tool_use","tool":"Read","input":{"file_path":"/tmp/test.rs"}}"#;
+        let line = r#"{"type":"tool_use","tool":"Read","tool_use_id":"tu_abc","input":{"file_path":"/tmp/test.rs"}}"#;
         let event = parse_agent_event(line).unwrap();
         match event {
-            AgentEvent::ToolUse { tool, input } => {
+            AgentEvent::ToolUse {
+                tool,
+                input,
+                tool_use_id,
+            } => {
                 assert_eq!(tool, "Read");
                 assert_eq!(input["file_path"], "/tmp/test.rs");
+                assert_eq!(tool_use_id.as_deref(), Some("tu_abc"));
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -176,7 +189,7 @@ mod tests {
 
     #[test]
     fn parse_tool_result() {
-        let line = r#"{"type":"tool_result","tool":"Bash","output":"ok","is_error":false}"#;
+        let line = r#"{"type":"tool_result","tool":"Bash","tool_use_id":"tu_01","output":"ok","is_error":false}"#;
         let event = parse_agent_event(line).unwrap();
         assert_eq!(
             event,
@@ -184,6 +197,7 @@ mod tests {
                 tool: "Bash".into(),
                 output: "ok".into(),
                 is_error: false,
+                tool_use_id: Some("tu_01".into()),
             }
         );
     }
@@ -199,6 +213,7 @@ mod tests {
                 tool: "Bash".into(),
                 output: "command not found".into(),
                 is_error: true,
+                tool_use_id: None,
             }
         );
     }
@@ -206,7 +221,7 @@ mod tests {
     #[test]
     fn parse_progress() {
         let line =
-            r#"{"type":"progress","tool":"Bash","status":"running","message":"Compiling..."}"#;
+            r#"{"type":"progress","tool":"Bash","tool_use_id":"tu_02","status":"running","message":"Compiling..."}"#;
         let event = parse_agent_event(line).unwrap();
         assert_eq!(
             event,
@@ -214,6 +229,7 @@ mod tests {
                 tool: "Bash".into(),
                 status: "running".into(),
                 message: Some("Compiling...".into()),
+                tool_use_id: Some("tu_02".into()),
             }
         );
     }
@@ -295,5 +311,74 @@ mod tests {
                 content: "Let me think...".into()
             }
         );
+    }
+
+    #[test]
+    fn parse_tool_use_without_tool_use_id() {
+        let line = r#"{"type":"tool_use","tool":"Read","input":{}}"#;
+        let event = parse_agent_event(line).unwrap();
+        match event {
+            AgentEvent::ToolUse { tool_use_id, .. } => {
+                assert_eq!(tool_use_id, None);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_concurrent_same_tool_distinct_ids() {
+        // Two concurrent Read calls with different tool_use_ids should parse independently.
+        let line_a =
+            r#"{"type":"tool_use","tool":"Read","tool_use_id":"tu_aaa","input":{"file_path":"/a.rs"}}"#;
+        let line_b =
+            r#"{"type":"tool_use","tool":"Read","tool_use_id":"tu_bbb","input":{"file_path":"/b.rs"}}"#;
+        let result_a =
+            r#"{"type":"tool_result","tool":"Read","tool_use_id":"tu_aaa","output":"content a","is_error":false}"#;
+        let result_b =
+            r#"{"type":"tool_result","tool":"Read","tool_use_id":"tu_bbb","output":"content b","is_error":false}"#;
+
+        let ev_a = parse_agent_event(line_a).unwrap();
+        let ev_b = parse_agent_event(line_b).unwrap();
+        let res_a = parse_agent_event(result_a).unwrap();
+        let res_b = parse_agent_event(result_b).unwrap();
+
+        // Both parse as ToolUse with distinct IDs.
+        match (&ev_a, &ev_b) {
+            (
+                AgentEvent::ToolUse {
+                    tool_use_id: id_a, ..
+                },
+                AgentEvent::ToolUse {
+                    tool_use_id: id_b, ..
+                },
+            ) => {
+                assert_eq!(id_a.as_deref(), Some("tu_aaa"));
+                assert_eq!(id_b.as_deref(), Some("tu_bbb"));
+                assert_ne!(id_a, id_b);
+            }
+            _ => panic!("expected two ToolUse events"),
+        }
+
+        // Results carry their respective IDs.
+        match (&res_a, &res_b) {
+            (
+                AgentEvent::ToolResult {
+                    tool_use_id: id_a,
+                    output: out_a,
+                    ..
+                },
+                AgentEvent::ToolResult {
+                    tool_use_id: id_b,
+                    output: out_b,
+                    ..
+                },
+            ) => {
+                assert_eq!(id_a.as_deref(), Some("tu_aaa"));
+                assert_eq!(id_b.as_deref(), Some("tu_bbb"));
+                assert_eq!(out_a, "content a");
+                assert_eq!(out_b, "content b");
+            }
+            _ => panic!("expected two ToolResult events"),
+        }
     }
 }

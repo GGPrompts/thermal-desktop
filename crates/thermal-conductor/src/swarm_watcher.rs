@@ -14,7 +14,7 @@
 //! subagent state from the same `ClaudeStatePoller` data that the state file
 //! watcher already processes — no additional inotify watchers needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,6 +68,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// If a subagent hasn't been seen in state files for this long, consider it done.
 const INACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of poll cycles to retry JSONL resolution before giving up.
+const MAX_JSONL_RETRIES: u32 = 20; // 20 × 500ms = 10s
 
 /// Base directory for Claude projects.
 fn claude_projects_dir() -> PathBuf {
@@ -284,8 +287,15 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-        // Track spawned swarm windows: session_id -> SwarmWindow
+        // Track successfully spawned swarm windows: session_id -> SwarmWindow
         let mut windows: HashMap<String, SwarmWindow> = HashMap::new();
+
+        // Sessions waiting for JSONL resolution (file may not exist yet).
+        // Maps session_id -> (parent_id, agent_id, retry_count).
+        let mut pending_jsonl: HashMap<String, (String, String, u32)> = HashMap::new();
+
+        // Sessions that failed to spawn (hyprctl error) — don't retry these.
+        let mut failed_spawns: HashSet<String> = HashSet::new();
 
         loop {
             interval.tick().await;
@@ -298,12 +308,78 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                 .filter(|s| s.parent_session_id.is_some())
                 .collect();
 
+            // Retry pending JSONL resolutions.
+            let mut resolved_pending = Vec::new();
+            for (sid, (parent_id, agent_id, retry_count)) in pending_jsonl.iter_mut() {
+                // Only retry if the subagent is still visible in state.
+                if !subagents.iter().any(|s| &s.session_id == sid) {
+                    resolved_pending.push(sid.clone()); // gone from state, drop it
+                    continue;
+                }
+
+                if let Some(jsonl_path) = resolve_jsonl_path(parent_id, agent_id) {
+                    match spawn_swarm_window(agent_id, &jsonl_path, parent_id).await {
+                        Ok(()) => {
+                            let now = Instant::now();
+                            info!(
+                                session = %sid,
+                                parent = %parent_id,
+                                agent = %agent_id,
+                                retries = %retry_count,
+                                "Swarm window spawned for subagent (after JSONL retry)"
+                            );
+                            windows.insert(
+                                sid.clone(),
+                                SwarmWindow {
+                                    session_id: sid.clone(),
+                                    parent_session_id: parent_id.clone(),
+                                    agent_id: agent_id.clone(),
+                                    jsonl_path: Some(jsonl_path),
+                                    window_address: None,
+                                    spawned_at: now,
+                                    last_active: now,
+                                    closing: false,
+                                    close_started_at: None,
+                                },
+                            );
+                            resolved_pending.push(sid.clone());
+                        }
+                        Err(e) => {
+                            error!(
+                                session = %sid,
+                                error = %e,
+                                "Failed to spawn swarm window on retry"
+                            );
+                            failed_spawns.insert(sid.clone());
+                            resolved_pending.push(sid.clone());
+                        }
+                    }
+                } else {
+                    *retry_count += 1;
+                    if *retry_count >= MAX_JSONL_RETRIES {
+                        warn!(
+                            session = %sid,
+                            parent = %parent_id,
+                            agent = %agent_id,
+                            "Giving up JSONL resolution after {MAX_JSONL_RETRIES} retries"
+                        );
+                        resolved_pending.push(sid.clone());
+                    }
+                }
+            }
+            for sid in resolved_pending {
+                pending_jsonl.remove(&sid);
+            }
+
             // Spawn windows for new subagents.
             for session in &subagents {
                 let sid = &session.session_id;
 
-                if windows.contains_key(sid) {
-                    // Already tracked — update last_active.
+                if windows.contains_key(sid)
+                    || pending_jsonl.contains_key(sid)
+                    || failed_spawns.contains(sid)
+                {
+                    // Already tracked/pending/failed — update last_active if tracked.
                     if let Some(w) = windows.get_mut(sid) {
                         w.last_active = Instant::now();
                     }
@@ -332,28 +408,30 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                 // Resolve JSONL path.
                 let jsonl_path = resolve_jsonl_path(&parent_id, &agent_id);
 
-                let now = Instant::now();
-                let mut window = SwarmWindow {
-                    session_id: sid.clone(),
-                    parent_session_id: parent_id.clone(),
-                    agent_id: agent_id.clone(),
-                    jsonl_path: jsonl_path.clone(),
-                    window_address: None,
-                    spawned_at: now,
-                    last_active: now,
-                    closing: false,
-                    close_started_at: None,
-                };
-
                 // Spawn the terminal window if we found a JSONL path.
                 if let Some(ref path) = jsonl_path {
                     match spawn_swarm_window(&agent_id, path, &parent_id).await {
                         Ok(()) => {
+                            let now = Instant::now();
                             info!(
                                 session = %sid,
                                 parent = %parent_id,
                                 agent = %agent_id,
                                 "Swarm window spawned for subagent"
+                            );
+                            windows.insert(
+                                sid.clone(),
+                                SwarmWindow {
+                                    session_id: sid.clone(),
+                                    parent_session_id: parent_id.clone(),
+                                    agent_id: agent_id.clone(),
+                                    jsonl_path: jsonl_path,
+                                    window_address: None,
+                                    spawned_at: now,
+                                    last_active: now,
+                                    closing: false,
+                                    close_started_at: None,
+                                },
                             );
                         }
                         Err(e) => {
@@ -362,20 +440,18 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                                 error = %e,
                                 "Failed to spawn swarm window"
                             );
+                            failed_spawns.insert(sid.clone());
                         }
                     }
                 } else {
-                    warn!(
+                    debug!(
                         session = %sid,
                         parent = %parent_id,
                         agent = %agent_id,
-                        "No JSONL found for subagent — window will not show content"
+                        "No JSONL found yet for subagent — will retry"
                     );
-                    // Still track it so we don't retry every poll cycle.
-                    window.jsonl_path = None;
+                    pending_jsonl.insert(sid.clone(), (parent_id, agent_id, 0));
                 }
-
-                windows.insert(sid.clone(), window);
             }
 
             // Check for completed subagents and initiate close sequence.
@@ -420,18 +496,22 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                 windows.remove(&sid);
             }
 
+            // Clean up failed_spawns for subagents that are no longer visible.
+            failed_spawns.retain(|sid| current_subagent_ids.contains(sid));
+
             // Emit swarm count to the event bus (via a lightweight mechanism).
             // The active count is the number of non-closing windows.
             let active_count = windows.values().filter(|w| !w.closing).count();
             let _ = active_count; // Available for future event bus integration.
 
             // Log swarm state changes at debug level.
-            if !windows.is_empty() {
+            if !windows.is_empty() || !pending_jsonl.is_empty() {
                 let closing_count = windows.values().filter(|w| w.closing).count();
                 debug!(
                     total = windows.len(),
                     active = windows.len() - closing_count,
                     closing = closing_count,
+                    pending = pending_jsonl.len(),
                     "Swarm watcher tick"
                 );
             }

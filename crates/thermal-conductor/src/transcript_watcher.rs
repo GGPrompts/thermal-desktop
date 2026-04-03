@@ -218,6 +218,20 @@ impl TranscriptWatcher {
 
         info!("Transcript watcher started");
 
+        // Initial scan: pick up .jsonl files that already exist (sessions active
+        // before conductor started).
+        let mut startup_count = 0usize;
+        for dir in [&claude_dir, &codex_dir] {
+            if dir.exists() {
+                startup_count += self.scan_existing_jsonl(dir);
+            }
+        }
+        if startup_count > 0 {
+            info!(
+                "Transcript watcher: picked up {startup_count} pre-existing session(s) on startup"
+            );
+        }
+
         // Keep watcher alive.
         let _watcher = watcher;
 
@@ -237,6 +251,35 @@ impl TranscriptWatcher {
                 }
             }
         }
+    }
+
+    /// Recursively scan a directory for existing `.jsonl` files and process them.
+    /// Returns the number of files found and processed.
+    fn scan_existing_jsonl(&self, dir: &Path) -> usize {
+        let mut count = 0;
+        let mut stack = vec![dir.to_path_buf()];
+
+        while let Some(current) = stack.pop() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(e) => e,
+                Err(e) => {
+                    debug!("Cannot read dir {:?} during startup scan: {e}", current);
+                    continue;
+                }
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                    self.handle_file_change(&path);
+                    count += 1;
+                }
+            }
+        }
+
+        count
     }
 
     /// Process a file modification event: read new JSONL lines incrementally.

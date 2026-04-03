@@ -216,7 +216,11 @@ impl OverlayManager {
     /// Returns `true` if the overlay state changed (caller should mark dirty).
     pub fn handle_agent_event(&mut self, event: &AgentEvent) -> bool {
         match event {
-            AgentEvent::ToolUse { tool, input } => {
+            AgentEvent::ToolUse {
+                tool,
+                input,
+                tool_use_id,
+            } => {
                 // Extract file path from input if present.
                 let file = input
                     .get("file_path")
@@ -239,6 +243,7 @@ impl OverlayManager {
                     status: ToolStatus::Running,
                     file,
                     input_preview,
+                    tool_use_id: tool_use_id.clone(),
                 }));
                 true
             }
@@ -247,10 +252,20 @@ impl OverlayManager {
                 tool,
                 output,
                 is_error,
+                tool_use_id,
             } => {
-                // Remove matching ToolCallCard.
-                self.passive_widgets
-                    .retain(|w| !matches!(&w.kind, WidgetKind::ToolCallCard(c) if c.tool == *tool));
+                // Remove matching ToolCallCard — prefer tool_use_id, fall back to tool name.
+                self.passive_widgets.retain(|w| {
+                    if let WidgetKind::ToolCallCard(c) = &w.kind {
+                        if let (Some(event_id), Some(card_id)) = (tool_use_id, &c.tool_use_id) {
+                            // Both have IDs — match on ID only.
+                            return card_id != event_id;
+                        }
+                        // No tool_use_id available — fall back to tool name match.
+                        return c.tool != *tool;
+                    }
+                    true
+                });
 
                 // Truncate output to a summary.
                 let summary = if output.len() > 120 {
@@ -272,12 +287,21 @@ impl OverlayManager {
                 tool,
                 status,
                 message,
+                tool_use_id,
             } => {
                 // Update existing ToolCallCard status if found.
+                // Prefer tool_use_id match, fall back to tool name.
                 let mut changed = false;
                 for w in &mut self.passive_widgets {
                     if let WidgetKind::ToolCallCard(ref mut card) = w.kind {
-                        if card.tool == *tool {
+                        let is_match = if let (Some(event_id), Some(card_id)) =
+                            (tool_use_id, &card.tool_use_id)
+                        {
+                            card_id == event_id
+                        } else {
+                            card.tool == *tool
+                        };
+                        if is_match {
                             let new_status = match status.as_str() {
                                 "running" => ToolStatus::Running,
                                 "completed" => ToolStatus::Completed,
@@ -419,6 +443,7 @@ mod tests {
         let event = AgentEvent::ToolUse {
             tool: "Read".into(),
             input: serde_json::json!({"file_path": "/tmp/test.rs"}),
+            tool_use_id: Some("tu_01".into()),
         };
         assert!(mgr.handle_agent_event(&event));
         assert_eq!(mgr.passive_widgets.len(), 1);
@@ -427,6 +452,7 @@ mod tests {
                 assert_eq!(card.tool, "Read");
                 assert_eq!(card.file.as_deref(), Some("/tmp/test.rs"));
                 assert_eq!(card.status, ToolStatus::Running);
+                assert_eq!(card.tool_use_id.as_deref(), Some("tu_01"));
             }
             other => panic!("expected ToolCallCard, got {:?}", other),
         }
@@ -439,6 +465,7 @@ mod tests {
         mgr.handle_agent_event(&AgentEvent::ToolUse {
             tool: "Bash".into(),
             input: serde_json::json!({"command": "ls"}),
+            tool_use_id: Some("tu_02".into()),
         });
         assert_eq!(mgr.passive_widgets.len(), 1);
 
@@ -447,6 +474,7 @@ mod tests {
             tool: "Bash".into(),
             output: "file1.txt\nfile2.txt".into(),
             is_error: false,
+            tool_use_id: Some("tu_02".into()),
         });
 
         // Should have replaced tool card with result card.
@@ -534,12 +562,14 @@ mod tests {
         mgr.handle_agent_event(&AgentEvent::ToolUse {
             tool: "Bash".into(),
             input: serde_json::json!({"command": "cargo build"}),
+            tool_use_id: Some("tu_03".into()),
         });
 
         let changed = mgr.handle_agent_event(&AgentEvent::Progress {
             tool: "Bash".into(),
             status: "completed".into(),
             message: Some("Build succeeded".into()),
+            tool_use_id: Some("tu_03".into()),
         });
         assert!(changed);
 
@@ -562,6 +592,7 @@ mod tests {
         mgr.handle_agent_event(&AgentEvent::ToolUse {
             tool: "Read".into(),
             input: serde_json::json!({}),
+            tool_use_id: None,
         });
         assert_eq!(mgr.passive_widgets.len(), 3);
 
@@ -574,5 +605,88 @@ mod tests {
             &mgr.passive_widgets[0].kind,
             WidgetKind::ContextGauge(_)
         ));
+    }
+
+    #[test]
+    fn concurrent_same_tool_no_collision() {
+        let mut mgr = OverlayManager::new();
+
+        // Two concurrent Read calls with different tool_use_ids.
+        mgr.handle_agent_event(&AgentEvent::ToolUse {
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path": "/a.rs"}),
+            tool_use_id: Some("tu_aaa".into()),
+        });
+        mgr.handle_agent_event(&AgentEvent::ToolUse {
+            tool: "Read".into(),
+            input: serde_json::json!({"file_path": "/b.rs"}),
+            tool_use_id: Some("tu_bbb".into()),
+        });
+        assert_eq!(mgr.passive_widgets.len(), 2);
+
+        // Progress for tu_bbb should only update the second card.
+        mgr.handle_agent_event(&AgentEvent::Progress {
+            tool: "Read".into(),
+            status: "running".into(),
+            message: Some("Reading /b.rs".into()),
+            tool_use_id: Some("tu_bbb".into()),
+        });
+        // First card should still have original input_preview.
+        match &mgr.passive_widgets[0].kind {
+            WidgetKind::ToolCallCard(card) => {
+                assert_eq!(card.tool_use_id.as_deref(), Some("tu_aaa"));
+                assert!(!card.input_preview.contains("Reading /b.rs"));
+            }
+            other => panic!("expected ToolCallCard, got {:?}", other),
+        }
+        // Second card should have the updated preview.
+        match &mgr.passive_widgets[1].kind {
+            WidgetKind::ToolCallCard(card) => {
+                assert_eq!(card.tool_use_id.as_deref(), Some("tu_bbb"));
+                assert!(card.input_preview.contains("Reading /b.rs"));
+            }
+            other => panic!("expected ToolCallCard, got {:?}", other),
+        }
+
+        // Result for tu_aaa should only remove the first card.
+        mgr.handle_agent_event(&AgentEvent::ToolResult {
+            tool: "Read".into(),
+            output: "content a".into(),
+            is_error: false,
+            tool_use_id: Some("tu_aaa".into()),
+        });
+        // Should have 1 ToolCallCard (tu_bbb) + 1 ResultCard.
+        assert_eq!(mgr.passive_widgets.len(), 2);
+        let tool_cards: Vec<_> = mgr
+            .passive_widgets
+            .iter()
+            .filter_map(|w| match &w.kind {
+                WidgetKind::ToolCallCard(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_cards.len(), 1);
+        assert_eq!(tool_cards[0].tool_use_id.as_deref(), Some("tu_bbb"));
+
+        // Result for tu_bbb should remove the remaining card.
+        mgr.handle_agent_event(&AgentEvent::ToolResult {
+            tool: "Read".into(),
+            output: "content b".into(),
+            is_error: false,
+            tool_use_id: Some("tu_bbb".into()),
+        });
+        // Should have 2 ResultCards, 0 ToolCallCards.
+        let tool_card_count = mgr
+            .passive_widgets
+            .iter()
+            .filter(|w| matches!(&w.kind, WidgetKind::ToolCallCard(_)))
+            .count();
+        assert_eq!(tool_card_count, 0);
+        let result_card_count = mgr
+            .passive_widgets
+            .iter()
+            .filter(|w| matches!(&w.kind, WidgetKind::ResultCard(_)))
+            .count();
+        assert_eq!(result_card_count, 2);
     }
 }

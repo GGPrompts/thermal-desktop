@@ -1,7 +1,8 @@
 //! Services page — manage thermal daemon lifecycle from the TUI.
 //!
-//! Shows thermal daemons (audio, bar, hud, notify, voice) with live status,
-//! start/stop toggling, and restart support.
+//! Shows the 3 core daemons (audio, dispatcher, conductor) with live status,
+//! start/stop toggling, and restart support. Uses `systemctl --user` for
+//! systemd-managed services to avoid conflicts with Restart=on-failure.
 
 use std::fs;
 use std::io::Read as _;
@@ -78,6 +79,10 @@ struct ServiceDef {
     command: Option<&'static str>,
     /// Extra args passed to the command.
     args: &'static [&'static str],
+    /// Systemd user unit name (e.g. "thermal-audio.service").
+    /// When set, start/stop/restart use `systemctl --user` instead of
+    /// direct process management (setsid/SIGTERM).
+    systemd_unit: Option<&'static str>,
     /// Embedded daemon documentation (from docs/daemons/*.md), if available.
     doc_content: Option<&'static str>,
 }
@@ -96,65 +101,31 @@ struct ServiceStatus {
 const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         binary: "thermal-audio",
-        description: "Audio daemon (TTS + voice capture)",
+        description: "TTS playback + voice capture",
         pid_source: PidSource::Pidfile("audio.pid"),
         command: None,
-        args: &["listen"],
+        args: &[],
+        systemd_unit: Some("thermal-audio.service"),
         doc_content: Some(include_str!("../../../../docs/daemons/thermal-audio.md")),
     },
-    // thermal-bar is now built into thermal-conductor (managed layer-shell surface).
-    // thermal-hud is now built into thermal-conductor (managed layer-shell surface).
-    ServiceDef {
-        binary: "thermal-lock",
-        description: "Lock screen",
-        pid_source: PidSource::Pgrep,
-        command: None,
-        args: &[],
-        doc_content: None,
-    },
-    ServiceDef {
-        binary: "thermal-notify",
-        description: "Notification daemon",
-        pid_source: PidSource::Pgrep,
-        command: None,
-        args: &[],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-notify.md")),
-    },
-    ServiceDef {
-        binary: "codex-state-adapter",
-        description: "Codex state tracker",
-        pid_source: PidSource::Pidfile("codex-state-adapter.pid"),
-        command: Some(CODEX_ADAPTER_SCRIPT),
-        args: &["--daemon"],
-        doc_content: None,
-    },
-    // thermal-voice is now merged into thermal-audio (voice capture module).
     ServiceDef {
         binary: "thermal-dispatcher",
-        description: "Voice command router",
+        description: "LLM API routing + trust tiers",
         pid_source: PidSource::Pgrep,
         command: None,
         args: &[],
+        systemd_unit: Some("thermal-dispatcher.service"),
         doc_content: Some(include_str!(
             "../../../../docs/daemons/thermal-dispatcher.md"
         )),
     },
     ServiceDef {
-        binary: "thermal-wallpaper",
-        description: "Animated thermal wallpaper",
-        pid_source: PidSource::Pidfile("wallpaper.pid"),
-        command: None,
-        args: &[],
-        doc_content: Some(include_str!(
-            "../../../../docs/daemons/thermal-wallpaper.md"
-        )),
-    },
-    ServiceDef {
         binary: "thermal-conductor",
-        description: "Session daemon",
+        description: "Session daemon + bar + HUD",
         pid_source: PidSource::PgrepPattern("thc daemon"),
         command: Some("thc"),
         args: &["daemon"],
+        systemd_unit: Some("thermal-conductor.service"),
         doc_content: Some(include_str!(
             "../../../../docs/daemons/thermal-conductor.md"
         )),
@@ -168,11 +139,6 @@ const SERVICES: &[ServiceDef] = &[
 fn runtime_dir() -> PathBuf {
     thermal_core::runtime::runtime_dir()
 }
-
-const CODEX_ADAPTER_SCRIPT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../scripts/codex-state-adapter.sh"
-);
 
 fn read_pid_from_file(filename: &str) -> Option<u32> {
     let path = runtime_dir().join(filename);
@@ -320,8 +286,38 @@ fn count_instances(def: &ServiceDef) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
+    // Use systemctl if this service has a systemd unit.
+    if let Some(unit) = def.systemd_unit {
+        return systemctl_action("start", unit, def.binary);
+    }
+
+    // Fallback: direct process management for non-systemd services.
+    start_service_direct(def)
+}
+
+/// Start a service via systemctl --user.
+fn systemctl_action(action: &str, unit: &str, binary: &str) -> Result<(), String> {
+    let output = Command::new("systemctl")
+        .args(["--user", action, unit])
+        .output()
+        .map_err(|e| format!("systemctl {} failed: {}", action, e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last_line = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("unknown error");
+        Err(format!("{}: {}", binary, last_line))
+    }
+}
+
+/// Direct start via setsid (fallback for services without systemd units).
+fn start_service_direct(def: &ServiceDef) -> Result<(), String> {
     // Clean up stale pidfile if the process is dead but the file remains.
-    // Without this, the new process sees the pidfile and refuses to start.
     if let PidSource::Pidfile(filename) = &def.pid_source {
         let pidfile = runtime_dir().join(filename);
         if pidfile.exists() && read_pid_from_file(filename).is_none() {
@@ -329,8 +325,6 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
         }
     }
 
-    // Spawn detached — setsid so it outlives the TUI.
-    // Capture stderr to a temp file so we can report early crashes.
     let program = def.command.unwrap_or(def.binary);
 
     let stderr_file =
@@ -352,19 +346,15 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
     let result = command.spawn();
     match result {
         Ok(_) => {
-            // Give the process a moment to crash on startup errors.
             std::thread::sleep(std::time::Duration::from_millis(500));
-            // Check if it actually stayed alive.
             let status = get_service_status(def);
             if status.running {
                 Ok(())
             } else {
-                // Read stderr from the temp file for the error message.
                 let stderr_output = fs::read_to_string(stderr_file.path()).unwrap_or_default();
                 let hint = if stderr_output.is_empty() {
                     format!("{} exited immediately (check logs)", def.binary)
                 } else {
-                    // Take the last non-empty line as the most useful error.
                     let last_line = stderr_output
                         .lines()
                         .rev()
@@ -383,23 +373,25 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
 }
 
 fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> {
-    // When duplicates exist, kill ALL instances — not just one.
+    // Use systemctl if this service has a systemd unit.
+    if let Some(unit) = def.systemd_unit {
+        return systemctl_action("stop", unit, def.binary);
+    }
+
+    // Fallback: direct process management.
     if status.duplicate_count > 1 {
         return kill_all_instances(def);
     }
 
     if let Some(pid) = status.pid {
-        // Send SIGTERM.
         match signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
             Ok(()) => {
-                // Clean up stale socket if the service has one.
                 cleanup_stale_socket(def);
                 Ok(())
             }
             Err(e) => Err(format!("Failed to kill PID {}: {}", pid, e)),
         }
     } else {
-        // No known PID — try pkill as fallback.
         kill_all_instances(def)
     }
 }
@@ -604,6 +596,25 @@ impl ServicesPage {
         let def = &SERVICES[self.selected];
         let status = &self.statuses[self.selected];
 
+        // Systemd-managed: use `systemctl --user restart` (atomic).
+        if let Some(unit) = def.systemd_unit {
+            match systemctl_action("restart", unit, def.binary) {
+                Ok(()) => {
+                    self.status_msg = Some((
+                        format!("Restarting {}...", def.binary),
+                        false,
+                        Instant::now(),
+                    ));
+                }
+                Err(e) => {
+                    self.status_msg = Some((e, true, Instant::now()));
+                }
+            }
+            self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
+            return;
+        }
+
+        // Fallback: stop then start.
         if status.running {
             match stop_service(def, status) {
                 Ok(()) => {
@@ -619,7 +630,6 @@ impl ServicesPage {
                 }
             }
         } else {
-            // Not running — just start it.
             match start_service(def) {
                 Ok(()) => {
                     self.status_msg =
@@ -656,6 +666,35 @@ impl ServicesPage {
 
         if !status.running {
             self.status_msg = Some((format!("{} not running", def.binary), true, Instant::now()));
+            return;
+        }
+
+        // For systemd-managed services, use `systemctl --user kill --signal=KILL`.
+        if let Some(unit) = def.systemd_unit {
+            let result = Command::new("systemctl")
+                .args(["--user", "kill", "--signal=KILL", unit])
+                .status();
+            // Also stop the unit so systemd doesn't restart it.
+            let _ = Command::new("systemctl")
+                .args(["--user", "stop", unit])
+                .status();
+            match result {
+                Ok(s) if s.success() => {
+                    self.status_msg = Some((
+                        format!("Force-killed {}", def.binary),
+                        false,
+                        Instant::now(),
+                    ));
+                }
+                _ => {
+                    self.status_msg = Some((
+                        format!("Failed to force-kill {}", def.binary),
+                        true,
+                        Instant::now(),
+                    ));
+                }
+            }
+            self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
             return;
         }
 

@@ -94,6 +94,30 @@ impl TrustConfig {
     pub fn tier_count(&self) -> usize {
         self.tiers.len()
     }
+
+    /// Return the effective tier for a tool, with a flag indicating if learning
+    /// suggests promotion.
+    #[allow(dead_code)] // Infrastructure for when dispatcher handles confirmations
+    ///
+    /// If the static config says CONFIRM but the learning history meets the
+    /// promotion threshold, this still returns CONFIRM — the caller should
+    /// check `ConfirmationHistory::pending_promotions()` separately for
+    /// suggestions. We never auto-mutate the static config.
+    pub fn tier_for_with_learning(
+        &self,
+        tool_name: &str,
+        history: &crate::learning::ConfirmationHistory,
+    ) -> (TrustTier, bool) {
+        let static_tier = self.tier_for(tool_name);
+        let dominated = static_tier == TrustTier::Confirm
+            && !crate::learning::is_never_promote(tool_name)
+            && history
+                .tools
+                .get(tool_name)
+                .map(|h| h.consecutive_approvals >= 3)
+                .unwrap_or(false);
+        (static_tier, dominated)
+    }
 }
 
 // ---------------------------------------------------------------------------

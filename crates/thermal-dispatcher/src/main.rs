@@ -14,6 +14,7 @@ mod config;
 mod context;
 mod escalation;
 mod executor;
+mod learning;
 mod tools;
 
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use tracing::{error, info, warn};
 
 use config::TrustConfig;
 use context::ConversationContext;
+use learning::ConfirmationHistory;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -96,10 +98,34 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // Parse CLI flags
+    let args: Vec<String> = std::env::args().collect();
+    let learning_enabled = !args.iter().any(|a| a == "--no-learning");
+
+    // Handle --show-promotions subcommand (print and exit)
+    if args.iter().any(|a| a == "--show-promotions") {
+        let history_path = learning::default_history_path();
+        let history = ConfirmationHistory::load(&history_path)?;
+        let promotions = history.pending_promotions();
+        if promotions.is_empty() {
+            println!("No pending promotions.");
+        } else {
+            println!("Pending trust tier promotions:");
+            for p in &promotions {
+                println!("  {p}");
+            }
+            println!(
+                "\nTo promote a tool, add it as AUTO in your trust-tiers.toml"
+            );
+        }
+        return Ok(());
+    }
+
     enforce_single_instance();
     write_pidfile();
 
     info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));
+    info!(learning = learning_enabled, "adaptive trust learning");
 
     // Detect best available backend (Claude CLI > Copilot CLI > Ollama)
     let http = reqwest::Client::new();
@@ -143,6 +169,25 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&sock_path).context("binding Unix socket")?;
     info!("listening on {}", sock_path.display());
 
+    // Load confirmation history for adaptive learning
+    let history_path = learning::default_history_path();
+    let confirmation_history = ConfirmationHistory::load(&history_path)
+        .unwrap_or_else(|e| {
+            warn!(error = %e, "failed to load confirmation history, starting fresh");
+            ConfirmationHistory::default()
+        });
+
+    // Log any pending promotions at startup
+    if learning_enabled {
+        let promotions = confirmation_history.pending_promotions();
+        if !promotions.is_empty() {
+            info!(count = promotions.len(), "pending trust tier promotions at startup:");
+            for p in &promotions {
+                info!("  {p}");
+            }
+        }
+    }
+
     // Shared state wrapped in Arc for concurrent access
     let shared = std::sync::Arc::new(SharedState {
         backend,
@@ -151,6 +196,9 @@ async fn main() -> Result<()> {
         tool_schemas,
         http,
         conversation: Mutex::new(ConversationContext::new()),
+        learning_enabled,
+        history_path,
+        confirmation_history: Mutex::new(confirmation_history),
     });
 
     loop {
@@ -181,6 +229,42 @@ struct SharedState {
     http: reqwest::Client,
     /// Multi-turn conversational context (persists across dispatch calls).
     conversation: Mutex<ConversationContext>,
+    /// Whether adaptive trust learning is enabled.
+    #[allow(dead_code)] // Used by record_tool_approval/denial and --show-promotions
+    learning_enabled: bool,
+    /// Path to the confirmation history TOML file.
+    #[allow(dead_code)]
+    history_path: PathBuf,
+    /// Confirmation history for adaptive trust tier learning.
+    #[allow(dead_code)]
+    confirmation_history: Mutex<ConfirmationHistory>,
+}
+
+#[allow(dead_code)] // Infrastructure for confirmation-gated tool execution
+impl SharedState {
+    /// Record that a user approved a tool execution. Persists to disk.
+    async fn record_tool_approval(&self, tool_name: &str) {
+        if !self.learning_enabled {
+            return;
+        }
+        let mut history = self.confirmation_history.lock().await;
+        history.record_approval(tool_name);
+        if let Err(e) = history.save(&self.history_path) {
+            warn!(error = %e, "failed to persist confirmation history");
+        }
+    }
+
+    /// Record that a user denied a tool execution. Persists to disk.
+    async fn record_tool_denial(&self, tool_name: &str) {
+        if !self.learning_enabled {
+            return;
+        }
+        let mut history = self.confirmation_history.lock().await;
+        history.record_denial(tool_name);
+        if let Err(e) = history.save(&self.history_path) {
+            warn!(error = %e, "failed to persist confirmation history");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

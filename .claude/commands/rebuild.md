@@ -14,21 +14,14 @@ IMPORTANT: `CARGO_TARGET_DIR=~/.cargo-target` — `cargo build` alone does NOT u
 | Crate | Path | Daemon? | How to restart |
 |-------|------|---------|----------------|
 | thermal-audio | crates/thermal-audio | Yes (pidfile: audio.pid, socket: audio.sock) | `thermal-audio` |
-| thermal-bar | crates/thermal-bar | Yes (pidfile: bar.pid) | `thermal-bar &` |
 | thermal-commander | crates/thermal-commander | No (stdio MCP server) | N/A |
 | thermal-conductor | crates/thermal-conductor | Optional daemon mode (socket: conductor.sock) | `thc daemon &` (if was running) |
-| thermal-dispatcher | crates/thermal-dispatcher | Yes (pidfile: dispatcher.pid, socket: dispatcher.sock) | `thermal-dispatcher &` |
-| thermal-hud | crates/thermal-hud | Yes (pidfile: hud.pid) | `thermal-hud &` |
+| thermal-dispatcher | crates/thermal-dispatcher | Yes (pidfile: dispatcher.pid) | `thermal-dispatcher &` |
 | thermal-launch | crates/thermal-launch | No (on-demand overlay) | N/A |
 | thermal-lock | crates/thermal-lock | No (on-demand) | N/A |
-| thermal-messages | crates/thermal-messages | Yes (pidfile: messages.pid, socket: messages.sock) | `thermal-messages &` or `thermal-messages --persist &` |
-| thermal-monitor | crates/thermal-monitor | No (interactive TUI) | N/A |
-| thermal-notify | crates/thermal-notify | Yes (pidfile: notify.pid) | `thermal-notify &` |
-| thermal-screensaver | crates/thermal-screensaver | Yes (pidfile: screensaver.pid) | `thermal-screensaver &` |
-| thermal-voice | crates/thermal-voice | Yes (pidfile: voice.pid, socket: voice.sock) | `thermal-voice listen &` |
-| thermal-wallpaper | crates/thermal-wallpaper | Yes (pidfile: wallpaper.pid) | `thermal-wallpaper &` |
 
 Note: thermal-core and thermal-terminal are libraries (no binary).
+Note: thermal-bar, thermal-hud, thermal-messages, thermal-voice, thermal-monitor, thermal-notify, thermal-screensaver, thermal-wallpaper have been removed.
 
 ## Strategy
 
@@ -70,8 +63,7 @@ If the argument is "nuke", perform a full scorched-earth reset:
 5. **Rebuild ALL binary crates** (same as "all" mode)
 
 6. **Restart all standard daemons** in dependency order (don't wait for "was it running?" — start everything):
-   - thermal-messages, thermal-audio, thermal-voice listen, thermal-dispatcher
-   - thermal-bar, thermal-hud, thermal-notify, thermal-wallpaper, thermal-screensaver
+   - thermal-audio, thermal-dispatcher
 
 7. **Skip** interactive components (TUI, monitor, conductor window, lock, launch)
 
@@ -141,16 +133,11 @@ nohup thermal-<name> [args] > /tmp/thermal-<name>.log 2>&1 &
 ```
 
 Restart order matters — dependencies first:
-1. **thermal-messages** (message bus — others depend on it)
-2. **thermal-audio** (TTS — dispatcher depends on it)
-3. **thermal-voice**, **thermal-dispatcher** (voice pipeline)
-4. **thermal-bar**, **thermal-hud**, **thermal-notify**, **thermal-wallpaper**, **thermal-screensaver** (UI components, independent)
-
-Preserve original arguments: if `thermal-voice` was running with `listen`, restart as `thermal-voice listen`. If `thermal-messages` was running with `--persist`, include that flag. Check the original `pgrep -a` output for the full command line.
+1. **thermal-audio** (TTS — dispatcher may depend on it)
+2. **thermal-dispatcher**
 
 Do NOT restart:
 - thermal-conductor TUI (interactive, user manages it)
-- thermal-monitor (interactive TUI)
 - thermal-commander (stdio, launched by MCP host)
 - thermal-launch (on-demand)
 - thermal-lock (on-demand)
@@ -174,9 +161,9 @@ Show a summary table:
 ```
 | Component | Rebuilt | Restarted | PID |
 |-----------|---------|-----------|-----|
-| thermal-bar | Yes | Yes | 12345 |
-| thermal-hud | Yes | Yes | 12346 |
-| thermal-audio | No | No | 3448168 (unchanged) |
+| thermal-audio | Yes | Yes | 12345 |
+| thermal-dispatcher | Yes | Yes | 12346 |
+| thermal-conductor | No | No | 3448168 (unchanged) |
 
 Doctor: CLEAN (or list issues found/fixed)
 Tests: PASSED (or SKIPPED if fast mode)

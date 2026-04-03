@@ -854,18 +854,18 @@ struct DaemonSpec {
 
 static DAEMONS: &[DaemonSpec] = &[
     DaemonSpec {
+        name: "thermal-conductor",
+        short_name: "conductor",
+        has_pidfile: false,
+        has_socket: true,
+        restart_cmd: None,
+    },
+    DaemonSpec {
         name: "thermal-audio",
         short_name: "audio",
         has_pidfile: true,
         has_socket: true,
         restart_cmd: Some(&["thermal-audio"]),
-    },
-    DaemonSpec {
-        name: "thermal-voice",
-        short_name: "voice",
-        has_pidfile: true,
-        has_socket: true,
-        restart_cmd: Some(&["thermal-voice", "listen"]),
     },
     DaemonSpec {
         name: "thermal-dispatcher",
@@ -874,41 +874,17 @@ static DAEMONS: &[DaemonSpec] = &[
         has_socket: false,
         restart_cmd: Some(&["thermal-dispatcher"]),
     },
-    DaemonSpec {
-        name: "thermal-bar",
-        short_name: "bar",
-        has_pidfile: true,
-        has_socket: false,
-        restart_cmd: None,
-    },
-    DaemonSpec {
-        name: "thermal-conductor",
-        short_name: "conductor",
-        has_pidfile: false,
-        has_socket: true,
-        restart_cmd: None,
-    },
-    DaemonSpec {
-        name: "thermal-hud",
-        short_name: "hud",
-        has_pidfile: true,
-        has_socket: false,
-        restart_cmd: None,
-    },
-    DaemonSpec {
-        name: "thermal-notify",
-        short_name: "notify",
-        has_pidfile: true,
-        has_socket: false,
-        restart_cmd: None,
-    },
-    DaemonSpec {
-        name: "thermal-wallpaper",
-        short_name: "wallpaper",
-        has_pidfile: true,
-        has_socket: false,
-        restart_cmd: None,
-    },
+];
+
+/// Stale artifacts from removed daemons that should be cleaned up on `--fix`.
+/// Format: (short_name, has_pidfile, has_socket)
+static REMOVED_DAEMON_ARTIFACTS: &[(&str, bool, bool)] = &[
+    ("bar", true, false),
+    ("hud", true, false),
+    ("messages", true, true),
+    ("voice", true, true),
+    ("notify", true, false),
+    ("wallpaper", true, false),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1564,7 +1540,7 @@ async fn cmd_config() -> Result<()> {
         },
     );
 
-    let socket_names = ["conductor", "voice", "dispatcher", "audio"];
+    let socket_names = ["conductor", "audio", "dispatcher"];
     for name in socket_names {
         let sock = thermal_core::runtime::socket_path(name);
         let exists = sock.exists();
@@ -1720,6 +1696,7 @@ async fn cmd_smoke(fix: bool) -> Result<()> {
                     fix_daemon(spec, &run_dir).await;
                 }
             }
+            cleanup_removed_daemon_artifacts(&run_dir);
         }
     }
 
@@ -1802,6 +1779,7 @@ async fn cmd_doctor(fix: bool, report: bool) -> Result<()> {
                 fix_daemon(spec, &run_dir).await;
             }
         }
+        cleanup_removed_daemon_artifacts(&run_dir);
         println!();
     } else if plan.should_print_fix_hint {
         println!(
@@ -1970,17 +1948,6 @@ fn gather_log_locations(run_dir: &std::path::Path) -> Vec<(String, String)> {
         "RUST_LOG=debug <daemon> 2>/path/to/file.log".to_string(),
     ));
 
-    // Voice state file
-    let voice_state = std::path::PathBuf::from("/tmp/thermal-voice-state.json");
-    locs.push((
-        "voice state".to_string(),
-        if voice_state.exists() {
-            voice_state.display().to_string()
-        } else {
-            format!("{} (not found)", voice_state.display())
-        },
-    ));
-
     locs
 }
 
@@ -2124,6 +2091,44 @@ async fn fix_daemon(spec: &DaemonSpec, run_dir: &std::path::Path) {
     }
 }
 
+/// Remove stale pidfiles and sockets left behind by removed daemons.
+///
+/// Daemons that no longer exist (thermal-bar, thermal-hud, thermal-messages,
+/// thermal-voice, thermal-notify, thermal-wallpaper) may have left runtime
+/// artifacts. This function silently removes them on `--fix`.
+fn cleanup_removed_daemon_artifacts(run_dir: &std::path::Path) {
+    for (short_name, has_pidfile, has_socket) in REMOVED_DAEMON_ARTIFACTS {
+        if *has_pidfile {
+            let path = run_dir.join(format!("{short_name}.pid"));
+            if path.exists() {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => println!(
+                        "    \x1b[90mcleaned stale artifact: {short_name}.pid (removed daemon)\x1b[0m"
+                    ),
+                    Err(e) => eprintln!(
+                        "    \x1b[33m! could not remove {}: {e}\x1b[0m",
+                        path.display()
+                    ),
+                }
+            }
+        }
+        if *has_socket {
+            let path = run_dir.join(format!("{short_name}.sock"));
+            if path.exists() {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => println!(
+                        "    \x1b[90mcleaned stale artifact: {short_name}.sock (removed daemon)\x1b[0m"
+                    ),
+                    Err(e) => eprintln!(
+                        "    \x1b[33m! could not remove {}: {e}\x1b[0m",
+                        path.display()
+                    ),
+                }
+            }
+        }
+    }
+}
+
 /// Format a ClaudeStatus for display.
 fn format_claude_status(status: &ClaudeStatus) -> String {
     match status {
@@ -2175,7 +2180,7 @@ mod doctor_tests {
                     sock_status: Some(SocketStatus::Stale),
                 },
                 DaemonCheckResult {
-                    name: "thermal-hud".to_string(),
+                    name: "thermal-dispatcher".to_string(),
                     health: DaemonHealth::NotRunning,
                     pid: None,
                     pid_status: Some(PidStatus::Missing),

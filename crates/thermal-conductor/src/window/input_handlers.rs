@@ -59,6 +59,32 @@ impl KeyboardHandler for ConductorWindow {
         _: u32,
         event: KeyEvent,
     ) {
+        // ── Modal overlay input capture ────────────────────────────────
+        // When a modal widget (e.g. permission dialog) is on the focus
+        // stack, it captures ALL keyboard input. Window-level shortcuts
+        // (Ctrl+Shift+Q) still work — modal only intercepts after those.
+        if self.overlay.has_modal() {
+            // For now, 'y'/'n'/Escape dismiss the modal.
+            // A full implementation would route to the widget's handler.
+            match event.keysym {
+                Keysym::y | Keysym::Y | Keysym::n | Keysym::N | Keysym::Escape => {
+                    if let Some(widget) = self.overlay.pop_modal() {
+                        tracing::info!(
+                            id = widget.id,
+                            key = ?event.keysym,
+                            "modal widget dismissed by keypress"
+                        );
+                    }
+                    self.dirty = true;
+                }
+                _ => {
+                    // Swallow all other input while modal is active.
+                    tracing::trace!(key = ?event.keysym, "input swallowed by modal overlay");
+                }
+            }
+            return;
+        }
+
         // ── Window close: Ctrl+Shift+Q ─────────────────────────────────
         if self.modifiers.ctrl
             && self.modifiers.shift

@@ -535,6 +535,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     };
 
     // ── Build state ───────────────────────────────────────────────────────────
+    let (agent_event_tx, agent_event_rx) = std::sync::mpsc::channel();
     let mut state = ConductorWindow {
         registry_state: RegistryState::new(&globals),
         seat_state: SeatState::new(&globals, &qh),
@@ -586,6 +587,9 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         inject_watcher,
         context_warning_active: false,
         context_critical_active: false,
+        overlay: overlay::OverlayManager::new(),
+        agent_event_rx,
+        agent_event_tx,
         agent_timeline: AgentTimeline::new(),
         agent_graph: AgentGraph::new(),
         bell_mode: BellMode::from_env(),
@@ -718,6 +722,23 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                 .record_tool_change(session.current_tool.as_deref());
         } else if state.agent_timeline.visible {
             state.agent_timeline.record_idle();
+        }
+
+        // ── Update overlay context gauge from Claude session state ──────
+        if let Some(ref session) = state.claude_session {
+            if let Some(ctx_pct) = session.context_percent {
+                let pct = (ctx_pct as f32 / 100.0).clamp(0.0, 1.0);
+                if state.overlay.update_context_gauge(pct, 1.0) {
+                    state.dirty = true;
+                }
+            }
+        }
+
+        // ── Drain agent events into overlay manager ───────────────────────
+        while let Ok(event) = state.agent_event_rx.try_recv() {
+            if state.overlay.handle_agent_event(&event) {
+                state.dirty = true;
+            }
         }
 
         // ── Update agent communication graph ─────────────────────────────
@@ -926,6 +947,13 @@ pub(super) struct ConductorWindow {
     pub(super) context_warning_active: bool,
     /// Whether the 95% context critical overlay is currently displayed.
     pub(super) context_critical_active: bool,
+    /// Agent overlay widget manager — focus stack + passive widgets.
+    pub(super) overlay: overlay::OverlayManager,
+    /// Receiver for parsed agent events (sent from daemon reader or PTY watcher).
+    /// Drained each event loop iteration to update the overlay.
+    pub(super) agent_event_rx: std::sync::mpsc::Receiver<crate::structured_output::AgentEvent>,
+    /// Sender half kept here so callers can clone it for background tasks.
+    pub(super) agent_event_tx: std::sync::mpsc::Sender<crate::structured_output::AgentEvent>,
     /// Agent tool-usage timeline bar (toggled with Ctrl+Shift+T).
     pub(super) agent_timeline: AgentTimeline,
     /// Agent communication graph overlay (toggled with F3).
@@ -1218,6 +1246,7 @@ mod claude_session;
 mod clipboard;
 mod daemon_reader;
 mod input_handlers;
+pub(crate) mod overlay;
 mod render;
 mod session_mode;
 mod url_detection;

@@ -16,11 +16,9 @@ impl ConductorWindow {
     /// Render a frame: clear to BG, then render the terminal grid.
     // TODO: [code-review] extract render_terminal_grid, render_overlays, render_hud sub-methods
     pub(super) fn render_frame(&mut self) -> RenderStatus {
-        // When the session is in structured JSON mode, future work (therm-cgos)
-        // will render parsed AgentEvents as rich widgets here. For now, log and
-        // continue with normal ANSI rendering.
-        if self.output_mode == crate::protocol::SessionOutputMode::StructuredJson {
-            tracing::trace!("Session in StructuredJson output mode — widget rendering pending");
+        // Garbage-collect expired overlay result cards each frame.
+        if self.overlay.gc_expired() {
+            self.dirty = true;
         }
 
         let output = match self.wgpu.surface.get_current_texture() {
@@ -248,6 +246,16 @@ impl ConductorWindow {
                                 );
                             }
 
+                            // ── Agent overlay widgets ─────────────────────────────
+                            if self.overlay.has_widgets() {
+                                self.overlay.render(
+                                    &mut encoder,
+                                    &view,
+                                    self.width,
+                                    self.height,
+                                );
+                            }
+
                             self.wgpu.queue.submit(std::iter::once(encoder.finish()));
                             output.present();
                             return RenderStatus::Presented;
@@ -426,6 +434,16 @@ impl ConductorWindow {
             self.grid_renderer.render_bell_flash(
                 &self.wgpu.device,
                 &self.wgpu.queue,
+                &mut encoder,
+                &view,
+                self.width,
+                self.height,
+            );
+        }
+
+        // ── Agent overlay widgets ──────────────────────────────────────
+        if self.overlay.has_widgets() {
+            self.overlay.render(
                 &mut encoder,
                 &view,
                 self.width,

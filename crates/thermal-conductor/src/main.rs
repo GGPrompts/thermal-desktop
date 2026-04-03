@@ -883,7 +883,9 @@ static DAEMONS: &[DaemonSpec] = &[
         has_socket: true,
         restart_cmd: Some(&["thc", "daemon"]),
         // `thc` is ambiguous (tui/daemon/window) — match the daemon subcommand.
-        pgrep_pattern: Some("thermal-conductor daemon"),
+        // Must use "thc daemon" (not "thermal-conductor daemon") because the
+        // process cmdline is "/path/to/thc daemon", not "thermal-conductor daemon".
+        pgrep_pattern: Some("thc daemon"),
     },
     DaemonSpec {
         name: "thermal-audio",

@@ -85,6 +85,10 @@ struct ServiceDef {
     systemd_unit: Option<&'static str>,
     /// Embedded daemon documentation (from docs/daemons/*.md), if available.
     doc_content: Option<&'static str>,
+    /// Optional `pgrep -f` pattern for instance counting and kill operations.
+    /// When set, overrides the default binary-name-based counting. Needed when
+    /// multiple subcommands share the same binary (e.g. `thc daemon` vs `thc tui`).
+    count_pattern: Option<&'static str>,
 }
 
 /// Runtime status of a service.
@@ -107,6 +111,7 @@ const SERVICES: &[ServiceDef] = &[
         args: &[],
         systemd_unit: Some("thermal-audio.service"),
         doc_content: Some(include_str!("../../../../docs/daemons/thermal-audio.md")),
+        count_pattern: None,
     },
     ServiceDef {
         binary: "thermal-dispatcher",
@@ -118,6 +123,7 @@ const SERVICES: &[ServiceDef] = &[
         doc_content: Some(include_str!(
             "../../../../docs/daemons/thermal-dispatcher.md"
         )),
+        count_pattern: None,
     },
     ServiceDef {
         binary: "thermal-conductor",
@@ -129,6 +135,10 @@ const SERVICES: &[ServiceDef] = &[
         doc_content: Some(include_str!(
             "../../../../docs/daemons/thermal-conductor.md"
         )),
+        // `thc` is a symlink to `thermal-conductor`, so pgrep -x thc matches
+        // thc tui, thc window, AND thc daemon. Use a cmdline pattern to count
+        // only the daemon process.
+        count_pattern: Some("thc daemon"),
     },
 ];
 
@@ -218,12 +228,13 @@ fn is_stale_binary(pid: u32, _def: &ServiceDef) -> bool {
 /// Count how many instances of this service are running.
 /// Delegates to the shared `daemon_lifecycle` module.
 fn count_instances(def: &ServiceDef) -> u32 {
-    let pgrep_pattern = match &def.pid_source {
+    // Prefer the explicit count_pattern (avoids matching sibling subcommands).
+    let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
         PidSource::PgrepPattern(pat) => Some(*pat),
         _ => None,
-    };
+    });
     let count = crate::daemon_lifecycle::count_instances(def.binary, pgrep_pattern);
-    if count > 0 {
+    if count > 0 || pgrep_pattern.is_some() {
         return count;
     }
     // Fallback: try the command name if different from binary.
@@ -356,10 +367,10 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
 /// Kill ALL instances of a service via pkill, then clean up stale socket.
 /// Delegates to the shared `daemon_lifecycle` module.
 fn kill_all_instances(def: &ServiceDef) -> Result<(), String> {
-    let pgrep_pattern = match &def.pid_source {
+    let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
         PidSource::PgrepPattern(pat) => Some(*pat),
         _ => None,
-    };
+    });
     let short_name = binary_to_short_name(def.binary);
     crate::daemon_lifecycle::kill_all(def.binary, short_name, pgrep_pattern)
 }
@@ -641,10 +652,10 @@ impl ServicesPage {
             // systemctl kill failed — unit not active, fall through to pkill.
         }
 
-        let pgrep_pattern = match &def.pid_source {
+        let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
             PidSource::PgrepPattern(pat) => Some(*pat),
             _ => None,
-        };
+        });
         let short_name = binary_to_short_name(def.binary);
 
         match crate::daemon_lifecycle::force_kill_all(def.binary, short_name, pgrep_pattern) {
@@ -1175,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn conductor_uses_pidfile() {
+    fn conductor_uses_pidfile_and_count_pattern() {
         let conductor = &SERVICES[2];
         assert_eq!(conductor.binary, "thermal-conductor");
         assert!(matches!(
@@ -1184,6 +1195,9 @@ mod tests {
         ));
         assert_eq!(conductor.command, Some("thc"));
         assert_eq!(conductor.args, ["daemon"]);
+        // count_pattern must target "thc daemon" specifically — without it,
+        // pgrep -cx thc matches thc tui and thc window too (false duplicates).
+        assert_eq!(conductor.count_pattern, Some("thc daemon"));
     }
 
     #[test]

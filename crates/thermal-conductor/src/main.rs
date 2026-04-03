@@ -35,6 +35,7 @@ mod semantic_state;
 mod structured_output;
 mod swarm_watcher;
 mod terminal;
+mod transcript_watcher;
 pub(crate) mod tui;
 mod window;
 

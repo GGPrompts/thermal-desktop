@@ -122,7 +122,7 @@ const SERVICES: &[ServiceDef] = &[
     ServiceDef {
         binary: "thermal-conductor",
         description: "Session daemon + bar + HUD",
-        pid_source: PidSource::PgrepPattern("thc daemon"),
+        pid_source: PidSource::Pidfile("conductor.pid"),
         command: Some("thc"),
         args: &["daemon"],
         systemd_unit: Some("thermal-conductor.service"),
@@ -210,74 +210,26 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
 }
 
 /// Check if the running process is using an older binary than what's on disk.
-/// Compares /proc/<pid>/exe mtime against the installed binary mtime.
+/// Delegates to the shared `daemon_lifecycle` module.
 fn is_stale_binary(pid: u32, _def: &ServiceDef) -> bool {
-    let exe_link = format!("/proc/{pid}/exe");
-    // Resolve the actual binary path the process is running.
-    let Ok(exe_path) = std::fs::read_link(&exe_link) else {
-        return false;
-    };
-    // Get mtime of the running binary (from /proc — reflects when process started).
-    let Ok(proc_meta) = std::fs::symlink_metadata(&exe_link) else {
-        return false;
-    };
-    // Get mtime of the on-disk binary.
-    let Ok(disk_meta) = std::fs::metadata(&exe_path) else {
-        return false;
-    };
-    let Ok(proc_mtime) = proc_meta.modified() else {
-        return false;
-    };
-    let Ok(disk_mtime) = disk_meta.modified() else {
-        return false;
-    };
-    // If the on-disk binary is newer than when the process started, it's stale.
-    disk_mtime > proc_mtime
+    crate::daemon_lifecycle::is_stale_binary(pid)
 }
 
 /// Count how many instances of this service are running.
+/// Delegates to the shared `daemon_lifecycle` module.
 fn count_instances(def: &ServiceDef) -> u32 {
-    fn pgrep_count(binary: &str) -> u32 {
-        let (flag, pattern) = if binary.len() > 15 {
-            ("-cf", format!("(^|/){binary}$"))
-        } else {
-            ("-cx", binary.to_string())
-        };
-        Command::new("pgrep")
-            .arg(flag)
-            .arg(&pattern)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0)
-    }
-    if let PidSource::PgrepPattern(pattern) = &def.pid_source {
-        return Command::new("pgrep")
-            .args(["-cf", pattern])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0);
-    }
-    let count = pgrep_count(def.binary);
+    let pgrep_pattern = match &def.pid_source {
+        PidSource::PgrepPattern(pat) => Some(*pat),
+        _ => None,
+    };
+    let count = crate::daemon_lifecycle::count_instances(def.binary, pgrep_pattern);
     if count > 0 {
         return count;
     }
+    // Fallback: try the command name if different from binary.
     def.command
         .filter(|cmd| *cmd != def.binary)
-        .map(pgrep_count)
+        .map(|cmd| crate::daemon_lifecycle::count_instances(cmd, None))
         .unwrap_or(0)
 }
 
@@ -402,38 +354,31 @@ fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> 
 }
 
 /// Kill ALL instances of a service via pkill, then clean up stale socket.
+/// Delegates to the shared `daemon_lifecycle` module.
 fn kill_all_instances(def: &ServiceDef) -> Result<(), String> {
-    let (flag, pattern) = match &def.pid_source {
-        PidSource::PgrepPattern(pat) => ("-f", pat.to_string()),
-        _ if def.binary.len() > 15 => ("-f", format!("(^|/){}", def.binary)),
-        _ => ("-x", def.binary.to_string()),
-    };
-    let result = Command::new("pkill").arg(flag).arg(&pattern).status();
-    cleanup_stale_socket(def);
-    match result {
-        Ok(s) if s.success() => Ok(()),
-        Ok(_) => Err(format!("{} not running", def.binary)),
-        Err(e) => Err(format!("pkill failed: {}", e)),
-    }
-}
-
-/// Remove stale Unix socket after stopping a service.
-fn cleanup_stale_socket(def: &ServiceDef) {
-    // Map binary name to socket filename.
-    let sock_name = match def.binary {
-        "thermal-dispatcher" => Some("dispatcher.sock"),
-        "thermal-audio" => Some("audio.sock"),
-        "thermal-conductor" => Some("conductor.sock"),
+    let pgrep_pattern = match &def.pid_source {
+        PidSource::PgrepPattern(pat) => Some(*pat),
         _ => None,
     };
-    if let Some(name) = sock_name {
-        let sock_path = runtime_dir().join(name);
-        let _ = std::fs::remove_file(&sock_path);
-    }
-    // Also clean up pidfile if present.
-    if let PidSource::Pidfile(filename) = &def.pid_source {
-        let pidfile = runtime_dir().join(filename);
-        let _ = std::fs::remove_file(&pidfile);
+    let short_name = binary_to_short_name(def.binary);
+    crate::daemon_lifecycle::kill_all(def.binary, short_name, pgrep_pattern)
+}
+
+/// Remove stale Unix socket and pidfile after stopping a service.
+/// Delegates to the shared `daemon_lifecycle` module.
+fn cleanup_stale_socket(def: &ServiceDef) {
+    let short_name = binary_to_short_name(def.binary);
+    crate::daemon_lifecycle::cleanup_artifacts(short_name);
+}
+
+/// Map a binary name (e.g. "thermal-audio") to its short runtime name
+/// (e.g. "audio") for pidfile/socket lookup.
+fn binary_to_short_name(binary: &str) -> &str {
+    match binary {
+        "thermal-audio" => "audio",
+        "thermal-dispatcher" => "dispatcher",
+        "thermal-conductor" => "conductor",
+        _ => binary,
     }
 }
 
@@ -696,22 +641,14 @@ impl ServicesPage {
             // systemctl kill failed — unit not active, fall through to pkill.
         }
 
-        let (flag, pattern) = match &def.pid_source {
-            PidSource::PgrepPattern(pat) => ("-f", pat.to_string()),
-            _ if def.binary.len() > 15 => ("-f", format!("(^|/){}", def.binary)),
-            _ => ("-x", def.binary.to_string()),
+        let pgrep_pattern = match &def.pid_source {
+            PidSource::PgrepPattern(pat) => Some(*pat),
+            _ => None,
         };
-        let result = Command::new("pkill")
-            .arg("-9") // SIGKILL
-            .arg(flag)
-            .arg(&pattern)
-            .status();
+        let short_name = binary_to_short_name(def.binary);
 
-        // Clean up socket and pidfile.
-        cleanup_stale_socket(def);
-
-        match result {
-            Ok(s) if s.success() => {
+        match crate::daemon_lifecycle::force_kill_all(def.binary, short_name, pgrep_pattern) {
+            Ok(()) => {
                 let count = status.duplicate_count;
                 let msg = if count > 1 {
                     format!("Force-killed {} ({count} instances)", def.binary)
@@ -720,15 +657,8 @@ impl ServicesPage {
                 };
                 self.status_msg = Some((msg, false, Instant::now()));
             }
-            Ok(_) => {
-                self.status_msg = Some((
-                    format!("{} already gone", def.binary),
-                    false,
-                    Instant::now(),
-                ));
-            }
             Err(e) => {
-                self.status_msg = Some((format!("pkill -9 failed: {e}"), true, Instant::now()));
+                self.status_msg = Some((e, true, Instant::now()));
             }
         }
         self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
@@ -1245,12 +1175,12 @@ mod tests {
     }
 
     #[test]
-    fn conductor_uses_pgrep_pattern() {
+    fn conductor_uses_pidfile() {
         let conductor = &SERVICES[2];
         assert_eq!(conductor.binary, "thermal-conductor");
         assert!(matches!(
             conductor.pid_source,
-            PidSource::PgrepPattern("thc daemon")
+            PidSource::Pidfile("conductor.pid")
         ));
         assert_eq!(conductor.command, Some("thc"));
         assert_eq!(conductor.args, ["daemon"]);

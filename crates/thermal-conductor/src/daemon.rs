@@ -1565,6 +1565,14 @@ pub async fn run_daemon() -> Result<()> {
     thermal_core::runtime::ensure_runtime_dir()
         .with_context(|| "Failed to create thermal runtime directory")?;
 
+    // Single-instance guard: exit if another conductor daemon is already running.
+    thermal_core::runtime::enforce_single_instance("conductor");
+
+    // Write pidfile for this instance.
+    let pidfile_path = thermal_core::runtime::pidfile_path("conductor");
+    thermal_core::runtime::write_pidfile("conductor", &pidfile_path)
+        .with_context(|| "Failed to write conductor pidfile")?;
+
     // Remove stale socket if present (checks whether a listener is alive).
     thermal_core::runtime::cleanup_stale_socket("conductor", &socket_path);
 
@@ -1704,8 +1712,9 @@ pub async fn run_daemon() -> Result<()> {
         let _ = persist::remove_state_file();
     }
 
-    // Clean up socket.
+    // Clean up socket and pidfile.
     let _ = std::fs::remove_file(&socket_path);
+    thermal_core::runtime::remove_pidfile("conductor", &pidfile_path);
     info!("Daemon shut down");
     Ok(())
 }

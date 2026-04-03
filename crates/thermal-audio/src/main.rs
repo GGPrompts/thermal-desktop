@@ -1050,6 +1050,7 @@ async fn async_main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Run the main loop using daemon semantic events for state change announcements.
+/// If the daemon disconnects, reconnects with exponential backoff (2s, 4s, 8s... 60s max).
 async fn run_daemon_event_loop(
     mut stream: daemon_client::DaemonEventStream,
     audio: &mut AudioManager,
@@ -1069,6 +1070,10 @@ async fn run_daemon_event_loop(
 
     let mut voice_check = tokio::time::interval(std::time::Duration::from_millis(500));
     voice_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    /// Exponential backoff constants for daemon reconnection.
+    const RECONNECT_INITIAL_SECS: u64 = 2;
+    const RECONNECT_MAX_SECS: u64 = 60;
 
     loop {
         tokio::select! {
@@ -1204,8 +1209,57 @@ async fn run_daemon_event_loop(
                         }
                     }
                     Ok(None) => {
-                        warn!("daemon disconnected — will not reconnect (restart thermal-audio to retry)");
-                        return Ok(());
+                        warn!("daemon disconnected — attempting reconnection with exponential backoff");
+
+                        // Clear stale session state on disconnect.
+                        session_names.clear();
+                        session_activities.clear();
+                        prev_context_level.clear();
+
+                        let mut backoff_secs = RECONNECT_INITIAL_SECS;
+                        loop {
+                            info!("reconnecting to conductor daemon in {backoff_secs}s...");
+
+                            // While waiting to reconnect, keep servicing socket TTS requests
+                            // so direct API calls still work.
+                            let deadline = tokio::time::Instant::now()
+                                + std::time::Duration::from_secs(backoff_secs);
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    Some(req) = sock_rx.recv() => {
+                                        let voice = req.voice.as_deref().unwrap_or(ASSISTANT_VOICE);
+                                        let high_priority = req.priority == Priority::High;
+                                        let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
+                                        if !is_muted {
+                                            let _ = audio.speak(voice, &req.text, high_priority).await;
+                                        }
+                                    }
+                                    _ = tokio::time::sleep_until(deadline) => {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            match daemon_client::connect_and_subscribe().await {
+                                Ok(Some(new_stream)) => {
+                                    info!("reconnected to conductor daemon");
+                                    stream = new_stream;
+                                    break;
+                                }
+                                Ok(None) => {
+                                    warn!("conductor daemon still unavailable");
+                                }
+                                Err(e) => {
+                                    warn!("reconnection failed: {e}");
+                                }
+                            }
+
+                            // Increase backoff, capped at max.
+                            backoff_secs = (backoff_secs * 2).min(RECONNECT_MAX_SECS);
+                        }
+                        // Continue the outer loop with the new stream.
+                        continue;
                     }
                     Err(e) => {
                         warn!("daemon stream error: {e} — continuing");

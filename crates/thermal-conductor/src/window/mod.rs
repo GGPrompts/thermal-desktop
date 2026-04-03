@@ -594,6 +594,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         overlay,
         agent_event_rx,
         agent_event_tx,
+        jsonl_tailer: jsonl_tailer::SessionJsonlTailer::new(),
         agent_timeline: AgentTimeline::new(),
         agent_graph: AgentGraph::new(),
         bell_mode: BellMode::from_env(),
@@ -740,6 +741,12 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
                     state.dirty = true;
                 }
             }
+        }
+
+        // ── Tail active session JSONL for agent events ────────────────────
+        {
+            let sid = state.claude_session.as_ref().map(|s| s.session_id.as_str());
+            state.jsonl_tailer.poll(sid, &state.agent_event_tx);
         }
 
         // ── Drain agent events into overlay manager ───────────────────────
@@ -965,6 +972,9 @@ pub(super) struct ConductorWindow {
     pub(super) agent_event_rx: std::sync::mpsc::Receiver<crate::structured_output::AgentEvent>,
     /// Sender half kept here so callers can clone it for background tasks.
     pub(super) agent_event_tx: std::sync::mpsc::Sender<crate::structured_output::AgentEvent>,
+    /// JSONL session log tailer — reads new lines from the active session's
+    /// JSONL file and sends parsed `AgentEvent`s into `agent_event_tx`.
+    pub(super) jsonl_tailer: jsonl_tailer::SessionJsonlTailer,
     /// Agent tool-usage timeline bar (toggled with Ctrl+Shift+T).
     pub(super) agent_timeline: AgentTimeline,
     /// Agent communication graph overlay (toggled with F3).
@@ -1387,6 +1397,7 @@ mod claude_session;
 mod clipboard;
 mod daemon_reader;
 mod input_handlers;
+mod jsonl_tailer;
 pub(crate) mod overlay;
 mod render;
 mod session_mode;

@@ -73,8 +73,20 @@ Designed as a command center for a vertical monitor:
 ## State File Watcher
 The daemon owns a **single `ClaudeStatePoller`** (inotify) that watches `/tmp/{claude-code,codex,copilot}-state/` and imports external sessions into the semantic event bus. This replaces the old pattern where every consumer ran its own poller. External sessions get the same granular events (activity, tool start/stop, context threshold) as daemon-owned PTY sessions. Sessions are tagged `backend: "external"` vs `"daemon"`.
 
+## Daemon Lifecycle
+Shared kill/restart/counting logic lives in `src/daemon_lifecycle.rs`. Both `thc doctor` (main.rs) and the TUI Services page (tui/services.rs) delegate to this module instead of duplicating pgrep/pkill logic. Key functions:
+- `count_instances()` / `list_pids()` — pgrep-based instance detection
+- `kill_duplicates()` / `kill_all()` / `force_kill_all()` — unified kill with SIGTERM→SIGKILL escalation
+- `is_stale_binary()` — compares /proc/PID/exe mtime against on-disk binary
+- `cleanup_artifacts()` — removes socket + pidfile for a daemon
+- `start_direct()` / `restart_via_systemctl()` — daemon restart helpers
+
+The conductor daemon writes a pidfile (`conductor.pid`) on startup and removes it on shutdown. Single-instance guard via `enforce_single_instance("conductor")` prevents duplicate daemons.
+
 ## Health Checks
-`thc doctor` checks PID liveness and socket connectivity for all thermal daemons. `thc doctor --fix` cleans stale PID/socket files and restarts core service daemons.
+`thc doctor` checks PID liveness, socket connectivity, instance count, and binary staleness for all thermal daemons. `thc doctor --fix` cleans stale PID/socket files, kills duplicates, and restarts dead core daemons. Stale binary warnings appear when the on-disk binary is newer than the running process.
+
+Integration tests in `tests/daemon_lifecycle.rs` cover: pidfile lifecycle, stale binary detection, socket lifecycle, single-instance guard.
 
 ## Known Issues
 - **Stale socket hazard**: if `conductor.sock` lingers after daemon crash, `thc window` enters client mode against dead socket — use `thc doctor --fix` or `rm /run/user/$UID/thermal/conductor.sock`

@@ -19,8 +19,13 @@ use thermal_core::text::glyphon_color_mode_for_surface;
 pub(super) mod colors {
     use thermal_core::palette::ThermalPalette;
 
-    /// Semi-transparent dark background for widget cards.
-    pub const CARD_BG: [f32; 4] = [0.04, 0.0, 0.06, 0.85];
+    /// Semi-transparent dark background for widget cards (palette BG + 0.85 alpha).
+    pub const CARD_BG: [f32; 4] = [
+        ThermalPalette::BG[0],
+        ThermalPalette::BG[1],
+        ThermalPalette::BG[2],
+        0.85,
+    ];
     /// Active tool — searing red.
     pub const TOOL_ACTIVE: [f32; 4] = ThermalPalette::SEARING;
     /// Tool pending — accent cold.
@@ -158,6 +163,9 @@ const CARD_PAD_Y: f32 = 6.0;
 pub struct OverlayPipeline {
     rect_pipeline: wgpu::RenderPipeline,
     surface_format: wgpu::TextureFormat,
+    /// Reusable vertex buffer for rect quads — avoids per-frame GPU allocation.
+    /// Tuple of (buffer, capacity_in_bytes).
+    rect_buffer: Option<(wgpu::Buffer, u64)>,
     // Glyphon text rendering — self-contained to avoid conflicts with
     // the grid renderer's atlas.
     font_system: FontSystem,
@@ -236,6 +244,7 @@ impl OverlayPipeline {
         Self {
             rect_pipeline,
             surface_format,
+            rect_buffer: None,
             font_system,
             swash_cache,
             cache,
@@ -347,17 +356,29 @@ impl OverlayPipeline {
             }
         }
 
-        // ── Upload rect vertex buffer ───────────────────────────────────
-        let rect_vbuf = if !vertices.is_empty() {
+        // ── Upload rect vertex buffer (reuse when possible) ────────────
+        let rect_draw = if !vertices.is_empty() {
             let data = bytemuck::cast_slice::<ColorVertex, u8>(&vertices);
-            let buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("overlay_rect_vbuf"),
-                size: data.len() as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buf, 0, data);
-            Some((buf, vertices.len() as u32))
+            let required = data.len() as u64;
+
+            // Reallocate only when the existing buffer is too small.
+            let needs_realloc = match &self.rect_buffer {
+                Some((_, capacity)) => required > *capacity,
+                None => true,
+            };
+            if needs_realloc {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("overlay_rect_vbuf"),
+                    size: required,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                self.rect_buffer = Some((buf, required));
+            }
+
+            let (buf, _) = self.rect_buffer.as_ref().unwrap();
+            queue.write_buffer(buf, 0, data);
+            Some(vertices.len() as u32)
         } else {
             None
         };
@@ -429,10 +450,12 @@ impl OverlayPipeline {
             });
 
             // Draw rect quads.
-            if let Some((ref vbuf, count)) = rect_vbuf {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, vbuf.slice(..));
-                pass.draw(0..count, 0..1);
+            if let Some(count) = rect_draw {
+                if let Some((vbuf, _)) = &self.rect_buffer {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, vbuf.slice(..));
+                    pass.draw(0..count, 0..1);
+                }
             }
 
             // Draw text.

@@ -41,3 +41,4 @@ regex = { workspace = true }
 shlex = "1"
 
 [dev-dependencies]
+thermal-core = { path = "../thermal-core" }

@@ -5,243 +5,148 @@ Custom Wayland desktop environment with a thermal/FLIR infrared aesthetic. GPU-a
 ## Quick Start
 
 ```bash
-cargo build                    # Build everything
-thermal-bar &                  # Status bar (auto-starts at login)
-thermal-audio &                # TTS announcements (auto-starts at login)
-thermal-launch                 # App launcher (Super+D)
-thermal-monitor                # TUI dashboard (standalone)
-thc                            # TUI dashboard (full-featured, with spawn profiles)
-thc tui                        # Same as above, explicit subcommand
-thermal-conductor window       # GPU terminal (standalone mode)
+cargo install --path crates/thermal-conductor  # TUI + daemon + GPU terminal + bar + HUD
+cargo install --path crates/thermal-audio       # TTS + voice capture
+cargo install --path crates/thermal-dispatcher  # AI command routing
+
+thc                            # TUI dashboard (Super+T)
+thc window                     # GPU terminal (Super+Enter)
+thc daemon                     # Session daemon (auto-starts via systemd)
 ```
 
-## Components
+## Architecture (3 Daemons)
 
-### Always Running (autostart)
-These launch automatically at login via Hyprland `exec-once`:
+Consolidated from 9 daemons into 3. Bar, HUD, and message bus are now in-process conductor modules.
 
-| Component | What It Does |
-|-----------|-------------|
-| **thermal-bar** | Top status bar — CPU/GPU/mem/net metrics (left), workspace map (center), agent sessions + clock (right) |
-| **thermal-audio** | TTS daemon — announces Claude session state changes (idle, tool use, awaiting input, context warnings) |
-| **codex-state-adapter** | Codex session tracker — mirrors `~/.codex/sessions` into `/tmp/codex-state/` for bar/TUI/audio |
-| **thc daemon** | Optional session daemon — PTY backend fallback when kitty is unavailable |
+| Daemon | What It Does | Auto-starts |
+|--------|-------------|-------------|
+| **thermal-conductor** | Session daemon, TUI, GPU terminal, bar (layer-shell), HUD (layer-shell), message bus | Yes (systemd) |
+| **thermal-audio** | TTS playback (edge-tts) + voice capture (VAD, Whisper STT) | Yes (systemd) |
+| **thermal-dispatcher** | LLM API routing, trust tiers, adaptive learning | Yes (systemd) |
 
-### On-Demand
+All three auto-start at login via `thermal.target` (systemd user services).
+
+### On-Demand Components
 | Component | How to Launch | What It Does |
 |-----------|--------------|-------------|
-| **thermal-launch** | Super+D | Fuzzy app launcher overlay with thermal components at the top |
-| **thermal-monitor** | `thermal-monitor` in kitty | Standalone ratatui TUI showing all agent sessions (Claude/Codex/Copilot) with subagent nesting, context %, tools |
-| **thermal-conductor** | `thc` or Super+T | Tabbed ratatui TUI dashboard — Sessions (with timeline bars), Profiles (Launch/Edit sub-modes), Services (with audio mute/volume) |
-| **thermal-conductor** | `thermal-conductor window` | GPU-rendered terminal with agent overlays (HUD badge, timeline bar) |
-| **thermal-hud** | `thermal-hud` | Layer-shell overlay showing Claude session tabs or voice assistant state |
-| **thermal-notify** | Runs as D-Bus service | Notification daemon with thermal-styled popups |
-| **thermal-screensaver** | `thermal-screensaver` | Idle-triggered thermal fluid simulation overlay (reaction-diffusion shader) |
-| **thermal-wallpaper** | `thermal-wallpaper` | Animated WGSL thermal shader wallpaper — heat field modulated by system metrics |
-| **thermal-face** | `thermal-face` | GPU-rendered SDF avatar overlay — thermal-palette animated face (200x200, bottom-right) |
+| **thermal-launch** | Super+D | Fuzzy app launcher overlay |
 | **thermal-lock** | Disabled (NVIDIA) | Lock screen with WGSL heatmap shader + PAM auth |
+| **thermal-screensaver** | `thermal-screensaver` | Idle-triggered thermal fluid simulation overlay |
+| **thermal-wallpaper** | `thermal-wallpaper` | Animated WGSL thermal shader wallpaper |
+| **thermal-commander** | MCP server (stdio) | Desktop control tools for Claude |
 
 ### CLI Tools
 ```bash
-# Interactive TUI dashboard (default when no subcommand given)
+# TUI dashboard
 thc                            # Launch tabbed TUI (Sessions/Profiles/Services)
 thc tui                        # Same, explicit subcommand
-thc --backend=kitty            # Force kitty backend
-thc --backend=daemon           # Force daemon backend
 
-# Session management (via kitty @ or daemon fallback)
-thc spawn                      # Spawn a shell session in kitty
-thc spawn -n 3                 # Spawn 3 sessions
-thc list                       # List sessions (kitty windows or daemon PTYs)
+# GPU terminal
+thc window                     # Standalone or daemon client mode
+
+# Session management
+thc spawn                      # Spawn a shell session
+thc list                       # List sessions
 thc kill ID                    # Kill a session
 thc send ID "text"             # Send text to a session
 
-# Audio control (via socket API)
-# Use thc Services tab for mute/volume (m/+/- keys), or direct:
-echo '{"action":"toggle_mute"}' | socat - UNIX:/run/user/$UID/thermal/audio.sock
-echo '{"action":"set_volume","value":0.7}' | socat - UNIX:/run/user/$UID/thermal/audio.sock
+# Audio control
+thc audio status               # Check audio daemon status
 thermal-audio --test "hello"   # Test TTS
 
-# MCP server (used by Claude for desktop control)
-thermal-commander              # 20 tools: screenshots, window mgmt, app launch, clipboard
+# Voice (integrated into thermal-audio)
+thc voice toggle               # Toggle push-to-talk
+thc voice listen               # Start always-listening VAD mode
+
+# Health check
+thc doctor                     # Check all daemons
+thc doctor --fix               # Clean stale files + restart dead daemons
 ```
 
-### Voice Assistant Pipeline
-Voice input with local Whisper transcription and AI dispatch. Supports push-to-talk and always-listening VAD mode:
+### Voice Pipeline
+Voice input with local Whisper transcription and AI dispatch:
 
 ```
-Super+\ → thermal-voice (cpal mic capture → Whisper STT) → claude -p (dispatch) → tool execution
+Super+\ -> thermal-audio (cpal mic capture -> Whisper STT) -> claude -p (dispatch) -> tool execution
          OR
-thermal-voice listen → VAD detects speech → same pipeline
-```
-
-The dispatcher maintains multi-turn conversational context (8-turn rolling window, 2min session timeout) so you can chain commands: "create an issue for X... now assign it to me."
-
-```bash
-# Start voice daemon (push-to-talk mode)
-thermal-voice &                  # Listens on voice.sock
-
-# Start voice daemon (always-listening VAD mode)
-thermal-voice listen             # Continuous VAD, auto-records on speech
-
-# Toggle recording: Super+Backslash (auto-starts daemon if needed)
+thc voice listen -> VAD detects speech -> same pipeline
 ```
 
 ### Spawn Profiles
-The TUI Profiles tab (Launch sub-mode) loads profiles from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`):
-
-```toml
-[[profile]]
-name = "thermal-desktop"
-icon = "🔥"
-cwd = "~/projects/thermal-desktop"
-
-[[profile]]
-name = "thermobile"
-icon = "📱"
-cwd = "~/projects/thermobile"
-
-[[profile]]
-name = "Shell"
-icon = "🖥️"
-command = ""
-```
-
-Blank fields inherit from the profile, then `default_cwd`, then the directory `thc` was launched from.
+The TUI Profiles tab loads from `config/profiles.toml` (or `~/.config/thermal/profiles.toml`).
 
 ## Hotkeys
 
 See [docs/HOTKEYS.md](docs/HOTKEYS.md) for the complete reference.
 
-Key ones:
-- **Super+D** — App launcher (thermal components listed first)
-- **Super+Enter** — New kitty terminal
-- **Super+Shift+Enter** — New GPU terminal (thermal-conductor window)
-- **Super+Q** — Close window
+- **Super+Enter** — GPU terminal (thc window)
+- **Super+Shift+Enter** — kitty terminal (fallback)
+- **Super+T** — TUI Hub (thc)
+- **Super+D** — App launcher
 - **Super+\\** — Push-to-talk voice input
+- **Super+Q** — Close window
 - **Super+B** — btop system monitor
-- **Super+T** — TUI Hub (thc — sessions, profiles, services)
-- **Super+N** — Notification center
 - **Print** — Screenshot region select
 
 ## Troubleshooting
 
-### thermal-bar disappeared
+### Daemons not running
 ```bash
-pkill -x thermal-bar; thermal-bar &
+# Check status
+thc doctor
+
+# Restart via systemd
+systemctl --user restart thermal-audio thermal-dispatcher thermal-conductor
+
+# Or restart all
+systemctl --user restart thermal.target
 ```
 
 ### thermal-audio not speaking
 ```bash
-# Check if running
 thc audio status
-
-# Restart
-pkill -x thermal-audio; thermal-audio &
-
-# Test directly
 thermal-audio --test "testing one two three"
 
-# Test the underlying pipeline
+# Test underlying pipeline
 edge-tts --text "hello" --write-media /tmp/test.mp3 && mpv --no-video /tmp/test.mp3
 ```
 
-### Codex sessions not appearing
-```bash
-# Check if the adapter is running
-thc                         # Services tab -> codex-state-adapter
-
-# Start it manually if needed
-/home/builder/projects/thermal-desktop/scripts/codex-state-adapter.sh --daemon
-```
-
-### thermal-launch won't open (Super+D)
-```bash
-# Check if binary is installed
-which thermal-launch
-
-# Reinstall
-cargo install --path crates/thermal-launch --force
-
-# Test directly
-thermal-launch
-```
-
 ### thermal-conductor window shows black/purple grid
-The GPU terminal supports **standalone mode** (own PTY) and **daemon client mode** (streams from `thc daemon`). A black/purple grid is a rendering bug, not expected behavior.
-
-Diagnostic steps:
 ```bash
-# Check whether a daemon is running and the socket exists
-thc daemon &   # start one if needed
+# Check daemon socket
 ls /run/user/$UID/thermal/conductor.sock
 
-# Launch the window (auto-detects daemon via socket)
-thc window
-
-# If the grid persists in standalone mode, check for wgpu/driver errors in stderr
+# Launch with stderr visible
 thc window 2>&1 | head -50
 ```
 
-### Duplicate instances
+### Stale processes / duplicate instances
 ```bash
-# Kill all instances of a component
-pkill -9 -x thermal-bar
-pkill -9 -x thermal-audio
-pkill -9 -x thermal-hud
+# Full reset
+thc doctor --fix
+
+# Or manual
+pkill -f 'thc daemon'; pkill thermal-audio; pkill thermal-dispatcher
+rm -f /run/user/$UID/thermal/*.pid /run/user/$UID/thermal/*.sock
 ```
 
-## Architecture
+## Crate Map
 
 ```
-thermal-core (shared library)
-  ├── ThermalPalette (18 colors)
-  ├── ClaudeStatePoller (/tmp/claude-code-state/, /tmp/codex-state/, /tmp/copilot-state/)
-  ├── WgpuContext (GPU device factory)
-  └── ThermalTextRenderer (glyphon + fonts)
+thermal-protocol (wire types, config — lightweight, no GPU)
+thermal-runtime  (socket/pid/cleanup helpers — no GPU)
+thermal-core     (palette, text, wgpu context — re-exports protocol+runtime)
+thermal-terminal (PTY, OSC 633, state inference)
 
-thermal-terminal (shared library)
-  ├── OSC 633 shell-integration parser
-  ├── Input encoding (KeyCode → PTY bytes)
-  ├── PtySession (fork/exec + reader thread)
-  └── TerminalSize (alacritty_terminal Dimensions)
-
-thermal-bar ──────────── layer-shell top bar, 1Hz metrics
-thermal-launch ───────── layer-shell overlay launcher
-thermal-hud ──────────── layer-shell HUD (agent tabs + voice state)
-thermal-lock ─────────── session-lock screen
-thermal-notify ───────── D-Bus notification server
-thermal-audio ────────── TTS daemon (edge-tts + mpv, Unix socket API)
-thermal-voice ────────── voice input daemon (push-to-talk + VAD always-listening)
-thermal-monitor ──────── standalone ratatui TUI dashboard
-thermal-conductor ────── tabbed TUI hub (kitty backend + daemon fallback) + GPU terminal
-thermal-commander ────── MCP server (21 desktop control tools, incl. system_metrics)
-thermal-dispatcher ───── voice command router (dispatches via claude -p, multi-turn context)
-thermal-face ─────────── GPU SDF avatar overlay (thermal palette, auto-blink)
-thermal-screensaver ──── idle-triggered thermal fluid simulation overlay
-thermal-wallpaper ────── animated WGSL thermal shader wallpaper daemon
+thermal-conductor ── TUI + daemon + GPU terminal + bar + HUD + message bus
+thermal-audio ────── TTS playback + voice capture (VAD, Whisper STT)
+thermal-dispatcher ─ AI command routing, trust tiers, adaptive learning
+thermal-commander ── MCP server (desktop control tools for Claude)
+thermal-launch ───── fuzzy app launcher overlay
+thermal-lock ─────── lock screen (WGSL shader + PAM)
+thermal-screensaver  idle thermal fluid simulation
+thermal-wallpaper ── animated thermal shader wallpaper
 ```
-
-### State & IPC
-
-Claude Code hooks (`~/.claude/hooks/state-tracker.sh`) write session state to `/tmp/claude-code-state/`. Subagent tool events are routed to separate files (`{session_id}.agent.{agent_id}.json`) so monitors can nest them under the parent session.
-
-All GUI components use **wgpu** for GPU rendering and **smithay-client-toolkit** for Wayland layer-shell surfaces. Text rendering via **glyphon** (cosmic-text + swash).
-
-## Color Palette
-
-All colors defined in `thermal-core/src/palette.rs` and `colors/thermal.toml`. The `scripts/generate-theme.py` script propagates colors to all config files (kitty, hyprland, starship).
-
-```bash
-python3 scripts/generate-theme.py          # Apply colors
-python3 scripts/generate-theme.py --check  # Verify in sync
-```
-
-## Hardware Setup
-
-- **Ultrawide**: 3440x1440 @ 100Hz (DP-1, primary)
-- **Portrait**: 1920x1080 @ 144Hz (HDMI-A-2, rotated)
-- **GPU**: NVIDIA (Vulkan backend for wgpu)
 
 ## File Locations
 
@@ -250,17 +155,20 @@ python3 scripts/generate-theme.py --check  # Verify in sync
 | Claude session state | `/tmp/claude-code-state/*.json` |
 | Codex session state | `/tmp/codex-state/*.json` |
 | Copilot session state | `/tmp/copilot-state/*.json` |
-| Subagent state | `/tmp/claude-code-state/{session}.agent.{agent_id}.json` |
 | Voice state | `/tmp/thermal-voice-state.json` |
-| HUD state | `/tmp/thermal-hud-state.json` |
-| Conductor socket | `/run/user/1000/thermal/conductor.sock` |
-| Voice socket | `/run/user/1000/thermal/voice.sock` |
-| Dispatcher socket | `/run/user/1000/thermal/dispatcher.sock` |
-| Audio socket | `/run/user/1000/thermal/audio.sock` |
+| Focus state | `/tmp/thermal-focus-state.json` |
+| Conductor socket | `/run/user/$UID/thermal/conductor.sock` |
+| Dispatcher socket | `/run/user/$UID/thermal/dispatcher.sock` |
+| Audio socket | `/run/user/$UID/thermal/audio.sock` |
 | TTS cache | `~/.cache/thermal-audio/` |
-| Audio settings (mute/vol) | `~/.config/thermal/audio.toml` |
+| Audio settings | `~/.config/thermal/audio.toml` |
 | Spawn profiles | `config/profiles.toml` or `~/.config/thermal/profiles.toml` |
-| Kitty sessions sidecar | `/run/user/1000/thermal/sessions.json` |
-| Hyprland config | `~/.config/hypr/hyprland.conf` |
-| Screenshots | `~/Pictures/Screenshots/` |
-| Color definitions | `colors/thermal.toml` |
+| Sessions sidecar | `/run/user/$UID/thermal/sessions.json` |
+| Color definitions | `thermal-core/src/palette.rs` |
+| Systemd units | `~/.config/systemd/user/thermal-*.service` |
+
+## Hardware
+
+- **Ultrawide**: 3440x1440 @ 100Hz (DP-1, primary)
+- **Portrait**: 1920x1080 @ 144Hz (HDMI-A-2, rotated)
+- **GPU**: NVIDIA GeForce RTX 3070 (Vulkan backend for wgpu)

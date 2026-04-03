@@ -50,7 +50,7 @@ Full thermal-themed kitty.conf lives in `thermal-os-dotfiles/config/kitty/kitty.
 ## TUI Sessions Tab (3-Panel Layout)
 Designed as a command center for a vertical monitor:
 - **Top**: Agent session list with model-based display names (opus, sonnet, gpt5.4mini), status badges, context %, workspace number, age, command duration (OSC 633). Single-select focuses kitty window. Multi-select (Space/Ctrl+A) for broadcast.
-- **Middle**: Live terminal preview via `kitty @ get-text --extent=screen`, refreshed 500ms. PgUp/PgDn/Home/End to scroll.
+- **Middle**: Live terminal preview via daemon broadcast subscription (`PreviewSubscriber` + `Attach` protocol). PgUp/PgDn/Home/End to scroll.
 - **Bottom**: Chat input with @-mention routing and response display via message bus. Tab-triggered autocomplete. Command history (up/down). Press 's' to save session as spawn profile.
 
 **Panel focus**: Tri-state (`FocusedPanel` enum: AgentList/Preview/Chat). Tab/Shift+Tab cycles, click-to-focus, Esc returns to AgentList.

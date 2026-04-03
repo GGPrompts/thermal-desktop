@@ -38,7 +38,7 @@ All colors in `thermal-core/src/palette.rs`. Use `ThermalPalette::*` constants e
 ## Development
 
 ### Build Environment
-`CARGO_TARGET_DIR` is set to `~/.cargo-target` (keeps build artifacts outside the project tree). This means:
+`CARGO_TARGET_DIR` is set to `~/.cargo-target` via `~/.config/environment.d/thermal.conf` (systemd/Hyprland) and `~/.zshenv` (interactive shells). This means:
 - `cargo build` outputs go to `~/.cargo-target/debug/`, **not** `target/debug/`
 - Stale binaries may exist at `target/debug/` — **do not trust them**
 - The authoritative installed binaries live in `~/.cargo/bin/` via `cargo install`

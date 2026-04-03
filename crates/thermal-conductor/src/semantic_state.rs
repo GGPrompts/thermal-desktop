@@ -208,7 +208,12 @@ impl SemanticEventBus {
         self.emit(SemanticEvent {
             session_id: session_id.to_string(),
             seq,
-            kind: SemanticEventKind::SessionSpawned { display_name, cwd },
+            kind: SemanticEventKind::SessionSpawned {
+                display_name,
+                cwd,
+                title: None,
+                pid,
+            },
         });
         debug!(session = %session_id, "Semantic: session spawned");
     }
@@ -651,6 +656,8 @@ impl SemanticEventBus {
                 kind: SemanticEventKind::SessionSpawned {
                     display_name: Some(display_name),
                     cwd: session.working_dir.clone(),
+                    title: None,
+                    pid: None,
                 },
             });
 
@@ -970,6 +977,8 @@ mod tests {
             &SemanticEventKind::SessionSpawned {
                 display_name: None,
                 cwd: None,
+                title: None,
+                pid: None,
             },
             &[EventCategory::SessionLifecycle],
         ));
@@ -977,6 +986,8 @@ mod tests {
             &SemanticEventKind::SessionSpawned {
                 display_name: None,
                 cwd: None,
+                title: None,
+                pid: None,
             },
             &[EventCategory::Tool],
         ));

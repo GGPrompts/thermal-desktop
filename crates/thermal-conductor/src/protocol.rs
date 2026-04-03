@@ -13,6 +13,12 @@
 
 use serde::{Deserialize, Serialize};
 
+// ── Protocol version ─────────────────────────────────────────────────────────
+
+/// Current protocol version. Incremented when breaking changes are made to
+/// the wire format. Clients and daemons negotiate on connect via Hello/HelloAck.
+pub const PROTOCOL_VERSION: u32 = 1;
+
 // ── Socket path ──────────────────────────────────────────────────────────────
 
 /// Return the daemon socket path: `/run/user/<uid>/thermal/conductor.sock`
@@ -170,6 +176,12 @@ pub enum SemanticEventKind {
         display_name: Option<String>,
         #[serde(default)]
         cwd: Option<String>,
+        /// Terminal title at spawn time (usually empty until shell sets it).
+        #[serde(default)]
+        title: Option<String>,
+        /// PID of the spawned process.
+        #[serde(default)]
+        pid: Option<u32>,
     },
     /// Session process exited.
     SessionExited {
@@ -304,9 +316,17 @@ pub enum Request {
     /// Subscribe to semantic session events.
     ///
     /// The daemon responds with `SnapshotSync` for each in-scope session,
-    /// then streams `EventBatch` messages as events occur.
-    /// Implementation deferred to therm-6yqa.
+    /// then streams `EventBatch` messages as events occur. Session lifecycle
+    /// events (spawned/exited) are included when scope matches.
     SubscribeEvents { scope: EventScope },
+
+    /// Protocol version handshake — must be the first message after connecting.
+    /// The daemon responds with `HelloAck` on success or `Error` if the version
+    /// is incompatible.
+    Hello {
+        /// Protocol version the client speaks.
+        version: u32,
+    },
 
     /// Connection health check — daemon responds with `Pong`.
     Ping,
@@ -383,6 +403,14 @@ pub enum Response {
 
     /// A batch of semantic events for subscribed sessions.
     EventStream(EventBatch),
+
+    /// Protocol version handshake acknowledgment.
+    HelloAck {
+        /// Protocol version the daemon speaks (always `PROTOCOL_VERSION`).
+        version: u32,
+        /// Optional capability flags for future extensibility.
+        capabilities: Vec<String>,
+    },
 
     /// Generic success acknowledgment.
     Ok,
@@ -1434,15 +1462,24 @@ mod tests {
             kind: SemanticEventKind::SessionSpawned {
                 display_name: Some("opus".into()),
                 cwd: Some("/tmp".into()),
+                title: Some("my-term".into()),
+                pid: Some(12345),
             },
         };
         let decoded = rt_semantic_event(&evt);
         assert_eq!(decoded.session_id, "s1");
         assert_eq!(decoded.seq, 1);
         match decoded.kind {
-            SemanticEventKind::SessionSpawned { display_name, cwd } => {
+            SemanticEventKind::SessionSpawned {
+                display_name,
+                cwd,
+                title,
+                pid,
+            } => {
                 assert_eq!(display_name.as_deref(), Some("opus"));
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
+                assert_eq!(title.as_deref(), Some("my-term"));
+                assert_eq!(pid, Some(12345));
             }
             other => panic!("unexpected: {:?}", other),
         }
@@ -1911,6 +1948,56 @@ mod tests {
                 assert_eq!(id, "old-su");
                 assert_eq!(seq, 7);
                 assert_eq!(mode, 0);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // ── Hello / HelloAck handshake ──────────────────────────────────────────
+
+    #[test]
+    fn request_hello_round_trip() {
+        let req = Request::Hello { version: 1 };
+        let decoded = rt_request(&req);
+        match decoded {
+            Request::Hello { version } => assert_eq!(version, 1),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_hello_ack_round_trip() {
+        let resp = Response::HelloAck {
+            version: 1,
+            capabilities: vec!["events".into(), "streaming".into()],
+        };
+        let decoded = rt_response(&resp);
+        match decoded {
+            Response::HelloAck {
+                version,
+                capabilities,
+            } => {
+                assert_eq!(version, 1);
+                assert_eq!(capabilities, vec!["events", "streaming"]);
+            }
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn response_hello_ack_empty_capabilities_round_trip() {
+        let resp = Response::HelloAck {
+            version: 1,
+            capabilities: vec![],
+        };
+        let decoded = rt_response(&resp);
+        match decoded {
+            Response::HelloAck {
+                version,
+                capabilities,
+            } => {
+                assert_eq!(version, 1);
+                assert!(capabilities.is_empty());
             }
             other => panic!("unexpected: {:?}", other),
         }

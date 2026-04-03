@@ -85,7 +85,12 @@ impl SessionAggregator {
     fn apply_event(&mut self, event: SemanticEvent) {
         let id = &event.session_id;
         match event.kind {
-            SemanticEventKind::SessionSpawned { display_name, cwd } => {
+            SemanticEventKind::SessionSpawned {
+                display_name,
+                cwd,
+                title,
+                pid,
+            } => {
                 self.sessions.insert(
                     id.clone(),
                     SemanticSessionSnapshot {
@@ -93,10 +98,10 @@ impl SessionAggregator {
                         backend: "daemon".into(),
                         runtime: AgentRuntime::Unknown,
                         display_name,
-                        title: None,
+                        title,
                         cwd,
                         workspace_root: None,
-                        pid: None,
+                        pid,
                         started_at: None,
                         last_activity_at: None,
                         exit_code: None,

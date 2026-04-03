@@ -912,6 +912,22 @@ impl Daemon {
                 }
             }
 
+            Request::Hello { version } => {
+                if *version == protocol::PROTOCOL_VERSION {
+                    Response::HelloAck {
+                        version: protocol::PROTOCOL_VERSION,
+                        capabilities: vec!["events".into(), "streaming".into()],
+                    }
+                } else {
+                    Response::Error {
+                        message: format!(
+                            "Incompatible protocol version: client={version}, daemon={}",
+                            protocol::PROTOCOL_VERSION
+                        ),
+                    }
+                }
+            }
+
             Request::Ping => Response::Pong,
 
             // SubscribeEvents is handled at the connection level in handle_client.

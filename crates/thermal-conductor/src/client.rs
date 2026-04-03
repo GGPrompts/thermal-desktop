@@ -15,18 +15,21 @@ use anyhow::{Context, Result};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::protocol::{self, Request, Response, SessionInfo};
+use crate::protocol::{self, Request, Response, SessionInfo, PROTOCOL_VERSION};
 
 /// Default request timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Maximum reconnect attempts before giving up.
-const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+/// Initial delay for exponential backoff reconnection.
+const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(500);
 
-/// Delay between reconnect attempts.
-const RECONNECT_DELAY: Duration = Duration::from_millis(500);
+/// Maximum delay cap for exponential backoff reconnection.
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Maximum number of reconnect attempts before giving up.
+const MAX_RECONNECT_ATTEMPTS: u32 = 10;
 
 /// A client connection to the session daemon.
 #[allow(dead_code)]
@@ -100,13 +103,18 @@ impl DaemonClient {
 
         let (request_tx, response_rx, writer_handle, reader_handle) = Self::spawn_io_tasks(stream);
 
-        Ok(Some(Self {
+        let mut client = Self {
             request_tx,
             response_rx,
             socket_path,
             timeout: DEFAULT_TIMEOUT,
             io_task_handles: Some((writer_handle, reader_handle)),
-        }))
+        };
+
+        // Perform protocol version handshake.
+        client.perform_handshake().await?;
+
+        Ok(Some(client))
     }
 
     /// Spawn reader and writer tasks for a connected stream.
@@ -181,15 +189,17 @@ impl DaemonClient {
 
     /// Attempt to reconnect to the daemon socket.
     ///
-    /// Tries up to `MAX_RECONNECT_ATTEMPTS` times with exponential backoff.
-    /// Returns `Ok(true)` if reconnected, `Ok(false)` if the socket doesn't
-    /// exist (daemon not running), or `Err` on persistent failure.
+    /// Uses exponential backoff with jitter: 500ms -> 1s -> 2s -> 4s -> 8s -> ...
+    /// capped at 30s. Returns `Ok(true)` if reconnected, `Ok(false)` if the
+    /// socket doesn't exist (daemon not running), or `Err` on persistent failure.
     pub async fn reconnect(&mut self) -> Result<bool> {
+        let mut base_delay = RECONNECT_INITIAL_DELAY;
+
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            info!(attempt, "Attempting to reconnect to daemon");
+            debug!(attempt, max = MAX_RECONNECT_ATTEMPTS, "Attempting to reconnect to daemon");
 
             if !self.socket_path.exists() {
-                warn!("Daemon socket does not exist; daemon not running");
+                debug!("Daemon socket does not exist; daemon not running");
                 return Ok(false);
             }
 
@@ -197,6 +207,7 @@ impl DaemonClient {
                 Ok(stream) => {
                     info!(
                         path = %self.socket_path.display(),
+                        attempt,
                         "Reconnected to session daemon"
                     );
                     // Abort old IO tasks to prevent duplicate readers/writers.
@@ -209,17 +220,28 @@ impl DaemonClient {
                     self.request_tx = request_tx;
                     self.response_rx = response_rx;
                     self.io_task_handles = Some((writer_handle, reader_handle));
+
+                    // Re-perform handshake on the new connection.
+                    self.perform_handshake().await?;
+
                     return Ok(true);
                 }
                 Err(e) => {
-                    warn!(
+                    debug!(
                         attempt,
                         error = %e,
+                        delay_ms = base_delay.as_millis() as u64,
                         "Reconnect attempt failed"
                     );
                     if attempt < MAX_RECONNECT_ATTEMPTS {
-                        let delay = RECONNECT_DELAY * attempt;
-                        tokio::time::sleep(delay).await;
+                        // Apply ±25% jitter to the base delay.
+                        let jitter_factor = 0.75 + (pseudo_random_f64(attempt) * 0.5);
+                        let jittered = Duration::from_secs_f64(
+                            base_delay.as_secs_f64() * jitter_factor,
+                        );
+                        tokio::time::sleep(jittered).await;
+                        // Double the base delay for next attempt, capped at max.
+                        base_delay = (base_delay * 2).min(RECONNECT_MAX_DELAY);
                     }
                 }
             }
@@ -270,6 +292,42 @@ impl DaemonClient {
             Ok(Some(response)) => Ok(response),
             Ok(None) => anyhow::bail!("Daemon connection lost while waiting for response"),
             Err(_) => anyhow::bail!("Request timed out after {:?}", self.timeout),
+        }
+    }
+
+    /// Perform the Hello/HelloAck protocol version handshake.
+    ///
+    /// Must be called immediately after establishing a new connection.
+    /// Returns an error if the daemon rejects the version or doesn't respond.
+    async fn perform_handshake(&mut self) -> Result<()> {
+        let response = self
+            .request_with_timeout(Request::Hello {
+                version: PROTOCOL_VERSION,
+            })
+            .await
+            .context("Protocol handshake failed")?;
+
+        match response {
+            Response::HelloAck { version, .. } => {
+                debug!(
+                    client_version = PROTOCOL_VERSION,
+                    daemon_version = version,
+                    "Protocol handshake succeeded"
+                );
+                Ok(())
+            }
+            Response::Error { message } => {
+                anyhow::bail!("Protocol handshake rejected: {message}")
+            }
+            other => {
+                // Tolerate old daemons that don't understand Hello — they may
+                // return an error or an unexpected response. Log and continue.
+                debug!(
+                    ?other,
+                    "Daemon did not acknowledge Hello; assuming pre-v1 daemon"
+                );
+                Ok(())
+            }
         }
     }
 
@@ -453,9 +511,41 @@ impl DaemonClient {
     }
 }
 
+/// Simple deterministic pseudo-random float in [0.0, 1.0) for jitter.
+/// Uses a hash of the attempt number — no external RNG dependency needed.
+fn pseudo_random_f64(seed: u32) -> f64 {
+    // Simple hash: multiply by a large prime, XOR shift.
+    let mut x = seed.wrapping_mul(2654435761);
+    x ^= x >> 16;
+    x = x.wrapping_mul(2246822519);
+    x ^= x >> 13;
+    (x as f64) / (u32::MAX as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: respond to a Hello request with HelloAck, used by mock servers.
+    async fn handle_hello_handshake(
+        r: &mut tokio::net::unix::OwnedReadHalf,
+        w: &mut tokio::net::unix::OwnedWriteHalf,
+    ) {
+        if let Some(payload) = protocol::read_frame(r).await.expect("read hello") {
+            let req: Request = protocol::decode_payload(&payload).expect("decode hello");
+            let resp = match req {
+                Request::Hello { version } => Response::HelloAck {
+                    version,
+                    capabilities: vec![],
+                },
+                _ => Response::Error {
+                    message: "Expected Hello".into(),
+                },
+            };
+            let frame = protocol::encode_frame(&resp).expect("encode hello ack");
+            w.write_all(&frame).await.expect("write hello ack");
+        }
+    }
 
     #[tokio::test]
     async fn connect_to_nonexistent_socket_returns_none() {
@@ -476,15 +566,16 @@ mod tests {
 
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        // Server: accept one connection, read one frame, reply with Pong.
+        // Server: accept one connection, handle handshake, then read one frame, reply with Pong.
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let (mut r, mut w) = stream.into_split();
+            // Handle Hello handshake first.
+            handle_hello_handshake(&mut r, &mut w).await;
             // Read one request.
             if let Some(payload) = protocol::read_frame(&mut r).await.expect("read") {
                 let _req: Request = protocol::decode_payload(&payload).expect("decode");
                 let resp = protocol::encode_frame(&Response::Pong).expect("encode");
-                use tokio::io::AsyncWriteExt;
                 w.write_all(&resp).await.expect("write");
             }
         });
@@ -530,11 +621,14 @@ mod tests {
                     Ok(Some(payload)) => {
                         let req: Request = protocol::decode_payload(&payload).expect("decode");
                         let resp = match req {
+                            Request::Hello { version } => Response::HelloAck {
+                                version,
+                                capabilities: vec![],
+                            },
                             Request::Ping => Response::Pong,
                             _ => Response::Ok,
                         };
                         let frame = protocol::encode_frame(&resp).expect("encode");
-                        use tokio::io::AsyncWriteExt;
                         if w.write_all(&frame).await.is_err() {
                             break;
                         }
@@ -597,7 +691,9 @@ mod tests {
         // Keep the server alive so the connection succeeds.
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
-            let (_r, _w) = stream.into_split();
+            let (mut r, mut w) = stream.into_split();
+            // Handle Hello handshake.
+            handle_hello_handshake(&mut r, &mut w).await;
             // Hold the connection open for a moment.
             tokio::time::sleep(Duration::from_secs(2)).await;
         });
@@ -622,9 +718,11 @@ mod tests {
 
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        // Server: accept, then drop immediately.
+        // Server: accept, handle handshake, then drop.
         let server = tokio::spawn(async move {
-            let (_stream, _) = listener.accept().await.expect("accept");
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut r, mut w) = stream.into_split();
+            handle_hello_handshake(&mut r, &mut w).await;
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
 
@@ -654,11 +752,14 @@ mod tests {
 
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        // Server: accept, then drop the connection immediately.
+        // Server: accept, handle handshake, then drop the connection.
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
-            // Drop the stream immediately to simulate daemon crash.
-            drop(stream);
+            let (mut r, mut w) = stream.into_split();
+            handle_hello_handshake(&mut r, &mut w).await;
+            // Drop after handshake to simulate daemon crash.
+            drop(r);
+            drop(w);
         });
 
         let mut client = DaemonClient::connect_to(sock_path.clone())
@@ -685,10 +786,13 @@ mod tests {
 
         let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind");
 
-        // Server: accept, then drop immediately.
+        // Server: accept, handle handshake, then drop.
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
-            drop(stream);
+            let (mut r, mut w) = stream.into_split();
+            handle_hello_handshake(&mut r, &mut w).await;
+            drop(r);
+            drop(w);
         });
 
         let mut client = DaemonClient::connect_to(sock_path.clone())

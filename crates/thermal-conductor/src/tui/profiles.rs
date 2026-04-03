@@ -879,8 +879,13 @@ impl TuiPage for ProfilesPage {
                 } else {
                     ""
                 };
-                let text = format!("{} {}{}", icon, p.name, dirty_mark);
-                ListItem::new(text)
+                // Use spans with a fixed-width icon cell to prevent Nerd Font
+                // double-width glyphs from shifting subsequent columns.
+                let line = Line::from(vec![
+                    Span::raw(format!("{icon} ")),
+                    Span::raw(format!("{}{dirty_mark}", p.name)),
+                ]);
+                ListItem::new(line)
             })
             .collect();
 
@@ -906,9 +911,13 @@ impl TuiPage for ProfilesPage {
             .highlight_symbol("\u{25b8} ")
             .style(Style::default().fg(TEXT));
 
+        // Clear the list area first to prevent ghost artifacts from Nerd Font
+        // icons whose actual rendered width exceeds unicode-width's calculation.
+        f.render_widget(Clear, main_chunks[0]);
         f.render_stateful_widget(profile_list, main_chunks[0], &mut self.list_state);
 
         // -- Right panel: mode-dependent form --
+        f.render_widget(Clear, main_chunks[1]);
         match self.mode {
             Mode::Launch => self.render_launch_form(f, main_chunks[1]),
             Mode::Edit => self.render_edit_form(f, main_chunks[1]),

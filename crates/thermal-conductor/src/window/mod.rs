@@ -594,6 +594,10 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         agent_graph: AgentGraph::new(),
         bell_mode: BellMode::from_env(),
         bell_flash_until: None,
+        focused: false,
+        focused_since: None,
+        unfocused_since: Some(Instant::now()),
+        last_focus_file_write: None,
     };
 
     // ── Event loop ────────────────────────────────────────────────────────────
@@ -756,6 +760,9 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         // ── Poll cross-pane inject watcher ────────────────────────────────
         // Non-blocking: picks up inject files from other windows.
         state.poll_inject_watcher();
+
+        // ── Refresh focus state file periodically (every 5s when unfocused) ──
+        state.maybe_refresh_focus_state();
 
         // Check whether the byte processor has produced new PTY output.
         if state.pty_dirty.swap(false, Ordering::AcqRel) {
@@ -963,6 +970,15 @@ pub(super) struct ConductorWindow {
     pub(super) bell_mode: BellMode,
     /// When set, a translucent flash overlay is rendered until this instant.
     pub(super) bell_flash_until: Option<Instant>,
+    // Focus tracking state
+    /// Whether the terminal surface currently has keyboard focus.
+    pub(super) focused: bool,
+    /// When the window gained focus (if currently focused).
+    pub(super) focused_since: Option<Instant>,
+    /// When the window lost focus (if currently unfocused).
+    pub(super) unfocused_since: Option<Instant>,
+    /// Last time we wrote the focus state file (throttle periodic updates).
+    pub(super) last_focus_file_write: Option<Instant>,
 }
 
 impl ConductorWindow {
@@ -977,6 +993,84 @@ impl ConductorWindow {
             self.selection_finalize();
         }
         self.mouse_left_held = false;
+    }
+
+    /// How many seconds the window has been unfocused (0 if focused).
+    pub(super) fn unfocused_seconds(&self) -> u64 {
+        if self.focused {
+            return 0;
+        }
+        self.unfocused_since
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(0)
+    }
+
+    /// Get the session ID for focus state reporting.
+    pub(super) fn focus_session_id(&self) -> Option<&str> {
+        match &self.session_mode {
+            SessionMode::Client { session_id, .. } => Some(session_id.as_str()),
+            SessionMode::Standalone { .. } => None,
+        }
+    }
+
+    /// Record a focus-in event and write the state file.
+    pub(super) fn record_focus_in(&mut self) {
+        self.focused = true;
+        self.focused_since = Some(Instant::now());
+        self.unfocused_since = None;
+        tracing::debug!("Focus gained");
+        self.write_focus_state_file();
+    }
+
+    /// Record a focus-out event and write the state file.
+    pub(super) fn record_focus_out(&mut self) {
+        self.focused = false;
+        self.focused_since = None;
+        self.unfocused_since = Some(Instant::now());
+        tracing::debug!("Focus lost");
+        self.write_focus_state_file();
+    }
+
+    /// Write `/tmp/thermal-focus-state.json` with current focus info.
+    pub(super) fn write_focus_state_file(&mut self) {
+        self.last_focus_file_write = Some(Instant::now());
+
+        let session_id = self.focus_session_id().map(|s| s.to_string());
+        let away_seconds = self.unfocused_seconds();
+
+        // ISO 8601 timestamp for focused_at (or null)
+        let focused_at = if self.focused {
+            Some(iso8601_now())
+        } else {
+            None
+        };
+
+        let json = serde_json::json!({
+            "focused_session": session_id,
+            "focused": self.focused,
+            "focused_at": focused_at,
+            "away_seconds": away_seconds,
+        });
+
+        if let Err(e) = write_focus_state(&json) {
+            tracing::warn!("Failed to write focus state file: {e}");
+        }
+    }
+
+    /// Periodically refresh the focus state file (every 5s when unfocused)
+    /// so `away_seconds` stays current.
+    pub(super) fn maybe_refresh_focus_state(&mut self) {
+        if self.focused {
+            // No need to refresh when focused — away_seconds is always 0.
+            return;
+        }
+        let should_write = match self.last_focus_file_write {
+            Some(last) => last.elapsed() >= std::time::Duration::from_secs(5),
+            None => true,
+        };
+        if should_write {
+            self.write_focus_state_file();
+        }
     }
 
     fn release_keyboard_capability(&mut self) {
@@ -1219,6 +1313,49 @@ impl SeatHandler for ConductorWindow {
         self.release_pointer_capability();
         self.seat = None;
     }
+}
+
+// ── Focus state file helpers ─────────────────────────────────────────────────
+
+const FOCUS_STATE_PATH: &str = "/tmp/thermal-focus-state.json";
+
+/// Write the focus state JSON atomically (write-to-tmp then rename).
+fn write_focus_state(json: &serde_json::Value) -> anyhow::Result<()> {
+    let tmp_path = format!("{FOCUS_STATE_PATH}.tmp");
+    std::fs::write(&tmp_path, serde_json::to_string_pretty(json)?)?;
+    std::fs::rename(&tmp_path, FOCUS_STATE_PATH)?;
+    Ok(())
+}
+
+/// Produce an ISO 8601 UTC timestamp from the current system time.
+fn iso8601_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+    let (year, month, day) = epoch_days_to_date(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
+}
+
+/// Convert days since Unix epoch to (year, month, day).
+/// Algorithm from Howard Hinnant's civil_from_days.
+fn epoch_days_to_date(days: u64) -> (u64, u64, u64) {
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64 + era * 400) as u64;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 // ── Delegate macros ───────────────────────────────────────────────────────────

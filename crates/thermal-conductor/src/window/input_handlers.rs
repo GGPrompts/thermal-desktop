@@ -34,6 +34,7 @@ impl KeyboardHandler for ConductorWindow {
         if self.current_term_mode().contains(TermMode::FOCUS_IN_OUT) {
             self.write_session(b"\x1b[I");
         }
+        self.record_focus_in();
     }
 
     fn leave(
@@ -48,6 +49,7 @@ impl KeyboardHandler for ConductorWindow {
         if self.current_term_mode().contains(TermMode::FOCUS_IN_OUT) {
             self.write_session(b"\x1b[O");
         }
+        self.record_focus_out();
         self.reset_keyboard_state();
     }
 

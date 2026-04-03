@@ -1670,11 +1670,11 @@ pub async fn run_daemon() -> Result<()> {
         let _ = shutdown_tx.send(()).await;
     });
 
-    // ── HUD layer-shell overlay — managed surface reading from event bus ──
-    let _hud_handle = crate::hud::spawn(Arc::clone(&daemon.event_bus));
-
-    // ── Status bar layer-shell surface — managed, reads from event bus ──
+    // ── Status bar layer-shell surface — top of screen, spawned first ──
     let _bar_handle = crate::bar::spawn(Arc::clone(&daemon.event_bus));
+
+    // ── HUD layer-shell surface — below bar, spawned second ──
+    let _hud_handle = crate::hud::spawn(Arc::clone(&daemon.event_bus));
 
     // ── State file watcher — single inotify for all consumers ──────────
     spawn_state_file_watcher(Arc::clone(&daemon));

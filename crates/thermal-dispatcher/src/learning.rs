@@ -72,10 +72,10 @@ impl ConfirmationHistory {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let history: Self = toml::from_str(&content)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let content =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let history: Self =
+            toml::from_str(&content).with_context(|| format!("parsing {}", path.display()))?;
 
         debug!(
             path = %path.display(),
@@ -93,12 +93,10 @@ impl ConfirmationHistory {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .context("serializing confirmation history")?;
+        let content = toml::to_string_pretty(self).context("serializing confirmation history")?;
 
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &content)
-            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::write(&tmp, &content).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, path)
             .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
 

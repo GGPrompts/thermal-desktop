@@ -17,7 +17,7 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::protocol::{self, Request, Response, SessionInfo, PROTOCOL_VERSION};
+use crate::protocol::{self, PROTOCOL_VERSION, Request, Response, SessionInfo};
 
 /// Default request timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -196,7 +196,11 @@ impl DaemonClient {
         let mut base_delay = RECONNECT_INITIAL_DELAY;
 
         for attempt in 1..=MAX_RECONNECT_ATTEMPTS {
-            debug!(attempt, max = MAX_RECONNECT_ATTEMPTS, "Attempting to reconnect to daemon");
+            debug!(
+                attempt,
+                max = MAX_RECONNECT_ATTEMPTS,
+                "Attempting to reconnect to daemon"
+            );
 
             if !self.socket_path.exists() {
                 debug!("Daemon socket does not exist; daemon not running");
@@ -236,9 +240,8 @@ impl DaemonClient {
                     if attempt < MAX_RECONNECT_ATTEMPTS {
                         // Apply ±25% jitter to the base delay.
                         let jitter_factor = 0.75 + (pseudo_random_f64(attempt) * 0.5);
-                        let jittered = Duration::from_secs_f64(
-                            base_delay.as_secs_f64() * jitter_factor,
-                        );
+                        let jittered =
+                            Duration::from_secs_f64(base_delay.as_secs_f64() * jitter_factor);
                         tokio::time::sleep(jittered).await;
                         // Double the base delay for next attempt, capped at max.
                         base_delay = (base_delay * 2).min(RECONNECT_MAX_DELAY);

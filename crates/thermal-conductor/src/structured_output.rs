@@ -157,8 +157,7 @@ mod tests {
 
     #[test]
     fn parse_tool_result() {
-        let line =
-            r#"{"type":"tool_result","tool":"Bash","output":"ok","is_error":false}"#;
+        let line = r#"{"type":"tool_result","tool":"Bash","output":"ok","is_error":false}"#;
         let event = parse_agent_event(line).unwrap();
         assert_eq!(
             event,

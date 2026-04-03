@@ -965,7 +965,9 @@ async fn handle_voice_connection(
 // ---------------------------------------------------------------------------
 
 /// Run the push-to-talk daemon (no VAD).
-pub async fn run_ptt_daemon(voice_cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<VoiceDaemonCommand>) -> Result<()> {
+pub async fn run_ptt_daemon(
+    voice_cmd_rx: &mut tokio::sync::mpsc::UnboundedReceiver<VoiceDaemonCommand>,
+) -> Result<()> {
     let config = load_voice_config();
 
     let model_path = resolve_model_path(&config);
@@ -1458,7 +1460,10 @@ pub async fn run_listen_daemon(
 /// Used by the playback side to check if it should suppress TTS.
 pub fn is_voice_active_from_state() -> bool {
     match read_state_file() {
-        Some(sf) => matches!(sf.state, VoiceState::Listening | VoiceState::Processing | VoiceState::Monitoring),
+        Some(sf) => matches!(
+            sf.state,
+            VoiceState::Listening | VoiceState::Processing | VoiceState::Monitoring
+        ),
         None => false,
     }
 }

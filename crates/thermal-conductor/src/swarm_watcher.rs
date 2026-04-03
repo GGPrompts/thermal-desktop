@@ -176,10 +176,7 @@ async fn spawn_swarm_window(
 }
 
 /// Position a swarm window relative to the orchestrator's window using Hyprland IPC.
-async fn position_swarm_window(
-    window_class: &str,
-    _parent_session_id: &str,
-) -> anyhow::Result<()> {
+async fn position_swarm_window(window_class: &str, _parent_session_id: &str) -> anyhow::Result<()> {
     // Query all clients to find the orchestrator and our swarm window.
     let output = Command::new("hyprctl")
         .args(["clients", "-j"])
@@ -191,14 +188,14 @@ async fn position_swarm_window(
     }
 
     let clients: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    let clients_arr = clients.as_array().ok_or_else(|| {
-        anyhow::anyhow!("hyprctl clients did not return array")
-    })?;
+    let clients_arr = clients
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("hyprctl clients did not return array"))?;
 
     // Find our swarm window by class.
-    let swarm_window = clients_arr.iter().find(|c| {
-        c["class"].as_str() == Some(window_class)
-    });
+    let swarm_window = clients_arr
+        .iter()
+        .find(|c| c["class"].as_str() == Some(window_class));
 
     if swarm_window.is_none() {
         debug!(class = %window_class, "Swarm window not yet visible in hyprctl clients");
@@ -213,7 +210,12 @@ async fn position_swarm_window(
     // Resize swarm windows to be smaller (they're just JSONL viewers).
     let resize_cmd = format!("class:{window_class}");
     let _ = Command::new("hyprctl")
-        .args(["dispatch", "resizewindowpixel", "exact 600 400", &resize_cmd])
+        .args([
+            "dispatch",
+            "resizewindowpixel",
+            "exact 600 400",
+            &resize_cmd,
+        ])
         .output()
         .await;
 
@@ -225,11 +227,7 @@ async fn close_swarm_window(agent_id: &str) -> anyhow::Result<()> {
     let window_class = format!("thermal-swarm-{}", &agent_id[..agent_id.len().min(12)]);
 
     let output = Command::new("hyprctl")
-        .args([
-            "dispatch",
-            "closewindow",
-            &format!("class:{window_class}"),
-        ])
+        .args(["dispatch", "closewindow", &format!("class:{window_class}")])
         .output()
         .await?;
 

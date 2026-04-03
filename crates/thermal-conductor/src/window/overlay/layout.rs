@@ -59,8 +59,7 @@ pub fn layout_widget(
         // Right-anchored, stacked vertically from top.
         WidgetKind::ToolCallCard(_) => {
             let x = viewport_w - TOOL_CARD_WIDTH - TOOL_CARD_MARGIN;
-            let y = TOOL_CARD_MARGIN
-                + stack_index as f32 * (TOOL_CARD_HEIGHT + TOOL_CARD_MARGIN);
+            let y = TOOL_CARD_MARGIN + stack_index as f32 * (TOOL_CARD_HEIGHT + TOOL_CARD_MARGIN);
             WidgetRect {
                 x,
                 y,
@@ -112,8 +111,7 @@ pub fn layout_widget(
         // Right-anchored, same column as tool cards but from bottom.
         WidgetKind::ResultCard(_) => {
             let x = viewport_w - RESULT_CARD_WIDTH - TOOL_CARD_MARGIN;
-            let y = TOOL_CARD_MARGIN
-                + stack_index as f32 * (RESULT_CARD_HEIGHT + TOOL_CARD_MARGIN);
+            let y = TOOL_CARD_MARGIN + stack_index as f32 * (RESULT_CARD_HEIGHT + TOOL_CARD_MARGIN);
             WidgetRect {
                 x,
                 y,

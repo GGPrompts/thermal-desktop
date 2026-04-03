@@ -95,7 +95,9 @@ fn read_voice_state() -> VoiceStateFile {
 // Level meter
 // ---------------------------------------------------------------------------
 
-const METER_BLOCKS: [char; 8] = ['\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}'];
+const METER_BLOCKS: [char; 8] = [
+    '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}', '\u{2588}',
+];
 const METER_WIDTH: usize = 5;
 
 fn level_meter(rms: f32) -> String {

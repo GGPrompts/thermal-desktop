@@ -200,19 +200,11 @@ fn parse_session_event(line: &str) -> Option<SessionEvent> {
                 .as_ref()
                 .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
                 .unwrap_or_default();
-            (
-                SessionEventType::ToolUse,
-                content,
-                raw.tool.clone(),
-            )
+            (SessionEventType::ToolUse, content, raw.tool.clone())
         }
         "tool_result" => {
             let content = raw.output.clone().unwrap_or_default();
-            (
-                SessionEventType::ToolResult,
-                content,
-                raw.tool.clone(),
-            )
+            (SessionEventType::ToolResult, content, raw.tool.clone())
         }
         "thinking" => {
             let content = extract_content_string(&raw.content);
@@ -456,9 +448,7 @@ mod tests {
 
     #[test]
     fn unknown_type_skipped() {
-        let f = make_session_file(&[
-            r#"{"type":"unknown_future_type","data":"something"}"#,
-        ]);
+        let f = make_session_file(&[r#"{"type":"unknown_future_type","data":"something"}"#]);
         let log = SessionLog::load(f.path()).unwrap();
         assert!(log.is_empty());
     }

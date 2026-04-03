@@ -55,7 +55,10 @@ impl MetricsModule {
 
         // Network.
         if m.net_rx_kbps > 0.1 || m.net_tx_kbps > 0.1 {
-            let net_str = format!("\u{2193}{:.0}K \u{2191}{:.0}K", m.net_rx_kbps, m.net_tx_kbps);
+            let net_str = format!(
+                "\u{2193}{:.0}K \u{2191}{:.0}K",
+                m.net_rx_kbps, m.net_tx_kbps
+            );
             modules.push(ModuleOutput::new(
                 Zone::Left,
                 net_str,

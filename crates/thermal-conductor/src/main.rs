@@ -5,8 +5,8 @@
 
 mod agent_graph;
 mod agent_timeline;
-mod bar;
 pub(crate) mod backend;
+mod bar;
 mod client;
 mod color_mapping;
 mod context_environment;
@@ -340,9 +340,7 @@ fn main() -> Result<()> {
                 Commands::Doctor { fix, report } => cmd_doctor(fix, report).await,
                 Commands::Config => cmd_config().await,
                 Commands::Smoke { fix } => cmd_smoke(fix).await,
-                Commands::Dispatch { target, message } => {
-                    cmd_dispatch(target, message).await
-                }
+                Commands::Dispatch { target, message } => cmd_dispatch(target, message).await,
                 Commands::Window { .. } => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),

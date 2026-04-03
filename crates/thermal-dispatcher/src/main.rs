@@ -114,9 +114,7 @@ async fn main() -> Result<()> {
             for p in &promotions {
                 println!("  {p}");
             }
-            println!(
-                "\nTo promote a tool, add it as AUTO in your trust-tiers.toml"
-            );
+            println!("\nTo promote a tool, add it as AUTO in your trust-tiers.toml");
         }
         return Ok(());
     }
@@ -171,17 +169,19 @@ async fn main() -> Result<()> {
 
     // Load confirmation history for adaptive learning
     let history_path = learning::default_history_path();
-    let confirmation_history = ConfirmationHistory::load(&history_path)
-        .unwrap_or_else(|e| {
-            warn!(error = %e, "failed to load confirmation history, starting fresh");
-            ConfirmationHistory::default()
-        });
+    let confirmation_history = ConfirmationHistory::load(&history_path).unwrap_or_else(|e| {
+        warn!(error = %e, "failed to load confirmation history, starting fresh");
+        ConfirmationHistory::default()
+    });
 
     // Log any pending promotions at startup
     if learning_enabled {
         let promotions = confirmation_history.pending_promotions();
         if !promotions.is_empty() {
-            info!(count = promotions.len(), "pending trust tier promotions at startup:");
+            info!(
+                count = promotions.len(),
+                "pending trust tier promotions at startup:"
+            );
             for p in &promotions {
                 info!("  {p}");
             }

@@ -123,8 +123,9 @@ impl PersistWriter {
         let mut rotated = self.path.clone().into_os_string();
         rotated.push(".1");
         let rotated = PathBuf::from(rotated);
-        std::fs::rename(&self.path, &rotated)
-            .with_context(|| format!("rotating {} -> {}", self.path.display(), rotated.display()))?;
+        std::fs::rename(&self.path, &rotated).with_context(|| {
+            format!("rotating {} -> {}", self.path.display(), rotated.display())
+        })?;
 
         let file = std::fs::OpenOptions::new()
             .create(true)

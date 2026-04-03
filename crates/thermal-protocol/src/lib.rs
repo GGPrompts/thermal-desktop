@@ -12,7 +12,7 @@ pub mod state;
 
 pub use config::{ConductorConfig, Layout};
 pub use ggl_types::{
-    AgentId, AgentState, ClaudeStatus, ParseAgentIdError, PaneInfo, SessionState, TaskState,
+    AgentId, AgentState, ClaudeStatus, PaneInfo, ParseAgentIdError, SessionState, TaskState,
     ToolArgs, ToolDetails,
 };
 pub use message::{Message, MessageType};

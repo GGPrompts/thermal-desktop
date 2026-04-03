@@ -312,13 +312,8 @@ pub fn run(event_bus: Arc<SemanticEventBus>) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("wlr-layer-shell not available: {e}"))?;
 
     let wl_surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(
-        &qh,
-        wl_surface,
-        Layer::Top,
-        Some("thermal-bar"),
-        None,
-    );
+    let layer =
+        layer_shell.create_layer_surface(&qh, wl_surface, Layer::Top, Some("thermal-bar"), None);
 
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_exclusive_zone(BAR_HEIGHT as i32);

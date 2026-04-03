@@ -522,10 +522,8 @@ pub fn run(event_bus: Arc<SemanticEventBus>) -> anyhow::Result<()> {
                     .sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
 
                 // Partition into parent sessions and subagents.
-                let mut subagent_map: std::collections::HashMap<
-                    String,
-                    Vec<ClaudeSessionState>,
-                > = std::collections::HashMap::new();
+                let mut subagent_map: std::collections::HashMap<String, Vec<ClaudeSessionState>> =
+                    std::collections::HashMap::new();
                 let mut parents: Vec<ClaudeSessionState> = Vec::new();
 
                 for s in sessions {

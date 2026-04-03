@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use tokio::sync::broadcast;
 
-use thermal_core::{ClaudeSessionState, SessionStateExt};
 use thermal_core::message::{AgentId, Message, MessageType};
+use thermal_core::{ClaudeSessionState, SessionStateExt};
 
 use super::SessionsPage;
 
@@ -176,7 +176,10 @@ impl SessionsPage {
         if let Some(ref target) = mention_target {
             let label = format!("you \u{2192} @{}", target);
             let msg = build_bus_message(&cleaned_content, Some(target));
-            let ok = self.bus_sender.as_ref().map_or(false, |tx| tx.try_send(msg).is_ok());
+            let ok = self
+                .bus_sender
+                .as_ref()
+                .map_or(false, |tx| tx.try_send(msg).is_ok());
             let entry = ChatEntry {
                 from_label: label,
                 content: cleaned_content.clone(),
@@ -216,7 +219,10 @@ impl SessionsPage {
 
             if selected_targets.is_empty() {
                 let msg = build_bus_message(&text, None);
-                let ok = self.bus_sender.as_ref().map_or(false, |tx| tx.try_send(msg).is_ok());
+                let ok = self
+                    .bus_sender
+                    .as_ref()
+                    .map_or(false, |tx| tx.try_send(msg).is_ok());
                 let entry = ChatEntry {
                     from_label: "you \u{2192} bus".to_string(),
                     content: text.clone(),

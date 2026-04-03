@@ -159,11 +159,7 @@ impl TranscriptWatcher {
     /// Return a snapshot of all tracked transcript sessions.
     #[allow(dead_code)]
     pub fn active_sessions(&self) -> Vec<TranscriptSession> {
-        self.state
-            .lock()
-            .values()
-            .map(|t| t.to_session())
-            .collect()
+        self.state.lock().values().map(|t| t.to_session()).collect()
     }
 
     /// Spawn the background watcher task. Returns a join handle.
@@ -258,16 +254,18 @@ impl TranscriptWatcher {
         };
 
         let mut state = self.state.lock();
-        let tracked = state.entry(path.to_path_buf()).or_insert_with(|| TrackedFile {
-            path: path.to_path_buf(),
-            session_id: session_id.clone(),
-            agent,
-            last_event_type: None,
-            last_modified: Instant::now(),
-            event_count: 0,
-            read_offset: 0,
-            last_summary: None,
-        });
+        let tracked = state
+            .entry(path.to_path_buf())
+            .or_insert_with(|| TrackedFile {
+                path: path.to_path_buf(),
+                session_id: session_id.clone(),
+                agent,
+                last_event_type: None,
+                last_modified: Instant::now(),
+                event_count: 0,
+                read_offset: 0,
+                last_summary: None,
+            });
 
         tracked.last_modified = Instant::now();
 
@@ -533,11 +531,7 @@ pub(crate) struct TranscriptWatcherHandle {
 impl TranscriptWatcherHandle {
     /// Return a snapshot of all tracked transcript sessions.
     pub fn active_sessions(&self) -> Vec<TranscriptSession> {
-        self.state
-            .lock()
-            .values()
-            .map(|t| t.to_session())
-            .collect()
+        self.state.lock().values().map(|t| t.to_session()).collect()
     }
 }
 

@@ -227,9 +227,7 @@ fn build_timeline(events: &[SessionEvent]) -> Vec<TimelineEntry> {
             SessionEventType::UserMessage => {
                 // Consume consecutive user messages.
                 let start = i;
-                while i < events.len()
-                    && events[i].event_type == SessionEventType::UserMessage
-                {
+                while i < events.len() && events[i].event_type == SessionEventType::UserMessage {
                     i += 1;
                 }
                 let label = make_label("User", &events[start].content, 60);
@@ -281,9 +279,7 @@ fn build_timeline(events: &[SessionEvent]) -> Vec<TimelineEntry> {
                         }
                         SessionEventType::ToolResult => {
                             // Match by tool_use_id if available.
-                            if tool_use_id.is_some()
-                                && events[i].tool_use_id == tool_use_id
-                            {
+                            if tool_use_id.is_some() && events[i].tool_use_id == tool_use_id {
                                 i += 1;
                                 break;
                             } else if tool_use_id.is_none() {
@@ -298,10 +294,7 @@ fn build_timeline(events: &[SessionEvent]) -> Vec<TimelineEntry> {
                     }
                 }
 
-                let duration = events[start..i]
-                    .iter()
-                    .rev()
-                    .find_map(|e| e.duration);
+                let duration = events[start..i].iter().rev().find_map(|e| e.duration);
 
                 let label = make_label(&tool_name, &events[start].content, 60);
                 timeline.push(TimelineEntry {

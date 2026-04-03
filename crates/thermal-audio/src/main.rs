@@ -786,10 +786,7 @@ async fn send_voice_command(action: &str) -> Result<capture::VoiceSocketResponse
 
 async fn run_voice_toggle() -> Result<()> {
     let status_resp = send_voice_command("status").await?;
-    let current_state = status_resp
-        .state
-        .as_deref()
-        .unwrap_or("muted");
+    let current_state = status_resp.state.as_deref().unwrap_or("muted");
 
     match current_state {
         "muted" | "monitoring" | "wake_word" => {
@@ -821,10 +818,7 @@ async fn run_voice_toggle() -> Result<()> {
 
 async fn run_voice_dispatch() -> Result<()> {
     let status_resp = send_voice_command("status").await?;
-    let current_state = status_resp
-        .state
-        .as_deref()
-        .unwrap_or("muted");
+    let current_state = status_resp.state.as_deref().unwrap_or("muted");
 
     match current_state {
         "muted" | "monitoring" | "wake_word" => {
@@ -970,7 +964,9 @@ async fn async_main() -> Result<()> {
                     let vol_pct = Arc::clone(&socket_volume_pct);
                     let voice_tx = socket_voice_cmd_tx.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_socket_connection(stream, tx, state, vol_pct, voice_tx).await {
+                        if let Err(e) =
+                            handle_socket_connection(stream, tx, state, vol_pct, voice_tx).await
+                        {
                             warn!("socket connection error: {e}");
                         }
                     });
@@ -1594,9 +1590,9 @@ async fn handle_socket_connection(
                 action: action.to_string(),
                 reply: reply_tx,
             });
-            let voice_resp = reply_rx
-                .await
-                .unwrap_or_else(|_| capture::VoiceSocketResponse::error("voice capture not running"));
+            let voice_resp = reply_rx.await.unwrap_or_else(|_| {
+                capture::VoiceSocketResponse::error("voice capture not running")
+            });
             let resp = serde_json::to_string(&voice_resp)?;
             writer.write_all(resp.as_bytes()).await?;
             writer.write_all(b"\n").await?;

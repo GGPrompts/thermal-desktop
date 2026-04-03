@@ -351,7 +351,8 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
 
     // Create a sync -> async bridge: the TUI sends messages via this channel
     // and a background thread drains them into the async MessageBus.
-    let (bus_send_tx, bus_send_rx) = std::sync::mpsc::sync_channel::<thermal_core::message::Message>(64);
+    let (bus_send_tx, bus_send_rx) =
+        std::sync::mpsc::sync_channel::<thermal_core::message::Message>(64);
     {
         let bus = std::sync::Arc::clone(&message_bus);
         std::thread::spawn(move || {
@@ -526,7 +527,10 @@ mod tests {
             let tab_width = left_padding + title_width + right_padding;
 
             assert_eq!(tab_hit_index_for_titles(&titles, x), Some(i));
-            assert_eq!(tab_hit_index_for_titles(&titles, x + tab_width - 1), Some(i));
+            assert_eq!(
+                tab_hit_index_for_titles(&titles, x + tab_width - 1),
+                Some(i)
+            );
 
             x += tab_width;
             if i + 1 < titles.len() {

@@ -9,8 +9,8 @@ use alacritty_terminal::term::cell::Flags;
 
 use crate::grid_renderer::{self, RenderCell, cell_display_text};
 
-use super::{ConductorWindow, RenderStatus};
 use super::url_detection::detect_urls_in_cells;
+use super::{ConductorWindow, RenderStatus};
 
 impl ConductorWindow {
     /// Render a frame: clear to BG, then render the terminal grid.
@@ -248,12 +248,8 @@ impl ConductorWindow {
 
                             // ── Agent overlay widgets ─────────────────────────────
                             if self.overlay.has_widgets() {
-                                self.overlay.render(
-                                    &mut encoder,
-                                    &view,
-                                    self.width,
-                                    self.height,
-                                );
+                                self.overlay
+                                    .render(&mut encoder, &view, self.width, self.height);
                             }
 
                             self.wgpu.queue.submit(std::iter::once(encoder.finish()));
@@ -443,12 +439,8 @@ impl ConductorWindow {
 
         // ── Agent overlay widgets ──────────────────────────────────────
         if self.overlay.has_widgets() {
-            self.overlay.render(
-                &mut encoder,
-                &view,
-                self.width,
-                self.height,
-            );
+            self.overlay
+                .render(&mut encoder, &view, self.width, self.height);
         }
 
         self.wgpu.queue.submit(std::iter::once(encoder.finish()));

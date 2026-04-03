@@ -249,9 +249,8 @@ impl OverlayManager {
                 is_error,
             } => {
                 // Remove matching ToolCallCard.
-                self.passive_widgets.retain(|w| {
-                    !matches!(&w.kind, WidgetKind::ToolCallCard(c) if c.tool == *tool)
-                });
+                self.passive_widgets
+                    .retain(|w| !matches!(&w.kind, WidgetKind::ToolCallCard(c) if c.tool == *tool));
 
                 // Truncate output to a summary.
                 let summary = if output.len() > 120 {

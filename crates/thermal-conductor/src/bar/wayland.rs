@@ -519,7 +519,7 @@ fn execute_click_action(action: &ClickAction) {
                 .spawn(move || {
                     use std::io::Write;
                     if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
-                        let _ = stream.write_all(b"{\"command\":\"voice_toggle\"}\n");
+                        let _ = stream.write_all(b"{\"action\":\"voice_toggle\"}\n");
                     }
                 });
         }

@@ -987,6 +987,13 @@ pub async fn run_ptt_daemon(
                 let response = match daemon_cmd.action.as_str() {
                     "start" => handle_start(&mut recorder),
                     "stop" => handle_stop(&mut recorder, &config).await,
+                    "toggle" => {
+                        if recorder.is_recording() {
+                            handle_stop(&mut recorder, &config).await
+                        } else {
+                            handle_start(&mut recorder)
+                        }
+                    }
                     "dispatch" => handle_dispatch(&mut recorder, &config).await,
                     "status" => {
                         let state = if recorder.is_recording() {
@@ -1401,6 +1408,30 @@ pub async fn run_listen_daemon(
                             resp
                         } else {
                             VoiceSocketResponse::ok("not_recording")
+                        }
+                    }
+                    "toggle" => {
+                        if ptt_active {
+                            // Currently recording — stop
+                            let resp = handle_stop(&mut ptt_recorder, &config).await;
+                            ptt_active = false;
+                            current_voice_state = if wake_word_detector.is_some() {
+                                VoiceState::WakeWord
+                            } else {
+                                VoiceState::Monitoring
+                            };
+                            write_state(current_voice_state, None);
+                            if let Some(ref mut ww_det) = wake_word_detector {
+                                ww_det.reset();
+                                ww_buffer.clear();
+                            }
+                            resp
+                        } else {
+                            // Not recording — start
+                            ptt_active = true;
+                            vad.reset();
+                            speech_buffer.clear();
+                            handle_start(&mut ptt_recorder)
                         }
                     }
                     "dispatch" => {

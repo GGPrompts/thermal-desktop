@@ -55,7 +55,7 @@ struct RawEnvelope {
 
     // Optional fields — present depending on `type`.
     #[serde(default)]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
     #[serde(default)]
     tool: Option<String>,
     #[serde(default)]
@@ -68,6 +68,25 @@ struct RawEnvelope {
     status: Option<String>,
     #[serde(default)]
     message: Option<String>,
+}
+
+/// Extract text content from CC's polymorphic `content` field.
+///
+/// CC uses either a plain string or an array of `{"type":"text","text":"..."}` objects.
+fn extract_content_string(value: &Option<serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => {
+            let mut parts = Vec::new();
+            for item in arr {
+                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                    parts.push(text);
+                }
+            }
+            parts.join("")
+        }
+        _ => String::new(),
+    }
 }
 
 /// Parse a single line of agent JSON output into an [`AgentEvent`].
@@ -85,10 +104,10 @@ pub(crate) fn parse_agent_event(line: &str) -> Option<AgentEvent> {
 
     match envelope.msg_type.as_str() {
         "user" => Some(AgentEvent::UserMessage {
-            content: envelope.content.unwrap_or_default(),
+            content: extract_content_string(&envelope.content),
         }),
         "assistant" => Some(AgentEvent::AssistantMessage {
-            content: envelope.content.unwrap_or_default(),
+            content: extract_content_string(&envelope.content),
         }),
         "tool_use" => Some(AgentEvent::ToolUse {
             tool: envelope.tool.unwrap_or_default(),
@@ -105,7 +124,7 @@ pub(crate) fn parse_agent_event(line: &str) -> Option<AgentEvent> {
             message: envelope.message,
         }),
         "thinking" => Some(AgentEvent::Thinking {
-            content: envelope.content.unwrap_or_default(),
+            content: extract_content_string(&envelope.content),
         }),
         _ => {
             tracing::trace!(msg_type = %envelope.msg_type, "Unknown agent JSON message type");
@@ -250,6 +269,30 @@ mod tests {
             event,
             AgentEvent::AssistantMessage {
                 content: "trimmed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_array_content() {
+        let line = r#"{"type":"assistant","content":[{"type":"text","text":"Hello "},{"type":"text","text":"world"}]}"#;
+        let event = parse_agent_event(line).unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::AssistantMessage {
+                content: "Hello world".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_thinking_array_content() {
+        let line = r#"{"type":"thinking","content":[{"type":"text","text":"Let me think..."}]}"#;
+        let event = parse_agent_event(line).unwrap();
+        assert_eq!(
+            event,
+            AgentEvent::Thinking {
+                content: "Let me think...".into()
             }
         );
     }

@@ -38,5 +38,6 @@ base64 = "0.22"
 tempfile = { workspace = true }
 zbus = { workspace = true }
 regex = { workspace = true }
+shlex = "1"
 
 [dev-dependencies]

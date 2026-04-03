@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
+use shlex;
+
 use crate::semantic_state::SemanticEventBus;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -136,12 +138,21 @@ async fn spawn_swarm_window(
 
     // Use hyprctl dispatch exec to spawn a kitty window tailing the JSONL.
     // The --class flag sets the window class for Hyprland matching.
+    // Shell-quote all interpolated values to prevent injection from paths
+    // containing spaces or metacharacters.
+    let quoted_class =
+        shlex::try_quote(&window_class).map_err(|e| anyhow::anyhow!("bad window class: {e}"))?;
+    let quoted_title =
+        shlex::try_quote(&title).map_err(|e| anyhow::anyhow!("bad title: {e}"))?;
+    let path_str = jsonl_path.display().to_string();
+    let quoted_path =
+        shlex::try_quote(&path_str).map_err(|e| anyhow::anyhow!("bad jsonl path: {e}"))?;
+
     let spawn_cmd = format!(
-        "kitty --class {window_class} --title {title} \
+        "kitty --class {quoted_class} --title {quoted_title} \
          -o background=#1a1a2e -o foreground=#c0c0d0 \
          -o font_size=9 \
-         tail -f {}",
-        jsonl_path.display()
+         tail -f {quoted_path}",
     );
 
     let output = Command::new("hyprctl")

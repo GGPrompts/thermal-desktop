@@ -1577,7 +1577,7 @@ async fn handle_socket_connection(
         | SocketMessage::VoiceGetStatus
         | SocketMessage::VoiceSetMode { .. } => {
             let action = match &message {
-                SocketMessage::VoiceToggle => "start", // toggle logic is client-side
+                SocketMessage::VoiceToggle => "toggle",
                 SocketMessage::VoiceStart => "start",
                 SocketMessage::VoiceStop => "stop",
                 SocketMessage::VoiceDispatch => "dispatch",

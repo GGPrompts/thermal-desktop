@@ -43,6 +43,7 @@ fn binary_to_section(binary: &str) -> Option<&'static str> {
         "thermal-dispatcher" => Some("dispatcher"),
         "thermal-bar" => Some("bar"),
         "thermal-conductor" | "thermal-conductor-tui" => Some("conductor"),
+        // thermal-hud is now built into thermal-conductor.
         "thermal-hud" => Some("hud"),
         "thermal-notify" => Some("notify"),
         _ => None,

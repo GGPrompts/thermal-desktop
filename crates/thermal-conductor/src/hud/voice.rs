@@ -1,4 +1,4 @@
-//! Voice assistant state management for thermal-hud.
+//! Voice assistant state management for the HUD overlay.
 //!
 //! Watches `/tmp/thermal-voice-state.json` for voice assistant state changes
 //! using the `notify` crate (same pattern as `ClaudeStatePoller` in thermal-core).
@@ -37,6 +37,7 @@ pub enum HudMode {
 
 /// Sub-states of the voice assistant UI.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum VoiceState {
     /// Microphone is listening for input.
     Listening,
@@ -61,7 +62,8 @@ struct VoiceStateFile {
     state: String,
     /// Optional label (e.g. "whisper", "dictating").
     label: Option<String>,
-    /// Current RMS audio level (0.0–1.0) from VAD.
+    /// Current RMS audio level (0.0-1.0) from VAD.
+    #[allow(dead_code)]
     level: Option<f32>,
 }
 

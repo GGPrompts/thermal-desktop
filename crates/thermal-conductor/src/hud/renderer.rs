@@ -1,8 +1,7 @@
-/// wgpu rendering pipeline for thermal-hud.
+/// wgpu rendering pipeline for the HUD layer-shell surface.
 ///
 /// Renders a horizontal tab strip showing per-agent status tabs with
 /// display name, current tool, status dot, and context % progress bar.
-/// Adapted from thermal-bar's renderer.rs pattern.
 use std::collections::HashMap;
 use std::ptr::NonNull;
 
@@ -16,7 +15,7 @@ use raw_window_handle::{
 };
 use thermal_core::{ClaudeSessionState, ClaudeStatus, ThermalPalette};
 
-use crate::voice::{HudMode, RESULT_DIM_SECS, VoiceState};
+use super::voice::{HudMode, RESULT_DIM_SECS, VoiceState};
 use wgpu::{
     BlendState, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, Device, FragmentState, FrontFace, Instance, InstanceDescriptor,
@@ -1050,10 +1049,9 @@ fn pixel_rect_to_ndc(
 }
 
 /// Map ClaudeStatus to a thermal color for the status dot.
-/// Matches thermal-conductor's sessions tab color scheme.
 fn status_color(status: &ClaudeStatus) -> [f32; 4] {
     match status {
-        ClaudeStatus::AwaitingInput => ThermalPalette::SEARING, // bright — ready for input
+        ClaudeStatus::AwaitingInput => ThermalPalette::SEARING,
         ClaudeStatus::ToolUse => ThermalPalette::HOT,
         ClaudeStatus::Processing => ThermalPalette::WARM,
         ClaudeStatus::Idle => ThermalPalette::COLD,
@@ -1073,7 +1071,6 @@ fn status_label(status: &ClaudeStatus) -> &'static str {
 /// Load display names from the sessions sidecar file (if available).
 ///
 /// Returns a map of session_id -> display_name (e.g. "opus", "sonnet-2").
-/// Falls back to an empty map if the file is missing or unparseable.
 fn load_sidecar_display_names() -> HashMap<String, String> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
     if runtime_dir.is_empty() {
@@ -1084,7 +1081,6 @@ fn load_sidecar_display_names() -> HashMap<String, String> {
         return HashMap::new();
     };
 
-    // Minimal deserialization — we only need session_id and display_name.
     #[derive(serde::Deserialize)]
     struct Entry {
         session_id: String,
@@ -1107,22 +1103,17 @@ fn load_sidecar_display_names() -> HashMap<String, String> {
 }
 
 /// Get a human-friendly display name for a session.
-///
-/// Priority: sidecar display_name (dedup-numbered) > model_display_name() > truncated ID.
 fn display_name_for_session(
     session: &ClaudeSessionState,
     sidecar_names: &HashMap<String, String>,
 ) -> String {
-    // 1. Sidecar display name (e.g. "opus", "sonnet-2")
     if let Some(name) = sidecar_names.get(&session.session_id) {
         return name.clone();
     }
-    // 2. Model-based display name from ClaudeSessionState
     let name = session.model_display_name();
     if name != "unknown" {
         return name;
     }
-    // 3. Fallback: truncated session ID
     if session.session_id.len() <= 10 {
         session.session_id.clone()
     } else {
@@ -1131,13 +1122,6 @@ fn display_name_for_session(
 }
 
 /// Map a subagent's current_tool to a compact emoji indicator.
-///
-/// Tool categories:
-/// - Edit/Write → ✏️
-/// - Read → 📖
-/// - Grep/Glob → 🔍
-/// - Bash → 💻
-/// - No tool / thinking → ⏳
 fn subagent_tool_emoji(tool: Option<&str>) -> &'static str {
     match tool {
         Some(t) if t.contains("Edit") || t.contains("Write") => "\u{270F}\u{FE0F}",

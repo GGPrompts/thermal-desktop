@@ -1,8 +1,8 @@
-/// Wayland layer-shell surface for thermal-hud.
+/// Wayland layer-shell surface for the HUD overlay.
 ///
 /// Uses smithay-client-toolkit 0.19 to create a wlr-layer-shell surface
 /// anchored to the top of the screen with a 48px exclusive zone.
-/// Adapted from thermal-bar's wayland.rs pattern.
+use std::sync::Arc;
 use std::time::Duration;
 
 use smithay_client_toolkit as sctk;
@@ -32,11 +32,13 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer::WlPointer, wl_seat, wl_surface},
 };
 
-use thermal_core::ClaudeStatePoller;
+use thermal_core::ClaudeSessionState;
 
-use crate::daemon_subscriber;
-use crate::renderer::Renderer;
-use crate::voice::{HudMode, VoiceStatePoller};
+use crate::protocol::{AgentActivity, AgentRuntime, EventScope};
+use crate::semantic_state::SemanticEventBus;
+
+use super::renderer::Renderer;
+use super::voice::{HudMode, VoiceStatePoller};
 
 /// Height of the HUD header bar in pixels.
 pub const HUD_HEIGHT: u32 = 48;
@@ -73,7 +75,7 @@ impl ClickRegion {
     }
 }
 
-/// State for the thermal-hud Wayland client.
+/// State for the HUD Wayland client.
 pub struct HudState {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -99,6 +101,7 @@ pub struct HudState {
 
 impl HudState {
     /// Commit an empty (null) buffer so the compositor will send a configure.
+    #[allow(dead_code)]
     pub fn commit_empty(&self) {
         self.layer.commit();
     }
@@ -305,12 +308,62 @@ impl ProvidesRegistryState for HudState {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot conversion
+// ---------------------------------------------------------------------------
+
+/// Convert a `SemanticSessionSnapshot` to a `ClaudeSessionState` for the renderer.
+fn snapshot_to_session_state(
+    snap: &crate::protocol::SemanticSessionSnapshot,
+) -> ClaudeSessionState {
+    use thermal_core::ClaudeStatus;
+
+    let status = match snap.agent_activity {
+        AgentActivity::Idle | AgentActivity::Exited => ClaudeStatus::Idle,
+        AgentActivity::Prompting | AgentActivity::WaitingInput => ClaudeStatus::AwaitingInput,
+        AgentActivity::Thinking | AgentActivity::StreamingOutput => ClaudeStatus::Processing,
+        AgentActivity::ToolRunning => ClaudeStatus::ToolUse,
+    };
+
+    let agent_type = match snap.runtime {
+        AgentRuntime::Claude => Some("claude".into()),
+        AgentRuntime::Codex => Some("codex".into()),
+        AgentRuntime::Copilot => Some("copilot".into()),
+        AgentRuntime::Unknown => None,
+    };
+
+    ClaudeSessionState {
+        session_id: snap.session_id.clone(),
+        status,
+        current_tool: snap.current_tool.clone(),
+        working_dir: snap.cwd.clone(),
+        context_percent: snap.context_state.saturation.map(|s| s * 100.0),
+        agent_type,
+        last_updated: snap.last_activity_at.clone(),
+        pid: snap.pid.map(|p| p as i64),
+        ..ClaudeSessionState::default()
+    }
+}
+
+/// Get current sessions from the event bus.
+fn sessions_from_bus(bus: &SemanticEventBus) -> Vec<ClaudeSessionState> {
+    let syncs = bus.snapshot_syncs(&EventScope::All);
+    syncs
+        .iter()
+        .filter(|s| s.snapshot.is_alive)
+        .map(|s| snapshot_to_session_state(&s.snapshot))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 /// Connect to the Wayland compositor, create a layer-shell HUD surface, and
 /// enter the event loop. Returns when the surface is closed or an error occurs.
-pub async fn run() -> anyhow::Result<()> {
+///
+/// This runs on a dedicated thread — it blocks on the Wayland event queue.
+/// Session state is read directly from the conductor's `SemanticEventBus`.
+pub fn run(event_bus: Arc<SemanticEventBus>) -> anyhow::Result<()> {
     // Connect to the Wayland compositor via WAYLAND_DISPLAY.
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue) = registry_queue_init(&conn)?;
@@ -355,13 +408,13 @@ pub async fn run() -> anyhow::Result<()> {
         pending_click: None,
     };
 
-    tracing::info!("thermal-hud: waiting for compositor configure");
+    tracing::info!("HUD: waiting for compositor configure");
 
     // Phase 1: Block until the compositor sends the first configure event.
     while !hud.configured {
         event_queue.blocking_dispatch(&mut hud)?;
         if hud.exit {
-            tracing::info!("thermal-hud: exit before configure");
+            tracing::info!("HUD: exit before configure");
             return Ok(());
         }
     }
@@ -375,35 +428,20 @@ pub async fn run() -> anyhow::Result<()> {
         .as_ptr()
         .cast::<std::ffi::c_void>();
 
-    let mut renderer =
-        Renderer::new_from_wayland(display_ptr, surface_ptr, hud.width, HUD_HEIGHT).await?;
+    let mut renderer = pollster::block_on(Renderer::new_from_wayland(
+        display_ptr,
+        surface_ptr,
+        hud.width,
+        HUD_HEIGHT,
+    ))?;
 
     tracing::info!(
         width = hud.width,
         height = HUD_HEIGHT,
-        "thermal-hud: renderer initialized, entering render loop"
+        "HUD: renderer initialized, entering render loop"
     );
 
-    // Phase 3: Set up agent session state source.
-    //
-    // Prefer daemon semantic subscriptions (real-time, event-driven) over
-    // file-watching (ClaudeStatePoller).  Falls back to the poller when the
-    // daemon is not running.
-    let daemon_rx = daemon_subscriber::try_spawn_subscriber();
-    let mut poller = if daemon_rx.is_some() {
-        tracing::info!("Using daemon semantic subscription for agent state (source: daemon)");
-        None
-    } else {
-        tracing::info!(
-            "Daemon not available — using ClaudeStatePoller fallback (source: file-derived)"
-        );
-        Some(
-            ClaudeStatePoller::new()
-                .map_err(|e| anyhow::anyhow!("failed to create ClaudeStatePoller: {e}"))?,
-        )
-    };
-
-    // Phase 4: Set up the VoiceStatePoller for voice assistant UI.
+    // Phase 3: Set up the VoiceStatePoller for voice assistant UI.
     let mut voice_poller = VoiceStatePoller::new()
         .map_err(|e| anyhow::anyhow!("failed to create VoiceStatePoller: {e}"))?;
 
@@ -411,8 +449,7 @@ pub async fn run() -> anyhow::Result<()> {
     let mut active_tab: usize = 0;
 
     loop {
-        // Dispatch Wayland events. We poll multiple times per render cycle
-        // to keep click response snappy (see sleep loop below).
+        // Dispatch Wayland events.
         event_queue.dispatch_pending(&mut hud)?;
         conn.flush()?;
         if let Some(guard) = conn.prepare_read() {
@@ -421,7 +458,7 @@ pub async fn run() -> anyhow::Result<()> {
         }
 
         if hud.exit {
-            tracing::info!("thermal-hud: exit requested");
+            tracing::info!("HUD: exit requested");
             break;
         }
 
@@ -465,20 +502,13 @@ pub async fn run() -> anyhow::Result<()> {
             HudMode::VoiceActive { .. } => {
                 // Clear click regions when in voice mode — no tabs to click.
                 hud.click_regions.clear();
-                // Compute how long the result has been shown (for auto-dim).
                 let result_age = voice_poller.result_shown_at.map(|t| t.elapsed().as_secs());
                 tracing::debug!(?voice_mode, "rendering voice state");
                 renderer.render_voice_state(&voice_mode, result_age)
             }
             HudMode::AgentTabs => {
-                // Get sessions from daemon subscription or file poller.
-                let mut sessions = if let Some(ref rx) = daemon_rx {
-                    rx.borrow().clone()
-                } else if let Some(ref mut p) = poller {
-                    p.poll()
-                } else {
-                    Vec::new()
-                };
+                // Get sessions directly from conductor's event bus.
+                let mut sessions = sessions_from_bus(&event_bus);
 
                 // Sort by workspace (same order as renderer) so click
                 // regions line up with rendered tabs.
@@ -486,13 +516,11 @@ pub async fn run() -> anyhow::Result<()> {
                     .sort_by_key(|s| (s.workspace.map_or(i64::MAX, |w| w), s.session_id.clone()));
 
                 // Partition into parent sessions and subagents.
-                // Only parent tabs are rendered full-width; subagents become
-                // compact emoji icons on their parent's tab.
                 let mut subagent_map: std::collections::HashMap<
                     String,
-                    Vec<thermal_core::ClaudeSessionState>,
+                    Vec<ClaudeSessionState>,
                 > = std::collections::HashMap::new();
-                let mut parents: Vec<thermal_core::ClaudeSessionState> = Vec::new();
+                let mut parents: Vec<ClaudeSessionState> = Vec::new();
 
                 for s in sessions {
                     if let Some(ref parent_id) = s.parent_session_id {
@@ -525,7 +553,6 @@ pub async fn run() -> anyhow::Result<()> {
         // so clicks are processed within ~100ms instead of waiting a full second.
         for _ in 0..9 {
             std::thread::sleep(Duration::from_millis(100));
-            // Drain any click events that arrived during sleep.
             event_queue.dispatch_pending(&mut hud)?;
             if let Ok(()) = conn.flush() {
                 if let Some(guard) = conn.prepare_read() {
@@ -533,7 +560,6 @@ pub async fn run() -> anyhow::Result<()> {
                     event_queue.dispatch_pending(&mut hud)?;
                 }
             }
-            // If a click arrived, break out early to process + re-render.
             if hud.pending_click.is_some() {
                 break;
             }
@@ -554,12 +580,8 @@ const TAB_GAP: f32 = 2.0;
 const LEFT_MARGIN: f32 = 8.0;
 
 /// Rebuild click regions from the current session tab layout.
-///
-/// Each session tab becomes a click region. Clicking a tab both selects it
-/// (visual highlight) and, if the session has a workspace, focuses that
-/// workspace via hyprctl.
 fn build_tab_click_regions(
-    sessions: &[thermal_core::ClaudeSessionState],
+    sessions: &[ClaudeSessionState],
     screen_w: f32,
     regions: &mut Vec<ClickRegion>,
 ) {
@@ -578,8 +600,6 @@ fn build_tab_click_regions(
     for (i, session) in sessions.iter().enumerate() {
         let tab_x = LEFT_MARGIN + i as f32 * (tab_width + TAB_GAP);
 
-        // Clicking always selects the tab. If the session also has a known
-        // workspace, focus that workspace via hyprctl.
         let action = if let Some(ws) = session.workspace {
             ClickAction::SessionFocus(i, ws)
         } else {

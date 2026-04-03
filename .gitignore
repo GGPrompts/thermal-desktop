@@ -2,7 +2,10 @@ target/
 *.rlib
 Cargo.lock
 
-# Dolt database files (added by bd init)
+# Beads / Dolt (device-specific)
 .dolt/
 *.db
 .beads/metadata.json
+.beads/.beads-credential-key
+.beads/backup/
+.beads-postgres-backup/

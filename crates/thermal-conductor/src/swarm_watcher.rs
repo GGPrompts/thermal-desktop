@@ -150,9 +150,8 @@ async fn spawn_swarm_window(
 
     let spawn_cmd = format!(
         "kitty --class {quoted_class} --title {quoted_title} \
-         -o background=#1a1a2e -o foreground=#c0c0d0 \
-         -o font_size=9 \
-         tail -f {quoted_path}",
+         -o background=#0a0010 -o font_size=9 \
+         thermal-conductor view {quoted_path}",
     );
 
     let output = Command::new("hyprctl")

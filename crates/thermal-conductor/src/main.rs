@@ -38,6 +38,7 @@ mod structured_output;
 mod swarm_watcher;
 mod terminal;
 mod transcript_watcher;
+mod viewer;
 pub(crate) mod tui;
 mod window;
 
@@ -192,6 +193,12 @@ enum Commands {
 
     /// Launch the session monitor TUI (read-only dashboard)
     Monitor,
+
+    /// View a JSONL session file with rich thermal-themed formatting
+    View {
+        /// Path to the JSONL file to view
+        path: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -268,7 +275,7 @@ fn main() -> Result<()> {
         Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }
     ) {
         // No tracing init — just run silently.
-    } else if matches!(command, Commands::Tui | Commands::Monitor) {
+    } else if matches!(command, Commands::Tui | Commands::Monitor | Commands::View { .. }) {
         // In TUI mode, log only to files so tracing never corrupts the
         // alternate screen. If all file paths fail, tracing stays disabled.
         tui_log_path = init_tui_tracing(env_filter);
@@ -292,6 +299,14 @@ fn main() -> Result<()> {
     // Monitor runs its own synchronous ratatui event loop.
     if matches!(command, Commands::Monitor) {
         return monitor::run();
+    }
+
+    // View runs its own ratatui event loop for JSONL viewing.
+    if let Commands::View { ref path } = command {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(viewer::run(path.clone()));
     }
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
@@ -345,6 +360,7 @@ fn main() -> Result<()> {
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
                 Commands::Monitor => unreachable!(),
+                Commands::View { .. } => unreachable!(),
             }
         })
 }

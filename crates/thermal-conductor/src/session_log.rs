@@ -29,7 +29,7 @@ use serde::Deserialize;
 
 /// The kind of event in a session log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum SessionEventType {
+pub enum SessionEventType {
     UserMessage,
     AssistantText,
     ToolUse,
@@ -55,7 +55,7 @@ impl std::fmt::Display for SessionEventType {
 
 /// A single parsed event from a CC session JSONL file.
 #[derive(Debug, Clone)]
-pub(crate) struct SessionEvent {
+pub struct SessionEvent {
     /// ISO 8601 timestamp string from the JSONL line.
     pub timestamp: String,
     /// Parsed epoch millis for ordering/duration computation.
@@ -76,7 +76,7 @@ pub(crate) struct SessionEvent {
 
 /// A loaded and parsed CC session log.
 #[derive(Debug)]
-pub(crate) struct SessionLog {
+pub struct SessionLog {
     /// Source file path.
     path: PathBuf,
     /// All parsed events in file order.
@@ -178,7 +178,7 @@ impl SessionLog {
 // ── Parsing helpers ──────────────────────────────────────────────────────────
 
 /// Parse a single JSONL line into a SessionEvent.
-fn parse_session_event(line: &str) -> Option<SessionEvent> {
+pub fn parse_session_event(line: &str) -> Option<SessionEvent> {
     let raw: RawLine = serde_json::from_str(line).ok()?;
     let msg_type = raw.msg_type.as_deref()?;
 

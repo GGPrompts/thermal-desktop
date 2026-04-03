@@ -848,6 +848,11 @@ impl TuiPage for ProfilesPage {
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
+        // Clear stale symbols before repainting. Ratatui styles the target area for
+        // Paragraph/List widgets, but it does not blank previously rendered text.
+        // Without an explicit clear here, switching to a profile with shorter field
+        // values can leave visual artifacts in the form pane.
+        f.render_widget(Clear, area);
         f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
         let main_chunks = Layout::default()
@@ -1692,6 +1697,7 @@ fn which_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::profiles_config::{ProfileConfig, default_count};
+    use ratatui::{Terminal, backend::TestBackend};
 
     // ── expand_tilde ──────────────────────────────────────────────────────────
 
@@ -2016,5 +2022,68 @@ cwd = "~/code"
         let page = make_page_with_cwd_inputs("/explicit/path", Some("/default"), "/launch");
         let cwd = page.effective_cwd();
         assert_eq!(cwd, "/explicit/path");
+    }
+
+    fn render_page_to_lines(page: &mut ProfilesPage, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
+        terminal
+            .draw(|f| page.render(f, f.area()))
+            .expect("page should render");
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn render_clears_stale_field_content_when_profile_values_shrink() {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0));
+
+        let mut page = ProfilesPage {
+            profiles: vec![Profile {
+                name: "Test".into(),
+                command: Some("residual-token-xyz123".into()),
+                cwd: None,
+                icon: Some("📁".into()),
+                count: 1,
+                git_worktree: false,
+            }],
+            default_cwd: None,
+            list_state,
+            mode: Mode::Launch,
+            focus: Focus::ProfileList,
+            cwd_input: String::new(),
+            command_input: "residual-token-xyz123".into(),
+            count_input: "1".into(),
+            worktree_enabled: false,
+            name_input: "Test".into(),
+            icon_input: "📁".into(),
+            icon_picker_open: false,
+            icon_picker_index: 0,
+            dirty: false,
+            spawning: Arc::new(AtomicBool::new(false)),
+            last_spawn_time: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            launch_cwd: "/tmp".into(),
+            backend_pref: BackendPreference::Auto,
+            spawn_result: Arc::new(Mutex::new(None)),
+            status_msg: None,
+        };
+
+        let _ = render_page_to_lines(&mut page, 80, 24);
+        page.command_input = "lf".into();
+        let lines = render_page_to_lines(&mut page, 80, 24);
+        let screen = lines.join("\n");
+
+        assert!(
+            !screen.contains("residual-token-xyz123"),
+            "stale command text remained after rerender:\n{screen}"
+        );
     }
 }

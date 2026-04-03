@@ -22,6 +22,7 @@ mod inject;
 mod input;
 mod kitty;
 mod kitty_graphics;
+mod monitor;
 mod osc633;
 mod persist;
 pub(crate) mod profiles_config;
@@ -32,10 +33,12 @@ mod terminal;
 pub(crate) mod tui;
 mod window;
 
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use thermal_core::message::{AgentId, Message, MessageType};
 use thermal_core::{ClaudeSessionState, ClaudeStatePoller, ClaudeStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{info, warn};
@@ -166,6 +169,21 @@ enum Commands {
         #[arg(long)]
         fix: bool,
     },
+
+    /// Send a message to the thermal-messages bus
+    #[command(trailing_var_arg = true)]
+    Dispatch {
+        /// Target agent type (e.g. "claude", "system"). Defaults to "system".
+        #[arg(short, long)]
+        target: Option<String>,
+
+        /// Message text (multiple words joined automatically)
+        #[arg(required = true, num_args = 1..)]
+        message: Vec<String>,
+    },
+
+    /// Launch the session monitor TUI (read-only dashboard)
+    Monitor,
 }
 
 #[derive(Subcommand)]
@@ -242,7 +260,7 @@ fn main() -> Result<()> {
         Commands::Doctor { .. } | Commands::Config | Commands::Smoke { .. }
     ) {
         // No tracing init — just run silently.
-    } else if matches!(command, Commands::Tui) {
+    } else if matches!(command, Commands::Tui | Commands::Monitor) {
         // In TUI mode, log only to files so tracing never corrupts the
         // alternate screen. If all file paths fail, tracing stays disabled.
         tui_log_path = init_tui_tracing(env_filter);
@@ -261,6 +279,11 @@ fn main() -> Result<()> {
             eprintln!("TUI logs → {}", path.display());
         }
         return result;
+    }
+
+    // Monitor runs its own synchronous ratatui event loop.
+    if matches!(command, Commands::Monitor) {
+        return monitor::run();
     }
 
     // Window subcommand manages its own tokio runtime (for PTY async I/O),
@@ -309,9 +332,13 @@ fn main() -> Result<()> {
                 Commands::Doctor { fix, report } => cmd_doctor(fix, report).await,
                 Commands::Config => cmd_config().await,
                 Commands::Smoke { fix } => cmd_smoke(fix).await,
+                Commands::Dispatch { target, message } => {
+                    cmd_dispatch(target, message).await
+                }
                 Commands::Window { .. } => unreachable!(),
                 Commands::Daemon => unreachable!(),
                 Commands::Tui => unreachable!(),
+                Commands::Monitor => unreachable!(),
             }
         })
 }
@@ -742,6 +769,85 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown error");
         bail!("TTS failed: {err}");
+    }
+
+    Ok(())
+}
+
+/// Send a message to the thermal-messages bus and print the response.
+async fn cmd_dispatch(target: Option<String>, message: Vec<String>) -> Result<()> {
+    let target = target.unwrap_or_else(|| "system".to_string());
+    let content = message.join(" ");
+
+    let msg = Message {
+        seq: 0,
+        ts: 0,
+        from: AgentId::new("cli", "td"),
+        to: AgentId::new(&target, "default"),
+        context_id: None,
+        project: None,
+        content,
+        msg_type: MessageType::AgentMsg,
+        metadata: HashMap::new(),
+    };
+
+    let sock = thermal_core::runtime::socket_path("messages");
+    let stream = match tokio::net::UnixStream::connect(&sock).await {
+        Ok(s) => s,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::ConnectionRefused && sock.exists() {
+                let _ = std::fs::remove_file(&sock);
+                bail!(
+                    "thermal-messages socket exists at {} but daemon is not responding — removed stale socket",
+                    sock.display()
+                );
+            }
+            if e.kind() == std::io::ErrorKind::NotFound || !sock.exists() {
+                bail!(
+                    "thermal-messages socket not found at {} — is the daemon running?",
+                    sock.display()
+                );
+            }
+            return Err(e).with_context(|| format!("could not connect to {}", sock.display()));
+        }
+    };
+
+    let (reader, mut writer) = stream.into_split();
+
+    // Send JSONL message.
+    let json = serde_json::to_string(&msg).context("serializing message")?;
+    writer.write_all(json.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await?;
+
+    // Read one response line.
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    match lines.next_line().await? {
+        Some(line) => {
+            // Try to pretty-print the content field; fall back to raw JSON.
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(ok) = val.get("ok") {
+                    if ok.as_bool() == Some(true) {
+                        println!("ok");
+                    } else if let Some(err) = val.get("error") {
+                        eprintln!("error: {}", err.as_str().unwrap_or(&line));
+                        std::process::exit(1);
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&val)?);
+                    }
+                } else if let Some(content) = val.get("content") {
+                    println!("{}", content.as_str().unwrap_or(&line));
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&val)?);
+                }
+            } else {
+                println!("{line}");
+            }
+        }
+        None => {
+            eprintln!("no response from daemon");
+            std::process::exit(1);
+        }
     }
 
     Ok(())

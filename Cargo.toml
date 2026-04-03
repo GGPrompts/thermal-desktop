@@ -6,7 +6,6 @@ members = [
     "crates/thermal-launch",
     "crates/thermal-notify",
     "crates/thermal-lock",
-    "crates/thermal-monitor",
     "crates/thermal-audio",
     "crates/thermal-core",
     "crates/thermal-commander",
@@ -17,7 +16,6 @@ members = [
     "crates/thermal-voice",
     "crates/thermal-terminal",
     "crates/thermal-messages",
-    "crates/thermal-dispatch-cli",
 ]
 
 [workspace.package]

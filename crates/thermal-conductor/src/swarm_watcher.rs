@@ -61,7 +61,8 @@ pub(crate) struct SwarmState {
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// How long to wait after a subagent completes before closing its window.
-const CLOSE_DELAY: Duration = Duration::from_secs(3);
+/// Gives time to read the final report before the window disappears.
+const CLOSE_DELAY: Duration = Duration::from_secs(10);
 
 /// Poll interval for checking subagent state changes.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);

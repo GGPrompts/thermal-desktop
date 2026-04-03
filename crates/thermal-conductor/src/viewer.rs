@@ -60,6 +60,10 @@ struct ViewerState {
     last_activity: Instant,
     /// Agent ID extracted from filename (for title).
     agent_id: String,
+    /// Current terminal width (updated each frame).
+    terminal_width: u16,
+    /// Whether the final report has been expanded (done once when stream stops).
+    final_expanded: bool,
 }
 
 impl ViewerState {
@@ -86,6 +90,8 @@ impl ViewerState {
             streaming: false,
             last_activity: Instant::now(),
             agent_id,
+            terminal_width: 120,
+            final_expanded: false,
         }
     }
 
@@ -134,9 +140,11 @@ impl ViewerState {
         if !new_events.is_empty() {
             self.streaming = true;
             self.last_activity = Instant::now();
+            self.final_expanded = false; // New content — reset expansion.
 
+            let width = self.terminal_width as usize;
             for event in new_events {
-                let new_lines = render_event(&event);
+                let new_lines = render_event(&event, width, false);
                 self.lines.extend(new_lines);
                 self.events.push(event);
             }
@@ -145,6 +153,12 @@ impl ViewerState {
         // Clear streaming indicator after 3 seconds of inactivity.
         if self.streaming && self.last_activity.elapsed() > Duration::from_secs(3) {
             self.streaming = false;
+        }
+
+        // Expand the final assistant text when the stream goes quiet.
+        // This shows the full subagent report instead of the "+N lines" collapsed view.
+        if !self.streaming && !self.final_expanded && !self.events.is_empty() {
+            self.expand_final_report();
         }
 
         Ok(())
@@ -167,10 +181,10 @@ impl ViewerState {
 
     /// Jump to next tool call event after current scroll position.
     fn jump_next_tool(&mut self, viewport_height: usize) {
-        // Find the display line for the next tool event after current scroll.
         let mut line_idx = 0;
-        for event in &self.events {
-            let n = display_line_count(event);
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.is_event_expanded(i);
+            let n = display_line_count(event, expanded);
             if line_idx > self.scroll
                 && matches!(event.event_type, SessionEventType::ToolUse | SessionEventType::ToolResult)
             {
@@ -180,7 +194,6 @@ impl ViewerState {
             }
             line_idx += n;
         }
-        // Wrap or no-op: scroll to bottom.
         self.scroll_to_bottom(viewport_height);
     }
 
@@ -188,8 +201,9 @@ impl ViewerState {
     fn jump_prev_tool(&mut self) {
         let mut positions = Vec::new();
         let mut line_idx = 0;
-        for event in &self.events {
-            let n = display_line_count(event);
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.is_event_expanded(i);
+            let n = display_line_count(event, expanded);
             if matches!(
                 event.event_type,
                 SessionEventType::ToolUse | SessionEventType::ToolResult
@@ -198,10 +212,35 @@ impl ViewerState {
             }
             line_idx += n;
         }
-        // Find the last position before current scroll.
         if let Some(&pos) = positions.iter().rev().find(|&&p| p < self.scroll) {
             self.scroll = pos;
             self.following = false;
+        }
+    }
+
+    /// Whether event at index should be rendered expanded.
+    fn is_event_expanded(&self, idx: usize) -> bool {
+        if !self.final_expanded {
+            return false;
+        }
+        // Find the last AssistantText event — that's the final report.
+        let last_assistant = self
+            .events
+            .iter()
+            .rposition(|e| e.event_type == SessionEventType::AssistantText);
+        last_assistant == Some(idx)
+    }
+
+    /// Expand the final assistant text event to show the full report.
+    fn expand_final_report(&mut self) {
+        self.final_expanded = true;
+        // Re-render all display lines with the final event expanded.
+        let width = self.terminal_width as usize;
+        self.lines.clear();
+        for (i, event) in self.events.iter().enumerate() {
+            let expanded = self.is_event_expanded(i);
+            let new_lines = render_event(event, width, expanded);
+            self.lines.extend(new_lines);
         }
     }
 }
@@ -209,39 +248,40 @@ impl ViewerState {
 // ── Event rendering ─────────────────────────────────────────────────────────
 
 /// How many display lines an event will take.
-fn display_line_count(event: &SessionEvent) -> usize {
+fn display_line_count(event: &SessionEvent, expanded: bool) -> usize {
     match event.event_type {
         SessionEventType::UserMessage => {
-            // Header + content lines (max 5) + blank.
-            let content_lines = event.content.lines().count().min(5).max(1);
-            1 + content_lines + 1
+            let max = if expanded { 100 } else { 5 };
+            let content_lines = event.content.lines().count().min(max).max(1);
+            let overflow = if event.content.lines().count() > max { 1 } else { 0 };
+            1 + content_lines + overflow + 1
         }
         SessionEventType::AssistantText => {
-            // Content lines (max 4) + blank.
-            let content_lines = event.content.lines().count().min(4).max(1);
-            content_lines + 1
+            let max = if expanded { 200 } else { 4 };
+            let content_lines = event.content.lines().count().min(max).max(1);
+            let overflow = if event.content.lines().count() > max { 1 } else { 0 };
+            content_lines + overflow + 1
         }
-        SessionEventType::Thinking => 1, // Single collapsed line.
-        SessionEventType::ToolUse => 1,  // Tool header line.
-        SessionEventType::ToolResult => {
-            // Result summary line + blank.
-            2
-        }
+        SessionEventType::Thinking => 1,
+        SessionEventType::ToolUse => 1,
+        SessionEventType::ToolResult => 2,
         SessionEventType::Progress => 1,
         SessionEventType::SystemMessage => 1,
     }
 }
 
 /// Render a single event into display lines.
-fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
+/// `max_width` is the usable terminal width (columns minus margins).
+/// `expanded` controls whether assistant text shows all lines (true) or is collapsed (false).
+fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<DisplayLine> {
     let mut lines = Vec::new();
+    // Content area width after accounting for left margin/gutter (~6 chars).
+    let content_width = max_width.saturating_sub(6);
 
     match event.event_type {
         SessionEventType::UserMessage => {
-            // Timestamp extraction (HH:MM:SS).
             let ts = format_time(&event.timestamp);
 
-            // Header line with gold accent.
             lines.push(DisplayLine {
                 spans: vec![
                     Span::styled("  ", Style::default()),
@@ -251,9 +291,9 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
                 ],
             });
 
-            // Content lines (max 5).
-            for line in event.content.lines().take(5) {
-                let text = truncate_line(line, 120);
+            let max_lines = if expanded { 100 } else { 5 };
+            for line in event.content.lines().take(max_lines) {
+                let text = truncate_line(line, content_width);
                 lines.push(DisplayLine {
                     spans: vec![
                         Span::styled("  ", Style::default()),
@@ -262,29 +302,30 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
                     ],
                 });
             }
-            if event.content.lines().count() > 5 {
-                let remaining = event.content.lines().count() - 5;
+            let total = event.content.lines().count();
+            if total > max_lines {
+                let remaining = total - max_lines;
                 lines.push(DisplayLine {
                     spans: vec![
                         Span::styled("  ", Style::default()),
                         Span::styled("┃ ", Style::default().fg(USER_COLOR)),
                         Span::styled(
-                            format!("  ...{remaining} more lines"),
+                            format!("  +{remaining} more lines"),
                             Style::default().fg(MUTED_COLOR),
                         ),
                     ],
                 });
             }
 
-            // Blank separator.
             lines.push(DisplayLine {
                 spans: vec![Span::raw("")],
             });
         }
 
         SessionEventType::AssistantText => {
-            for line in event.content.lines().take(4) {
-                let text = truncate_line(line, 120);
+            let max_lines = if expanded { 200 } else { 4 };
+            for line in event.content.lines().take(max_lines) {
+                let text = truncate_line(line, content_width);
                 lines.push(DisplayLine {
                     spans: vec![
                         Span::styled("    ", Style::default()),
@@ -292,33 +333,29 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
                     ],
                 });
             }
-            if event.content.lines().count() > 4 {
-                let remaining = event.content.lines().count() - 4;
+            let total = event.content.lines().count();
+            if total > max_lines {
+                let remaining = total - max_lines;
                 lines.push(DisplayLine {
                     spans: vec![
                         Span::styled("    ", Style::default()),
                         Span::styled(
-                            format!("...{remaining} more lines"),
+                            format!("+{remaining} more lines"),
                             Style::default().fg(MUTED_COLOR),
                         ),
                     ],
                 });
             }
-            // Blank separator.
             lines.push(DisplayLine {
                 spans: vec![Span::raw("")],
             });
         }
 
         SessionEventType::Thinking => {
-            let preview = event
-                .content
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(60)
-                .collect::<String>();
+            let preview = truncate_line(
+                event.content.lines().next().unwrap_or(""),
+                content_width.saturating_sub(14),
+            );
             lines.push(DisplayLine {
                 spans: vec![
                     Span::styled("  ", Style::default()),
@@ -340,8 +377,7 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
 
         SessionEventType::ToolUse => {
             let tool = event.tool_name.as_deref().unwrap_or("?");
-            // Extract a meaningful summary from the input JSON.
-            let summary = extract_tool_summary(tool, &event.content);
+            let summary = extract_tool_summary(tool, &event.content, content_width.saturating_sub(tool.len() + 6));
             let tool_style = tool_color_style(tool);
 
             lines.push(DisplayLine {
@@ -354,7 +390,6 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
         }
 
         SessionEventType::ToolResult => {
-            let tool = event.tool_name.as_deref().unwrap_or("?");
             let duration_str = event
                 .duration
                 .map(|d| format!("[{:.1}s]", d.as_secs_f64()))
@@ -366,19 +401,15 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
                 ("✓", OK_COLOR)
             };
 
-            // First line of output (truncated).
-            let preview = event
-                .content
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(80)
-                .collect::<String>();
+            let preview_width = content_width.saturating_sub(6);
+            let preview = truncate_line(
+                event.content.lines().next().unwrap_or(""),
+                preview_width,
+            );
 
             let total_lines = event.content.lines().count();
             let line_info = if total_lines > 1 {
-                format!(" ({total_lines} lines)")
+                format!(" +{} lines", total_lines - 1)
             } else {
                 String::new()
             };
@@ -396,7 +427,6 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
                 ],
             });
 
-            // Blank separator after tool result.
             lines.push(DisplayLine {
                 spans: vec![Span::raw("")],
             });
@@ -404,7 +434,7 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
 
         SessionEventType::Progress => {
             let tool = event.tool_name.as_deref().unwrap_or("?");
-            let msg = truncate_line(&event.content, 80);
+            let msg = truncate_line(&event.content, content_width.saturating_sub(tool.len() + 4));
             lines.push(DisplayLine {
                 spans: vec![
                     Span::styled("    ", Style::default()),
@@ -419,7 +449,7 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
         }
 
         SessionEventType::SystemMessage => {
-            let msg = truncate_line(&event.content, 80);
+            let msg = truncate_line(&event.content, content_width.saturating_sub(4));
             lines.push(DisplayLine {
                 spans: vec![
                     Span::styled("  ", Style::default()),
@@ -438,56 +468,39 @@ fn render_event(event: &SessionEvent) -> Vec<DisplayLine> {
 }
 
 /// Extract a meaningful summary from tool input JSON.
-fn extract_tool_summary(tool: &str, input_json: &str) -> String {
-    // Parse the JSON input to find key fields.
+fn extract_tool_summary(tool: &str, input_json: &str, max_width: usize) -> String {
     let value: serde_json::Value = match serde_json::from_str(input_json) {
         Ok(v) => v,
-        Err(_) => return truncate_line(input_json, 60),
+        Err(_) => return truncate_line(input_json, max_width),
     };
 
     match tool {
         "Bash" => value
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| truncate_line(s, 80))
+            .map(|s| truncate_line(s, max_width))
             .unwrap_or_default(),
-        "Read" => value
+        "Read" | "Write" | "Edit" => value
             .get("file_path")
             .and_then(|v| v.as_str())
             .map(|s| shorten_path(s))
             .unwrap_or_default(),
-        "Write" => value
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| shorten_path(s))
-            .unwrap_or_default(),
-        "Edit" => value
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|s| shorten_path(s))
-            .unwrap_or_default(),
-        "Glob" => value
+        "Glob" | "Grep" => value
             .get("pattern")
             .and_then(|v| v.as_str())
-            .map(|s| truncate_line(s, 60))
-            .unwrap_or_default(),
-        "Grep" => value
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .map(|s| truncate_line(s, 60))
+            .map(|s| truncate_line(s, max_width))
             .unwrap_or_default(),
         "Agent" => value
             .get("description")
             .and_then(|v| v.as_str())
-            .map(|s| truncate_line(s, 60))
+            .map(|s| truncate_line(s, max_width))
             .unwrap_or_default(),
         _ => {
-            // Generic: show first string field value.
             if let Some(obj) = value.as_object() {
                 for (_k, v) in obj.iter() {
                     if let Some(s) = v.as_str() {
                         if !s.is_empty() {
-                            return truncate_line(s, 60);
+                            return truncate_line(s, max_width);
                         }
                     }
                 }
@@ -668,6 +681,9 @@ pub async fn run(path: PathBuf) -> Result<()> {
     let poll_interval = Duration::from_millis(250);
 
     loop {
+        // Update terminal width for dynamic truncation.
+        state.terminal_width = terminal.size()?.width;
+
         // Render.
         terminal.draw(|f| render_ui(f, &mut state))?;
 

@@ -426,7 +426,6 @@ fn cleanup_stale_socket(def: &ServiceDef) {
     let sock_name = match def.binary {
         "thermal-dispatcher" => Some("dispatcher.sock"),
         "thermal-audio" => Some("audio.sock"),
-        "thermal-voice" => Some("voice.sock"),
         "thermal-conductor" => Some("conductor.sock"),
         _ => None,
     };

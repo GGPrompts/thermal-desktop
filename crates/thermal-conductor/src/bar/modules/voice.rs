@@ -1,7 +1,8 @@
 /// Voice/microphone status module for the bar's right zone.
 ///
-/// Reads `/tmp/thermal-voice-state.json` and displays a mic icon with
-/// thermal-colored state. Polled once per render cycle (~1 Hz).
+/// Reads `/tmp/thermal-voice-state.json` (written by the unified thermal-audio
+/// daemon) and displays a mic icon with thermal-colored state. Polled once per
+/// render cycle (~1 Hz).
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

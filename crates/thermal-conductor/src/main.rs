@@ -885,11 +885,11 @@ static DAEMONS: &[DaemonSpec] = &[
 /// Format: (short_name, has_pidfile, has_socket)
 static REMOVED_DAEMON_ARTIFACTS: &[(&str, bool, bool)] = &[
     ("bar", true, false),
-    ("hud", true, false),
+    ("hud", false, false),
     ("messages", true, true),
     ("voice", true, true),
-    ("notify", true, false),
-    ("wallpaper", true, false),
+    ("monitor", false, false),
+    ("dispatch-cli", false, false),
 ];
 
 #[derive(Debug, Clone, PartialEq)]

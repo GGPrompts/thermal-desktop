@@ -39,12 +39,8 @@ impl ServiceSettings {
 fn binary_to_section(binary: &str) -> Option<&'static str> {
     match binary {
         "thermal-audio" => Some("audio"),
-        "thermal-voice" => Some("voice"),
         "thermal-dispatcher" => Some("dispatcher"),
-        "thermal-bar" => Some("bar"),
         "thermal-conductor" | "thermal-conductor-tui" => Some("conductor"),
-        // thermal-hud is now built into thermal-conductor.
-        "thermal-hud" => Some("hud"),
         "thermal-notify" => Some("notify"),
         _ => None,
     }
@@ -247,12 +243,13 @@ mod tests {
     #[test]
     fn binary_to_section_maps_known_services() {
         assert_eq!(binary_to_section("thermal-audio"), Some("audio"));
-        assert_eq!(binary_to_section("thermal-voice"), Some("voice"));
         assert_eq!(binary_to_section("thermal-dispatcher"), Some("dispatcher"));
-        assert_eq!(binary_to_section("thermal-bar"), Some("bar"));
         assert_eq!(binary_to_section("thermal-conductor"), Some("conductor"));
-        assert_eq!(binary_to_section("thermal-hud"), Some("hud"));
         assert_eq!(binary_to_section("thermal-notify"), Some("notify"));
+        // Removed daemons should return None
+        assert_eq!(binary_to_section("thermal-voice"), None);
+        assert_eq!(binary_to_section("thermal-bar"), None);
+        assert_eq!(binary_to_section("thermal-hud"), None);
     }
 
     #[test]

@@ -13,10 +13,10 @@ wake word detection ("Alfred"), and local Whisper STT. In listen mode,
 continuously monitors audio and dispatches transcripts to thermal-dispatcher.
 
 ## Socket / Pidfile
-- Audio socket: `/run/user/$UID/thermal/audio.sock`
-- Voice socket: `/run/user/$UID/thermal/voice.sock`
+- Audio socket: `/run/user/$UID/thermal/audio.sock` (TTS + voice commands)
 - Pidfile: `/run/user/$UID/thermal/audio.pid`
 - State file: `/tmp/thermal-voice-state.json` (state + RMS level, ~5Hz)
+- Echo suppression: in-process `Arc<AtomicBool>` (replaces former cross-daemon file polling)
 
 ## CLI Usage
 ```

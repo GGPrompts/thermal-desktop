@@ -8,9 +8,9 @@
 //! # State source: voice state file (separate chain)
 //!
 //! Voice state is a separate chain from agent session state. The file is
-//! written by `thermal-voice` and read directly by consumers (bar, HUD,
-//! audio). It does NOT flow through the conductor daemon's semantic event
-//! bus — see `thermal-core/src/claude_state.rs` header for details.
+//! written by `thermal-audio` (unified audio daemon) and read directly by
+//! consumers (bar, HUD). It does NOT flow through the conductor daemon's
+//! semantic event bus — see `thermal-core/src/claude_state.rs` header for details.
 
 use notify::{
     Event, EventKind, RecommendedWatcher, RecursiveMode, Result as NotifyResult, Watcher,

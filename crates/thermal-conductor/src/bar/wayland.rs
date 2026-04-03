@@ -516,14 +516,15 @@ fn execute_click_action(action: &ClickAction) {
                 tracing::warn!("XDG_RUNTIME_DIR not set, cannot toggle voice");
                 return;
             };
-            let sock_path = format!("{runtime_dir}/thermal/voice.sock");
+            // Voice is now part of the unified thermal-audio daemon (audio.sock).
+            let sock_path = format!("{runtime_dir}/thermal/audio.sock");
             // Fire-and-forget via a std thread since we're not on a tokio runtime.
             let _ = std::thread::Builder::new()
                 .name("voice-toggle".into())
                 .spawn(move || {
                     use std::io::Write;
                     if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&sock_path) {
-                        let _ = stream.write_all(b"toggle\n");
+                        let _ = stream.write_all(b"{\"command\":\"voice_toggle\"}\n");
                     }
                 });
         }

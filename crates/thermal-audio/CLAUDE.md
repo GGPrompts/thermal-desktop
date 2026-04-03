@@ -7,7 +7,7 @@ Combined audio daemon handling both playback (TTS) and capture (voice input). Re
 
 **Playback**: edge-tts based text-to-speech via Unix socket API at `/run/user/$UID/thermal/audio.sock`. 12-voice pool, per-agent voices, state transition alerts. rodio 0.20 for PipeWire-compatible playback.
 
-**Capture**: cpal audio capture with Silero ONNX VAD. Push-to-talk and always-listening modes. Wake word detection ("Alfred") via rustpotter. Local Whisper STT (batch) or WebSocket streaming STT. Voice commands via `/run/user/$UID/thermal/voice.sock`.
+**Capture**: cpal audio capture with Silero ONNX VAD. Push-to-talk and always-listening modes. Wake word detection ("Alfred") via rustpotter. Local Whisper STT (batch) or WebSocket streaming STT. Voice commands accepted on `audio.sock` (VoiceToggle, VoiceStart, VoiceStop, etc.).
 
 ## Modules
 - `main.rs` — TTS daemon, socket API, session announcements

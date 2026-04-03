@@ -119,7 +119,7 @@ struct TtsRequest {
     priority: Priority,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum Priority {
     Normal,
@@ -138,7 +138,7 @@ struct TtsResponse {
 }
 
 /// Extended socket protocol — discriminated union with backward compatibility.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum SocketMessage {
     /// TTS request (new-style with explicit action).
@@ -751,21 +751,27 @@ fn session_label(session: &ClaudeSessionState) -> String {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Voice subcommand client (sends to running daemon's voice.sock)
+// Voice subcommand client (sends to running daemon's audio.sock)
 // ---------------------------------------------------------------------------
 
 async fn send_voice_command(action: &str) -> Result<capture::VoiceSocketResponse> {
-    let sock = thermal_core::runtime::socket_path("voice");
+    let sock = thermal_core::runtime::socket_path("audio");
     let stream = tokio::net::UnixStream::connect(&sock)
         .await
-        .with_context(|| format!("connecting to voice socket at {}", sock.display()))?;
+        .with_context(|| format!("connecting to audio socket at {}", sock.display()))?;
 
     let (reader, mut writer) = stream.into_split();
 
-    let cmd = capture::VoiceSocketCommand {
-        action: action.to_string(),
+    // Map action names to SocketMessage variants (audio.sock format).
+    let msg_json = match action {
+        "toggle" => serde_json::to_string(&SocketMessage::VoiceToggle)?,
+        "start" => serde_json::to_string(&SocketMessage::VoiceStart)?,
+        "stop" => serde_json::to_string(&SocketMessage::VoiceStop)?,
+        "dispatch" => serde_json::to_string(&SocketMessage::VoiceDispatch)?,
+        "status" => serde_json::to_string(&SocketMessage::VoiceGetStatus)?,
+        other => anyhow::bail!("unknown voice action: {other}"),
     };
-    let mut msg = serde_json::to_string(&cmd)?;
+    let mut msg = msg_json;
     msg.push('\n');
     writer.write_all(msg.as_bytes()).await?;
     writer.shutdown().await?;
@@ -948,8 +954,8 @@ async fn async_main() -> Result<()> {
     let (voice_cmd_tx, mut voice_cmd_rx) =
         tokio::sync::mpsc::unbounded_channel::<capture::VoiceDaemonCommand>();
 
-    // Spawn voice.sock listener (accepts commands from `thermal-audio toggle` etc.)
-    let _voice_sock = capture::spawn_voice_socket_listener(voice_cmd_tx.clone()).await?;
+    // Voice commands are accepted on audio.sock (VoiceToggle, VoiceStart, etc.)
+    // — no separate voice.sock needed.
 
     // Spawn the audio.sock listener task.
     let socket_audio_state = Arc::clone(&audio_state);

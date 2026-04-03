@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# thermal-voice-toggle.sh — Toggle push-to-talk via thermal-voice daemon.
+# thermal-voice-toggle.sh — Toggle push-to-talk via thermal-audio daemon.
 # Designed for a Hyprland keybind (Super+Backslash).
 #
 # If not listening → sends "start" (begin recording)
@@ -9,13 +9,13 @@
 # Also starts the daemon if it is not running.
 #
 
-SOCKET="/run/user/${UID}/thermal/voice.sock"
+SOCKET="/run/user/${UID}/thermal/audio.sock"
 STATE_FILE="/tmp/thermal-voice-state.json"
 
 # --- Ensure daemon is running ---
 if [ ! -S "$SOCKET" ]; then
-    echo "Starting thermal-voice daemon..."
-    thermal-voice &
+    echo "Starting thermal-audio daemon..."
+    thermal-audio &
     disown
     # Give it a moment to bind the socket
     for i in 1 2 3 4 5; do
@@ -23,18 +23,18 @@ if [ ! -S "$SOCKET" ]; then
         sleep 0.3
     done
     if [ ! -S "$SOCKET" ]; then
-        notify-send -a "thermal-voice" -u critical "Voice daemon failed to start" \
+        notify-send -a "thermal-audio" -u critical "Audio daemon failed to start" \
             "Check journalctl or daemon logs" 2>/dev/null
         exit 1
     fi
 fi
 
 # --- Toggle using the native Rust subcommand ---
-RESULT=$(thermal-voice toggle 2>&1)
+RESULT=$(thermal-audio toggle 2>&1)
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
-    notify-send -a "thermal-voice" -t 3000 "Voice Error" "$RESULT" 2>/dev/null
+    notify-send -a "thermal-audio" -t 3000 "Voice Error" "$RESULT" 2>/dev/null
     exit 1
 fi
 
@@ -52,22 +52,22 @@ fi
 
 case "$STATE" in
     listening)
-        notify-send -a "thermal-voice" -t 2000 "Listening..." \
+        notify-send -a "thermal-audio" -t 2000 "Listening..." \
             "Press Super+\\ again to stop" 2>/dev/null
         ;;
     processing)
         if [ "$LABEL" = "dispatching" ]; then
-            notify-send -a "thermal-voice" -t 3000 "Dispatching..." \
+            notify-send -a "thermal-audio" -t 3000 "Dispatching..." \
                 "Sending to Claude" 2>/dev/null
         else
-            notify-send -a "thermal-voice" -t 2000 "Processing..." \
+            notify-send -a "thermal-audio" -t 2000 "Processing..." \
                 "Transcribing audio" 2>/dev/null
         fi
         ;;
     muted)
         # toggle just finished a stop — output is the transcript or error
         if [ -n "$RESULT" ]; then
-            notify-send -a "thermal-voice" -t 5000 "Typed" "$RESULT" 2>/dev/null
+            notify-send -a "thermal-audio" -t 5000 "Typed" "$RESULT" 2>/dev/null
         fi
         ;;
 esac

@@ -218,15 +218,25 @@ struct App {
 }
 
 impl App {
-    fn new(backend_pref: BackendPreference) -> Result<Self> {
+    fn new(
+        backend_pref: BackendPreference,
+        message_bus: &std::sync::Arc<crate::messages::MessageBus>,
+        bus_send_tx: std::sync::mpsc::SyncSender<thermal_core::message::Message>,
+    ) -> Result<Self> {
         let poller = ClaudeStatePoller::new()?;
 
+        let mut sessions_page = SessionsPage::new(backend_pref);
+        sessions_page.set_bus_handles(message_bus.subscribe(), bus_send_tx);
+
+        let mut chat_page = ChatPage::new();
+        chat_page.set_bus_receiver(message_bus.subscribe());
+
         let pages: Vec<Box<dyn TuiPage>> = vec![
-            Box::new(SessionsPage::new(backend_pref)),
+            Box::new(sessions_page),
             Box::new(ProfilesPage::new(backend_pref)),
             Box::new(ServicesPage::new()),
             Box::new(SettingsPage::new()),
-            Box::new(ChatPage::new()),
+            Box::new(chat_page),
         ];
 
         Ok(Self {
@@ -336,7 +346,30 @@ pub fn run(backend_pref: BackendPreference) -> Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(backend_pref)?;
+    // Initialize the internal message bus (replaces thermal-messages daemon).
+    let message_bus = std::sync::Arc::new(crate::messages::MessageBus::new(true)?);
+
+    // Create a sync -> async bridge: the TUI sends messages via this channel
+    // and a background thread drains them into the async MessageBus.
+    let (bus_send_tx, bus_send_rx) = std::sync::mpsc::sync_channel::<thermal_core::message::Message>(64);
+    {
+        let bus = std::sync::Arc::clone(&message_bus);
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime for message bus");
+            rt.block_on(async move {
+                while let Ok(msg) = bus_send_rx.recv() {
+                    bus.send(msg).await;
+                }
+                // Channel closed — flush persistence and exit.
+                bus.flush_persist().await;
+            });
+        });
+    }
+
+    let mut app = App::new(backend_pref, &message_bus, bus_send_tx)?;
 
     // Initial tick to populate sessions.
     app.tick();

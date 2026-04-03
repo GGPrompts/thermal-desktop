@@ -375,7 +375,7 @@ async fn execute_commander_tool(tool_name: &str, input: &Value) -> Result<String
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "thermal-messages",
+                "name": "thermal-conductor",
                 "version": env!("CARGO_PKG_VERSION"),
             }
         }
@@ -551,9 +551,8 @@ async fn kitty_send_text(window_match: &str, text: &str) -> Result<String> {
 // ---------------------------------------------------------------------------
 //
 // We re-implement the minimal protocol types here rather than depending on
-// thermal-conductor (which would pull in wgpu, alacritty_terminal, etc.).
-// The wire format is length-prefixed MessagePack, identical to protocol.rs
-// in thermal-conductor.
+// the full protocol module (which may pull in extra types). The wire format
+// is length-prefixed MessagePack, identical to protocol.rs.
 
 /// Request sent to the conductor daemon — only the variant we need.
 #[derive(Debug, Serialize)]
@@ -910,7 +909,7 @@ async fn dispatch_user(msg: &Message) -> Result<Message> {
         }
     }
 
-    // The message itself will be broadcast to subscribers by the daemon's
+    // The message itself will be broadcast to subscribers by the
     // normal ingest path. The UserBackend just returns an ack.
     Ok(make_response(msg, "delivered to user".to_string()))
 }
@@ -1030,7 +1029,7 @@ impl RouteTable {
 }
 
 // ---------------------------------------------------------------------------
-// Route dispatcher — called by the daemon after ingesting a message
+// Route dispatcher — called after ingesting a message
 // ---------------------------------------------------------------------------
 
 /// Attempt to route a message to the appropriate backend.
@@ -1072,7 +1071,7 @@ pub async fn route_message(msg: &Message, table: &RouteTable) -> Option<Message>
 
     if is_async {
         // Return TaskStatus::Submitted immediately.
-        // The actual dispatch happens in a background task (wired by the daemon).
+        // The actual dispatch happens in a background task (wired by the caller).
         let task_id = format!("task-{}", msg.seq);
         info!(task_id = %task_id, backend = backend.name(), "async dispatch — returning Submitted");
 
@@ -1111,8 +1110,8 @@ pub async fn route_message(msg: &Message, table: &RouteTable) -> Option<Message>
 /// Build a response message with from/to swapped.
 fn make_response(original: &Message, content: String) -> Message {
     Message {
-        seq: 0, // Will be assigned by daemon ingest
-        ts: 0,  // Will be assigned by daemon ingest
+        seq: 0, // Will be assigned by ingest
+        ts: 0,  // Will be assigned by ingest
         from: original.to.clone(),
         to: original.from.clone(),
         context_id: original.context_id.clone(),
@@ -1147,7 +1146,7 @@ mod tests {
         }
     }
 
-    // ── TrustConfig parsing ──────────────────────────────────────────────────
+    // -- TrustConfig parsing --
 
     #[test]
     fn trust_config_parse_basic() {
@@ -1200,7 +1199,7 @@ kill_claude = "BLOCK"
         }
     }
 
-    // ── MCP response parsing ─────────────────────────────────────────────────
+    // -- MCP response parsing --
 
     #[test]
     fn mcp_text_content_extracted() {
@@ -1232,7 +1231,7 @@ kill_claude = "BLOCK"
         assert!(parse_mcp_response("not json").is_err());
     }
 
-    // ── make_response ────────────────────────────────────────────────────────
+    // -- make_response --
 
     #[test]
     fn make_response_swaps_from_to() {
@@ -1260,7 +1259,7 @@ kill_claude = "BLOCK"
         assert_eq!(resp.project, Some("thermal-desktop".to_string()));
     }
 
-    // ── RouteTable ───────────────────────────────────────────────────────────
+    // -- RouteTable --
 
     #[test]
     fn route_table_has_all_backends() {
@@ -1282,7 +1281,7 @@ kill_claude = "BLOCK"
         assert!(!table.has_backend("nonexistent"));
     }
 
-    // ── route_message filtering ──────────────────────────────────────────────
+    // -- route_message filtering --
 
     #[tokio::test]
     async fn route_skips_subscribe_messages() {
@@ -1387,7 +1386,7 @@ kill_claude = "BLOCK"
         assert!(route_message(&msg, &table).await.is_none());
     }
 
-    // ── SystemBackend trust tier blocking ────────────────────────────────────
+    // -- SystemBackend trust tier blocking --
 
     #[tokio::test]
     async fn system_backend_blocks_tool() {
@@ -1416,10 +1415,8 @@ kill_claude = "BLOCK"
 
     #[test]
     fn system_backend_parses_plain_text_tool_name() {
-        // When content is not valid JSON, it's treated as a tool name
         let msg = sample_msg("system", "screenshot");
         let content = &msg.content;
-        // Replicate the parsing logic from dispatch_system:
         let (tool_name, _input) = if let Ok(parsed) = serde_json::from_str::<Value>(content) {
             let tool = parsed
                 .get("tool")
@@ -1445,7 +1442,7 @@ kill_claude = "BLOCK"
         assert_eq!(input["y"], 200);
     }
 
-    // ── Async dispatch task_id format ────────────────────────────────────────
+    // -- Async dispatch task_id format --
 
     #[tokio::test]
     async fn async_dispatch_task_id_includes_seq() {

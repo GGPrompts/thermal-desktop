@@ -1,6 +1,6 @@
 //! JSONL append-log persistence for the message bus.
 //!
-//! When `--persist` is enabled, every ingested message is appended to
+//! When persistence is enabled, every ingested message is appended to
 //! `~/.local/share/thermal/messages.jsonl`. On startup, the log is read
 //! back to populate the ring buffer with historical messages.
 //!
@@ -115,7 +115,7 @@ impl PersistWriter {
         Ok(())
     }
 
-    /// Rotate: flush, rename current → .1, open fresh file.
+    /// Rotate: flush, rename current -> .1, open fresh file.
     fn rotate(&mut self) -> Result<()> {
         self.writer.flush().context("flushing before rotation")?;
 
@@ -124,7 +124,7 @@ impl PersistWriter {
         rotated.push(".1");
         let rotated = PathBuf::from(rotated);
         std::fs::rename(&self.path, &rotated)
-            .with_context(|| format!("rotating {} → {}", self.path.display(), rotated.display()))?;
+            .with_context(|| format!("rotating {} -> {}", self.path.display(), rotated.display()))?;
 
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -231,13 +231,11 @@ mod tests {
 
     #[test]
     fn persist_write_and_load() {
-        // Use a temp dir to avoid polluting real data.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("thermal");
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("messages.jsonl");
 
-        // Write some messages directly.
         {
             let file = std::fs::OpenOptions::new()
                 .create(true)
@@ -254,9 +252,6 @@ mod tests {
             w.flush().unwrap();
         }
 
-        // Override HOME to point to temp.
-        // Instead, just test load_log reads from the path.
-        // We test the parsing logic directly.
         let content = std::fs::read_to_string(&log).unwrap();
         let msgs: Vec<Message> = content
             .lines()
@@ -276,7 +271,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("messages.jsonl");
 
-        // Create a writer manually pointing at our temp path.
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -290,18 +284,15 @@ mod tests {
             path: log.clone(),
         };
 
-        // Write 3 messages — should trigger rotation after the 2nd (hitting 10k).
         for i in 1..=3 {
             let msg = make_msg(i, &format!("rot {i}"));
             pw.append(&msg).unwrap();
         }
         pw.flush().unwrap();
 
-        // After rotation, the old file should exist as .1
         let rotated = dir.join("messages.jsonl.1");
         assert!(rotated.exists(), "rotated file should exist");
 
-        // The current log should have just 1 line (the 3rd message, post-rotation).
         let current = std::fs::read_to_string(&log).unwrap();
         let current_lines: Vec<&str> = current.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(current_lines.len(), 1);
@@ -325,12 +316,7 @@ mod tests {
 
     #[test]
     fn load_log_nonexistent_returns_empty() {
-        // load_log checks log_path() which uses HOME — but the function
-        // handles missing files gracefully.
-        // We just verify the code path doesn't panic.
         let msgs = load_log(100);
-        // May or may not be empty depending on whether the file exists,
-        // but it shouldn't panic.
         let _ = msgs;
     }
 }

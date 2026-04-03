@@ -1,9 +1,10 @@
-//! Chat panel: bus connection, @-mention parsing, message routing, autocomplete.
+//! Chat panel: bus subscription, @-mention parsing, message routing, autocomplete.
 
-use std::io::{BufRead, BufReader, Write as _};
-use std::os::unix::net::UnixStream;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
+
+use tokio::sync::broadcast;
 
 use thermal_core::ClaudeSessionState;
 use thermal_core::message::{AgentId, Message, MessageType};
@@ -11,77 +12,29 @@ use thermal_core::message::{AgentId, Message, MessageType};
 use super::SessionsPage;
 
 // ---------------------------------------------------------------------------
-// Messages socket path
+// Bus receiver wrapper
 // ---------------------------------------------------------------------------
 
-fn messages_socket_path() -> std::path::PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    std::path::PathBuf::from(format!("/run/user/{uid}/thermal/messages.sock"))
+/// Wrapper around a broadcast::Receiver for non-blocking polling from the
+/// synchronous TUI event loop.
+pub(in crate::tui) struct BusReceiver {
+    rx: broadcast::Receiver<Arc<Message>>,
 }
 
-// ---------------------------------------------------------------------------
-// Bus connection (subscriber)
-// ---------------------------------------------------------------------------
-
-/// Non-blocking connection to the messages daemon.
-pub(in crate::tui) struct BusConnection {
-    reader: BufReader<UnixStream>,
-    line_buf: String,
-}
-
-impl BusConnection {
-    /// Attempt to connect and send a Subscribe message.
-    pub(super) fn connect(since_seq: u64) -> Option<Self> {
-        let path = messages_socket_path();
-        let stream = UnixStream::connect(&path).ok()?;
-        stream.set_nonblocking(true).ok()?;
-
-        let subscribe = Message {
-            seq: 0,
-            ts: 0,
-            from: AgentId::new("user", "tui"),
-            to: AgentId::new("daemon", "bus"),
-            context_id: None,
-            project: None,
-            content: String::new(),
-            msg_type: MessageType::Subscribe {
-                since_seq: if since_seq > 0 { Some(since_seq) } else { None },
-            },
-            metadata: Default::default(),
-        };
-
-        let mut json = serde_json::to_string(&subscribe).ok()?;
-        json.push('\n');
-
-        stream.set_nonblocking(false).ok()?;
-        let mut write_stream = stream.try_clone().ok()?;
-        write_stream.write_all(json.as_bytes()).ok()?;
-        stream.set_nonblocking(true).ok()?;
-
-        Some(Self {
-            reader: BufReader::new(stream),
-            line_buf: String::new(),
-        })
+impl BusReceiver {
+    pub(in crate::tui) fn new(rx: broadcast::Receiver<Arc<Message>>) -> Self {
+        Self { rx }
     }
 
-    /// Try to read any available messages (non-blocking).
+    /// Drain all available messages without blocking.
     pub(super) fn poll(&mut self) -> Vec<Message> {
         let mut msgs = Vec::new();
         loop {
-            self.line_buf.clear();
-            match self.reader.read_line(&mut self.line_buf) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = self.line_buf.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Ok(msg) = serde_json::from_str::<Message>(trimmed) {
-                        msgs.push(msg);
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+            match self.rx.try_recv() {
+                Ok(arc_msg) => msgs.push((*arc_msg).clone()),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
         msgs
@@ -130,21 +83,14 @@ pub(super) fn parse_at_mention_with_sessions(
     (None, trimmed.to_string())
 }
 
-/// Send a message to the message bus via messages.sock.
-pub(super) fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool {
-    let path = messages_socket_path();
-    let mut stream = match UnixStream::connect(&path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let _ = stream.set_nonblocking(false);
-
+/// Build a Message for sending to the bus.
+fn build_bus_message(text: &str, target: Option<&AgentId>) -> Message {
     let to = match target {
         Some(id) => id.clone(),
         None => AgentId::new("*", "broadcast"),
     };
 
-    let msg = Message {
+    Message {
         seq: 0,
         ts: 0,
         from: AgentId::new("user", "tui"),
@@ -154,13 +100,7 @@ pub(super) fn send_to_message_bus(text: &str, target: Option<&AgentId>) -> bool 
         content: text.to_string(),
         msg_type: MessageType::AgentMsg,
         metadata: Default::default(),
-    };
-    let mut json = match serde_json::to_string(&msg) {
-        Ok(j) => j,
-        Err(_) => return false,
-    };
-    json.push('\n');
-    stream.write_all(json.as_bytes()).is_ok()
+    }
 }
 
 /// Maximum recent messages to display in the chat area.
@@ -178,24 +118,20 @@ pub(in crate::tui) struct ChatEntry {
 // ---------------------------------------------------------------------------
 
 impl SessionsPage {
-    /// Attempt to connect to the message bus (throttled to every 3 seconds).
-    pub(super) fn try_bus_connect(&mut self) {
-        if let Some(last) = self.last_bus_connect_attempt {
-            if last.elapsed().as_secs() < 3 {
-                return;
-            }
-        }
-        self.last_bus_connect_attempt = Some(Instant::now());
-
-        if let Some(conn) = BusConnection::connect(self.last_bus_seq) {
-            self.bus_connection = Some(conn);
-        }
+    /// Set the bus handles (broadcast receiver + sync sender).
+    pub fn set_bus_handles(
+        &mut self,
+        rx: broadcast::Receiver<Arc<Message>>,
+        tx: std::sync::mpsc::SyncSender<Message>,
+    ) {
+        self.bus_receiver = Some(BusReceiver::new(rx));
+        self.bus_sender = Some(tx);
     }
 
-    /// Poll the bus connection for incoming messages and add them to chat_messages.
+    /// Poll the bus receiver for incoming messages and add them to chat_messages.
     pub(super) fn poll_bus_messages(&mut self) {
-        let msgs = if let Some(ref mut conn) = self.bus_connection {
-            let msgs = conn.poll();
+        let msgs = if let Some(ref mut receiver) = self.bus_receiver {
+            let msgs = receiver.poll();
             if msgs.is_empty() {
                 return;
             }
@@ -239,7 +175,8 @@ impl SessionsPage {
 
         if let Some(ref target) = mention_target {
             let label = format!("you \u{2192} @{}", target);
-            let ok = send_to_message_bus(&cleaned_content, Some(target));
+            let msg = build_bus_message(&cleaned_content, Some(target));
+            let ok = self.bus_sender.as_ref().map_or(false, |tx| tx.try_send(msg).is_ok());
             let entry = ChatEntry {
                 from_label: label,
                 content: cleaned_content.clone(),
@@ -278,7 +215,8 @@ impl SessionsPage {
             };
 
             if selected_targets.is_empty() {
-                let ok = send_to_message_bus(&text, None);
+                let msg = build_bus_message(&text, None);
+                let ok = self.bus_sender.as_ref().map_or(false, |tx| tx.try_send(msg).is_ok());
                 let entry = ChatEntry {
                     from_label: "you \u{2192} bus".to_string(),
                     content: text.clone(),

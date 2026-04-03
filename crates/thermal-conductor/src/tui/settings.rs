@@ -45,7 +45,6 @@ fn binary_to_section(binary: &str) -> Option<&'static str> {
         "thermal-conductor" | "thermal-conductor-tui" => Some("conductor"),
         "thermal-hud" => Some("hud"),
         "thermal-notify" => Some("notify"),
-        "thermal-messages" => Some("messages"),
         _ => None,
     }
 }
@@ -253,7 +252,6 @@ mod tests {
         assert_eq!(binary_to_section("thermal-conductor"), Some("conductor"));
         assert_eq!(binary_to_section("thermal-hud"), Some("hud"));
         assert_eq!(binary_to_section("thermal-notify"), Some("notify"));
-        assert_eq!(binary_to_section("thermal-messages"), Some("messages"));
     }
 
     #[test]

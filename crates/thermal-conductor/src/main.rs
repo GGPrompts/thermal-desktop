@@ -22,6 +22,7 @@ mod inject;
 mod input;
 mod kitty;
 mod kitty_graphics;
+pub(crate) mod messages;
 mod monitor;
 mod osc633;
 mod persist;
@@ -774,7 +775,9 @@ async fn cmd_say(text: String, voice: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Send a message to the thermal-messages bus and print the response.
+/// Send a message through an ephemeral message bus instance.
+/// The bus handles routing (e.g. @system -> thermal-commander) and
+/// prints any response.
 async fn cmd_dispatch(target: Option<String>, message: Vec<String>) -> Result<()> {
     let target = target.unwrap_or_else(|| "system".to_string());
     let content = message.join(" ");
@@ -791,65 +794,46 @@ async fn cmd_dispatch(target: Option<String>, message: Vec<String>) -> Result<()
         metadata: HashMap::new(),
     };
 
-    let sock = thermal_core::runtime::socket_path("messages");
-    let stream = match tokio::net::UnixStream::connect(&sock).await {
-        Ok(s) => s,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::ConnectionRefused && sock.exists() {
-                let _ = std::fs::remove_file(&sock);
-                bail!(
-                    "thermal-messages socket exists at {} but daemon is not responding — removed stale socket",
-                    sock.display()
-                );
-            }
-            if e.kind() == std::io::ErrorKind::NotFound || !sock.exists() {
-                bail!(
-                    "thermal-messages socket not found at {} — is the daemon running?",
-                    sock.display()
-                );
-            }
-            return Err(e).with_context(|| format!("could not connect to {}", sock.display()));
-        }
-    };
+    // Create an ephemeral bus (no persistence for one-shot dispatch).
+    let bus = std::sync::Arc::new(messages::MessageBus::new(false)?);
 
-    let (reader, mut writer) = stream.into_split();
+    // Subscribe before sending so we can capture the routing response.
+    let mut rx = bus.subscribe();
 
-    // Send JSONL message.
-    let json = serde_json::to_string(&msg).context("serializing message")?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    bus.send(msg).await;
 
-    // Read one response line.
-    let mut lines = tokio::io::BufReader::new(reader).lines();
-    match lines.next_line().await? {
-        Some(line) => {
-            // Try to pretty-print the content field; fall back to raw JSON.
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(ok) = val.get("ok") {
-                    if ok.as_bool() == Some(true) {
-                        println!("ok");
-                    } else if let Some(err) = val.get("error") {
-                        eprintln!("error: {}", err.as_str().unwrap_or(&line));
-                        std::process::exit(1);
-                    } else {
-                        println!("{}", serde_json::to_string_pretty(&val)?);
+    // Drain broadcast channel to find the response message.
+    // Give routing up to 30 seconds to complete.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(arc_msg) => {
+                        // Skip the original message (seq 1) — look for the response.
+                        if arc_msg.seq > 1 {
+                            if !arc_msg.content.is_empty() {
+                                println!("{}", arc_msg.content);
+                            } else {
+                                println!("ok");
+                            }
+                            break;
+                        }
                     }
-                } else if let Some(content) = val.get("content") {
-                    println!("{}", content.as_str().unwrap_or(&line));
-                } else {
-                    println!("{}", serde_json::to_string_pretty(&val)?);
+                    Err(_) => {
+                        println!("ok");
+                        break;
+                    }
                 }
-            } else {
-                println!("{line}");
             }
-        }
-        None => {
-            eprintln!("no response from daemon");
-            std::process::exit(1);
+            _ = tokio::time::sleep_until(deadline) => {
+                eprintln!("timeout waiting for routing response");
+                std::process::exit(1);
+            }
         }
     }
 
+    bus.flush_persist().await;
     Ok(())
 }
 
@@ -867,13 +851,6 @@ struct DaemonSpec {
 }
 
 static DAEMONS: &[DaemonSpec] = &[
-    DaemonSpec {
-        name: "thermal-messages",
-        short_name: "messages",
-        has_pidfile: true,
-        has_socket: true,
-        restart_cmd: Some(&["thermal-messages"]),
-    },
     DaemonSpec {
         name: "thermal-audio",
         short_name: "audio",
@@ -1585,7 +1562,7 @@ async fn cmd_config() -> Result<()> {
         },
     );
 
-    let socket_names = ["conductor", "voice", "dispatcher", "audio", "messages"];
+    let socket_names = ["conductor", "voice", "dispatcher", "audio"];
     for name in socket_names {
         let sock = thermal_core::runtime::socket_path(name);
         let exists = sock.exists();
@@ -2189,13 +2166,6 @@ mod doctor_tests {
             runtime_dir: std::path::PathBuf::from("/run/user/1000/thermal"),
             daemon_results: vec![
                 DaemonCheckResult {
-                    name: "thermal-messages".to_string(),
-                    health: DaemonHealth::Running,
-                    pid: Some(1234),
-                    pid_status: Some(PidStatus::Alive),
-                    sock_status: Some(SocketStatus::Connectable),
-                },
-                DaemonCheckResult {
                     name: "thermal-audio".to_string(),
                     health: DaemonHealth::Dead,
                     pid: Some(9999),
@@ -2211,8 +2181,8 @@ mod doctor_tests {
                 },
             ],
             socket_files: vec![SocketFileInfo {
-                name: "messages.sock".to_string(),
-                path: std::path::PathBuf::from("/run/user/1000/thermal/messages.sock"),
+                name: "conductor.sock".to_string(),
+                path: std::path::PathBuf::from("/run/user/1000/thermal/conductor.sock"),
                 status: SocketStatus::Connectable,
             }],
             backend_mode: "Standalone PTY (no conductor socket)".to_string(),

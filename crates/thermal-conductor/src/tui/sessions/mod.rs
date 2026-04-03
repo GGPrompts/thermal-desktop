@@ -132,9 +132,9 @@ pub(in crate::tui) struct SessionsPage {
     pub(super) panel_rect_chat: Rect,
 
     // -- Bus subscriber --
-    pub(super) bus_connection: Option<BusConnection>,
+    pub(super) bus_receiver: Option<BusReceiver>,
+    pub(super) bus_sender: Option<std::sync::mpsc::SyncSender<thermal_core::message::Message>>,
     pub(super) last_bus_seq: u64,
-    pub(super) last_bus_connect_attempt: Option<Instant>,
 
     // -- Daemon semantic subscription --
     pub(super) daemon_sub_rx: Option<tokio::sync::watch::Receiver<Vec<ClaudeSessionState>>>,
@@ -194,9 +194,9 @@ impl SessionsPage {
             panel_rect_agent: Rect::default(),
             panel_rect_preview: Rect::default(),
             panel_rect_chat: Rect::default(),
-            bus_connection: None,
+            bus_receiver: None,
+            bus_sender: None,
             last_bus_seq: 0,
-            last_bus_connect_attempt: None,
             daemon_sub_rx,
             preview_subscriber: None,
             preview_attached_daemon_id: None,
@@ -668,9 +668,6 @@ impl TuiPage for SessionsPage {
         self.fetch_preview();
 
         // Poll bus for incoming messages.
-        if self.bus_connection.is_none() {
-            self.try_bus_connect();
-        }
         self.poll_bus_messages();
 
         // Clear chat status after 4 seconds.
@@ -1315,9 +1312,9 @@ mod tests {
             panel_rect_agent: Rect::default(),
             panel_rect_preview: Rect::default(),
             panel_rect_chat: Rect::default(),
-            bus_connection: None,
+            bus_receiver: None,
+            bus_sender: None,
             last_bus_seq: 0,
-            last_bus_connect_attempt: None,
             preview_content: Vec::new(),
             preview_scroll: 0,
             preview_pinned: false,

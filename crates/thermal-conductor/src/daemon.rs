@@ -919,6 +919,12 @@ impl Daemon {
             Request::SubscribeEvents { .. } => Response::Error {
                 message: "SubscribeEvents must be handled at the connection level".into(),
             },
+
+            // MessageForward is handled at the connection level when a MessageBus
+            // is available (e.g. in the TUI). The daemon doesn't own a bus yet.
+            Request::MessageForward { .. } => Response::Error {
+                message: "MessageForward not supported in daemon mode (bus is internal to TUI)".into(),
+            },
         }
     }
 

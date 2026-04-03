@@ -1,12 +1,11 @@
 //! Chat page — read-only message bus log for the TUI.
 //!
-//! Connects to `messages.sock` and displays the message stream as a scrollable
-//! chat log. Input has moved to the Sessions tab inline chat bar.
+//! Subscribes to the internal MessageBus broadcast channel and displays the
+//! message stream as a scrollable chat log. Input has moved to the Sessions
+//! tab inline chat bar.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Write as _};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ratatui::{
@@ -16,6 +15,8 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
+
+use tokio::sync::broadcast;
 
 use thermal_core::{
     ClaudeStatePoller,
@@ -62,80 +63,32 @@ fn agent_color(agent_type: &str) -> Color {
 }
 
 // ---------------------------------------------------------------------------
-// Socket path
+// Bus receiver wrapper
 // ---------------------------------------------------------------------------
 
-fn messages_socket_path() -> PathBuf {
-    let uid = nix::unistd::getuid().as_raw();
-    PathBuf::from(format!("/run/user/{uid}/thermal/messages.sock"))
+/// Wrapper around a broadcast::Receiver for non-blocking polling from the
+/// synchronous TUI event loop.
+struct BusReceiver {
+    rx: broadcast::Receiver<Arc<Message>>,
 }
 
-// ---------------------------------------------------------------------------
-// Connection state
-// ---------------------------------------------------------------------------
-
-/// Non-blocking connection to the messages daemon.
-struct BusConnection {
-    reader: BufReader<UnixStream>,
-    /// Buffer for partial line reads.
-    line_buf: String,
-}
-
-impl BusConnection {
-    /// Attempt to connect and send a Subscribe message.
-    fn connect(since_seq: u64) -> Option<Self> {
-        let path = messages_socket_path();
-        let stream = UnixStream::connect(&path).ok()?;
-        stream.set_nonblocking(true).ok()?;
-
-        // Build subscribe message.
-        let subscribe = Message {
-            seq: 0,
-            ts: 0,
-            from: AgentId::new("user", "tui"),
-            to: AgentId::new("daemon", "bus"),
-            context_id: None,
-            project: None,
-            content: String::new(),
-            msg_type: MessageType::Subscribe {
-                since_seq: if since_seq > 0 { Some(since_seq) } else { None },
-            },
-            metadata: Default::default(),
-        };
-
-        let mut json = serde_json::to_string(&subscribe).ok()?;
-        json.push('\n');
-
-        // Briefly set blocking for the subscribe write.
-        stream.set_nonblocking(false).ok()?;
-        let mut write_stream = stream.try_clone().ok()?;
-        write_stream.write_all(json.as_bytes()).ok()?;
-        stream.set_nonblocking(true).ok()?;
-
-        Some(Self {
-            reader: BufReader::new(stream),
-            line_buf: String::new(),
-        })
+impl BusReceiver {
+    fn new(rx: broadcast::Receiver<Arc<Message>>) -> Self {
+        Self { rx }
     }
 
-    /// Try to read any available messages (non-blocking).
+    /// Drain all available messages without blocking.
     fn poll(&mut self) -> Vec<Message> {
         let mut msgs = Vec::new();
         loop {
-            self.line_buf.clear();
-            match self.reader.read_line(&mut self.line_buf) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    let trimmed = self.line_buf.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if let Ok(msg) = serde_json::from_str::<Message>(trimmed) {
-                        msgs.push(msg);
-                    }
+            match self.rx.try_recv() {
+                Ok(arc_msg) => msgs.push((*arc_msg).clone()),
+                Err(broadcast::error::TryRecvError::Empty) => break,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    // Skip over dropped messages and continue.
+                    continue;
                 }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break, // Connection lost
+                Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
         msgs
@@ -250,12 +203,12 @@ const MAX_SCROLLBACK: usize = 1000;
 pub struct ChatPage {
     /// Chat message entries.
     entries: VecDeque<ChatEntry>,
-    /// Connection to messages.sock (None if not connected).
-    conn: Option<BusConnection>,
-    /// Highest seen sequence number (for replay on reconnect).
+    /// Broadcast receiver from the internal MessageBus (None if bus not yet provided).
+    receiver: Option<BusReceiver>,
+    /// Highest seen sequence number.
     last_seq: u64,
-    /// Last connection attempt time (for retry throttling).
-    last_connect_attempt: Option<Instant>,
+    /// Whether we've already connected (received a receiver).
+    connected: bool,
 
     /// Scroll offset from bottom (0 = pinned to bottom).
     scroll_offset: usize,
@@ -275,9 +228,9 @@ impl ChatPage {
     pub fn new() -> Self {
         Self {
             entries: VecDeque::new(),
-            conn: None,
+            receiver: None,
             last_seq: 0,
-            last_connect_attempt: None,
+            connected: false,
             scroll_offset: 0,
             scroll_pinned: true,
             filter_active: false,
@@ -286,34 +239,18 @@ impl ChatPage {
         }
     }
 
-    /// Attempt to connect to the message bus.
-    fn try_connect(&mut self) {
-        // Throttle connection attempts to every 3 seconds.
-        if let Some(last) = self.last_connect_attempt {
-            if last.elapsed().as_secs() < 3 {
-                return;
-            }
-        }
-        self.last_connect_attempt = Some(Instant::now());
-
-        match BusConnection::connect(self.last_seq) {
-            Some(conn) => {
-                self.conn = Some(conn);
-                self.status_msg = Some(("Connected to message bus".into(), false, Instant::now()));
-            }
-            None => {
-                // Not an error — daemon may not be running.
-            }
-        }
+    /// Provide a broadcast receiver from the internal MessageBus.
+    pub fn set_bus_receiver(&mut self, rx: broadcast::Receiver<Arc<Message>>) {
+        self.receiver = Some(BusReceiver::new(rx));
+        self.connected = true;
+        self.status_msg = Some(("Connected to message bus".into(), false, Instant::now()));
     }
 
     /// Poll for new messages from the bus.
     fn poll_messages(&mut self) {
-        let msgs = if let Some(ref mut conn) = self.conn {
-            let msgs = conn.poll();
+        let msgs = if let Some(ref mut receiver) = self.receiver {
+            let msgs = receiver.poll();
             if msgs.is_empty() {
-                // Check if connection is still alive by looking at poll result.
-                // On actual EOF the next poll will also return empty.
                 return;
             }
             msgs
@@ -336,7 +273,6 @@ impl ChatPage {
         // Trim scrollback.
         while self.entries.len() > MAX_SCROLLBACK {
             self.entries.pop_front();
-            // Adjust scroll offset if needed.
             if self.scroll_offset > 0 {
                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
             }
@@ -382,12 +318,7 @@ impl TuiPage for ChatPage {
     }
 
     fn tick(&mut self, _poller: &mut ClaudeStatePoller) {
-        // Ensure we have a connection.
-        if self.conn.is_none() {
-            self.try_connect();
-        }
-
-        // Poll for new messages.
+        // Poll for new messages from the broadcast channel.
         self.poll_messages();
 
         // Clear status message after 4 seconds.
@@ -401,7 +332,7 @@ impl TuiPage for ChatPage {
     fn render(&mut self, f: &mut Frame, area: Rect) {
         f.render_widget(Block::default().style(Style::default().bg(BG)), area);
 
-        let connected = self.conn.is_some();
+        let connected = self.connected;
 
         // Layout: title | messages | filter bar (optional) | status
         let filter_height = if self.filter_active { 1 } else { 0 };
@@ -664,7 +595,7 @@ mod tests {
     #[test]
     fn chat_page_starts_disconnected() {
         let page = ChatPage::new();
-        assert!(page.conn.is_none());
+        assert!(page.receiver.is_none());
         assert_eq!(page.entries.len(), 0);
         assert_eq!(page.last_seq, 0);
     }
@@ -760,13 +691,6 @@ mod tests {
             page.entries.pop_front();
         }
         assert_eq!(page.entries.len(), MAX_SCROLLBACK);
-    }
-
-    #[test]
-    fn messages_socket_path_is_under_thermal() {
-        let path = messages_socket_path();
-        let path_str = path.to_str().unwrap();
-        assert!(path_str.ends_with("/thermal/messages.sock"));
     }
 
     #[test]

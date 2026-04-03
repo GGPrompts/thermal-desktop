@@ -310,6 +310,14 @@ pub enum Request {
 
     /// Connection health check — daemon responds with `Pong`.
     Ping,
+
+    /// Forward a message to the internal message bus (replaces messages.sock).
+    /// External callers (e.g. thermal-dispatcher's route tool) use this to
+    /// inject messages into the bus without a separate socket.
+    MessageForward {
+        /// The message to ingest into the bus.
+        message: thermal_core::message::Message,
+    },
 }
 
 // ── Daemon → Client ──────────────────────────────────────────────────────────
@@ -384,6 +392,9 @@ pub enum Response {
 
     /// Health check response.
     Pong,
+
+    /// Acknowledgment that a MessageForward was ingested into the bus.
+    MessageForwarded,
 }
 
 // ── Supporting types ─────────────────────────────────────────────────────────

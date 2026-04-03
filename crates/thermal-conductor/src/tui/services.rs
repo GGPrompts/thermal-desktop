@@ -161,14 +161,6 @@ const SERVICES: &[ServiceDef] = &[
         )),
     },
     ServiceDef {
-        binary: "thermal-messages",
-        description: "Agent message bus",
-        pid_source: PidSource::Pidfile("messages.pid"),
-        command: None,
-        args: &[],
-        doc_content: Some(include_str!("../../../../docs/daemons/thermal-messages.md")),
-    },
-    ServiceDef {
         binary: "thermal-wallpaper",
         description: "Animated thermal wallpaper",
         pid_source: PidSource::Pidfile("wallpaper.pid"),
@@ -454,7 +446,6 @@ fn cleanup_stale_socket(def: &ServiceDef) {
     // Map binary name to socket filename.
     let sock_name = match def.binary {
         "thermal-dispatcher" => Some("dispatcher.sock"),
-        "thermal-messages" => Some("messages.sock"),
         "thermal-audio" => Some("audio.sock"),
         "thermal-voice" => Some("voice.sock"),
         "thermal-conductor" => Some("conductor.sock"),
@@ -1176,7 +1167,7 @@ mod tests {
 
     #[test]
     fn services_count_matches_expected() {
-        assert_eq!(SERVICES.len(), 11);
+        assert_eq!(SERVICES.len(), 10);
     }
 
     #[test]

@@ -1678,6 +1678,9 @@ pub async fn run_daemon() -> Result<()> {
     // ── State file watcher — single inotify for all consumers ──────────
     spawn_state_file_watcher(Arc::clone(&daemon));
 
+    // ── Swarm watcher — auto-spawn terminal windows for subagents ─────
+    crate::swarm_watcher::spawn_swarm_watcher(Arc::clone(&daemon.event_bus));
+
     // Delegate to the shared accept loop.
     let daemon = run_daemon_on(listener, shutdown_rx, Some(daemon)).await?;
 

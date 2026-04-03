@@ -33,6 +33,7 @@ mod protocol;
 mod pty;
 mod semantic_state;
 mod structured_output;
+mod swarm_watcher;
 mod terminal;
 pub(crate) mod tui;
 mod window;

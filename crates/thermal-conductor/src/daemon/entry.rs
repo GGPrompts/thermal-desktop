@@ -145,10 +145,11 @@ pub async fn run_daemon() -> Result<()> {
     thermal_core::runtime::ensure_runtime_dir()
         .with_context(|| "Failed to create thermal runtime directory")?;
 
-    // Single-instance guard: exit if another conductor daemon is already running.
-    thermal_core::runtime::enforce_single_instance("conductor");
+    // Single-instance guard: flock-based (atomic, no TOCTOU race).
+    // The lock is released automatically when _instance_lock is dropped (process exit).
+    let _instance_lock = thermal_core::runtime::acquire_instance_lock("conductor");
 
-    // Write pidfile for this instance.
+    // Write pidfile for this instance (still useful for diagnostics / pgrep).
     let pidfile_path = thermal_core::runtime::pidfile_path("conductor");
     thermal_core::runtime::write_pidfile("conductor", &pidfile_path)
         .with_context(|| "Failed to write conductor pidfile")?;

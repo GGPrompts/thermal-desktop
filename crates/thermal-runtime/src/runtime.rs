@@ -210,6 +210,93 @@ pub fn enforce_single_instance_at(display_name: &str, path: &Path) {
     }
 }
 
+// ── flock-based single-instance guard ─────────────────────────────────────
+
+/// Return the path for a daemon's lockfile (e.g. `"conductor"` -> `.../conductor.lock`).
+pub fn lockfile_path(name: &str) -> PathBuf {
+    runtime_dir().join(format!("{name}.lock"))
+}
+
+/// Atomic single-instance guard using `flock()`.
+///
+/// Acquires an exclusive non-blocking lock on a lockfile in the runtime
+/// directory. Unlike pidfile-based guards, `flock()` is atomic (no TOCTOU
+/// race) and the kernel automatically releases the lock when the process
+/// exits (even on SIGKILL / crash).
+///
+/// Returns the held `File` handle — the lock is released when this handle
+/// is dropped. Callers **must** keep the returned value alive for the
+/// lifetime of the daemon.
+///
+/// If another instance already holds the lock, prints a message to stderr
+/// and calls `std::process::exit(0)`.
+pub fn acquire_instance_lock(daemon_name: &str) -> fs::File {
+    let path = lockfile_path(daemon_name);
+    acquire_instance_lock_at(daemon_name, &path)
+}
+
+/// Atomic single-instance guard using an explicit lockfile path.
+///
+/// Uses `Flock::lock` from nix. The returned `File` keeps the flock held
+/// (via `into_raw_fd` -> `from_raw_fd` to avoid `Flock<T>` Drop unlocking).
+pub fn acquire_instance_lock_at(display_name: &str, path: &Path) -> fs::File {
+    use nix::fcntl::{Flock, FlockArg};
+
+    // Ensure the runtime directory exists.
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .truncate(false)
+        .open(path)
+        .unwrap_or_else(|e| {
+            eprintln!("{display_name}: failed to open lockfile {}: {e}", path.display());
+            std::process::exit(1);
+        });
+
+    // Try non-blocking exclusive lock.
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(mut locked) => {
+            // Write our PID into the lockfile for diagnostics (not used for guard logic).
+            use std::io::{Seek, Write};
+            let _ = locked.set_len(0);
+            let _ = locked.seek(std::io::SeekFrom::Start(0));
+            let _ = write!(locked, "{}", std::process::id());
+            info!(
+                daemon = display_name,
+                path = %path.display(),
+                "Acquired instance lock"
+            );
+            // Extract the raw fd, then forget the Flock wrapper to prevent
+            // its Drop from calling LOCK_UN. Reconstruct a plain File that
+            // keeps the fd (and therefore the flock) open. The lock is
+            // released when the File is dropped or the process exits.
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let fd = locked.as_raw_fd();
+            std::mem::forget(locked);
+            // SAFETY: fd is a valid open file descriptor we own. We skipped
+            // the Flock destructor, so the flock is still held.
+            unsafe { fs::File::from_raw_fd(fd) }
+        }
+        Err((_file, _errno)) => {
+            // Read the PID from the lockfile for a better error message.
+            let holder_pid = fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            if let Some(pid) = holder_pid {
+                eprintln!("{display_name} already running (pid {pid}, locked). Exiting.");
+            } else {
+                eprintln!("{display_name} already running (lockfile held). Exiting.");
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
 // ── Client-side stale socket detection ──────────────────────────────────────
 
 /// Try to connect to a daemon socket. If the socket file exists but the daemon

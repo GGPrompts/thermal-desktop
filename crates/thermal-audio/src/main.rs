@@ -929,10 +929,10 @@ async fn async_main() -> Result<()> {
         return Ok(());
     }
 
-    // Daemon mode — single-instance guard via pidfile.
+    // Daemon mode — single-instance guard via flock (atomic, no TOCTOU race).
     thermal_core::runtime::ensure_runtime_dir()?;
+    let _instance_lock = thermal_core::runtime::acquire_instance_lock("audio");
     let pidfile = thermal_core::runtime::pidfile_path("audio");
-    thermal_core::runtime::enforce_single_instance("thermal-audio");
     thermal_core::runtime::write_pidfile("thermal-audio", &pidfile)
         .with_context(|| format!("writing pidfile {:?}", pidfile))?;
 

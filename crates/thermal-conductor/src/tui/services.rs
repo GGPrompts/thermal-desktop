@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
-use nix::sys::signal::{self, Signal};
+use nix::sys::signal;
 use nix::unistd::Pid;
 
 use ratatui::{
@@ -290,130 +290,26 @@ fn count_instances(def: &ServiceDef) -> u32 {
 // ---------------------------------------------------------------------------
 
 fn start_service(def: &ServiceDef) -> Result<(), String> {
-    // Try systemctl first; fall through to direct start if the unit isn't available.
-    if let Some(unit) = def.systemd_unit {
-        if systemctl_action("start", unit, def.binary).is_ok() {
-            return Ok(());
-        }
-    }
-
-    // Fallback: direct process management.
-    start_service_direct(def)
-}
-
-/// Start a service via systemctl --user.
-fn systemctl_action(action: &str, unit: &str, binary: &str) -> Result<(), String> {
-    let output = Command::new("systemctl")
-        .args(["--user", action, unit])
-        .output()
-        .map_err(|e| format!("systemctl {} failed: {}", action, e))?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last_line = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("unknown error");
-        Err(format!("{}: {}", binary, last_line))
-    }
-}
-
-/// Direct start via setsid (fallback for services without systemd units).
-fn start_service_direct(def: &ServiceDef) -> Result<(), String> {
-    // Clean up stale pidfile if the process is dead but the file remains.
-    if let PidSource::Pidfile(filename) = &def.pid_source {
-        let pidfile = runtime_dir().join(filename);
-        if pidfile.exists() && read_pid_from_file(filename).is_none() {
-            let _ = std::fs::remove_file(&pidfile);
-        }
-    }
-
+    let short_name = binary_to_short_name(def.binary);
     let program = def.command.unwrap_or(def.binary);
 
-    let stderr_file =
-        tempfile::NamedTempFile::new().map_err(|e| format!("Failed to create temp file: {e}"))?;
-    let stderr_fd = stderr_file
-        .as_file()
-        .try_clone()
-        .map_err(|e| format!("Failed to clone stderr fd: {e}"))?;
-
-    let mut command = Command::new("setsid");
-    command
-        .arg("--fork")
-        .arg(program)
-        .args(def.args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_fd))
-        .env("PATH", ensure_path());
-    let result = command.spawn();
-    match result {
-        Ok(_) => {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let status = get_service_status(def);
-            if status.running {
-                Ok(())
-            } else {
-                let stderr_output = fs::read_to_string(stderr_file.path()).unwrap_or_default();
-                let hint = if stderr_output.is_empty() {
-                    format!("{} exited immediately (check logs)", def.binary)
-                } else {
-                    let last_line = stderr_output
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("unknown error");
-                    format!("{}: {}", def.binary, last_line)
-                };
-                Err(hint)
-            }
-        }
-        Err(e) => Err(format!(
-            "Failed to start {} ({}): {}",
-            def.binary, program, e
-        )),
-    }
+    // Unified path: systemctl when managed, setsid fallback otherwise.
+    crate::daemon_lifecycle::start_daemon(short_name, def.binary, program, def.args)
 }
 
-fn stop_service(def: &ServiceDef, status: &ServiceStatus) -> Result<(), String> {
-    // Try systemctl first; fall through to direct kill if the unit isn't active.
-    if let Some(unit) = def.systemd_unit {
-        if systemctl_action("stop", unit, def.binary).is_ok() {
-            cleanup_stale_socket(def);
-            return Ok(());
-        }
-    }
-
-    // Fallback: direct process management.
-    if status.duplicate_count > 1 {
-        return kill_all_instances(def);
-    }
-
-    if let Some(pid) = status.pid {
-        match signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-            Ok(()) => {
-                cleanup_stale_socket(def);
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to kill PID {}: {}", pid, e)),
-        }
-    } else {
-        kill_all_instances(def)
-    }
-}
-
-/// Kill ALL instances of a service via pkill, then clean up stale socket.
-/// Delegates to the shared `daemon_lifecycle` module.
-fn kill_all_instances(def: &ServiceDef) -> Result<(), String> {
+fn stop_service(def: &ServiceDef, _status: &ServiceStatus) -> Result<(), String> {
+    let short_name = binary_to_short_name(def.binary);
     let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
         PidSource::PgrepPattern(pat) => Some(*pat),
         _ => None,
     });
-    let short_name = binary_to_short_name(def.binary);
-    crate::daemon_lifecycle::kill_all(def.binary, short_name, pgrep_pattern)
+
+    // Unified path: systemctl when managed, direct kill otherwise.
+    let result = crate::daemon_lifecycle::stop_daemon(short_name, def.binary, pgrep_pattern);
+    if result.is_ok() {
+        cleanup_stale_socket(def);
+    }
+    result
 }
 
 /// Remove stale Unix socket and pidfile after stopping a service.
@@ -596,52 +492,29 @@ impl ServicesPage {
 
     fn restart_selected(&mut self) {
         let def = &SERVICES[self.selected];
-        let status = &self.statuses[self.selected];
+        let short_name = binary_to_short_name(def.binary);
+        let program = def.command.unwrap_or(def.binary);
+        let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
+            PidSource::PgrepPattern(pat) => Some(*pat),
+            _ => None,
+        });
 
-        // Systemd-managed: use `systemctl --user restart` (atomic).
-        if let Some(unit) = def.systemd_unit {
-            match systemctl_action("restart", unit, def.binary) {
-                Ok(()) => {
-                    self.status_msg = Some((
-                        format!("Restarting {}...", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
-                }
-                Err(e) => {
-                    self.status_msg = Some((e, true, Instant::now()));
-                }
+        // Unified path: systemctl when managed (atomic restart), setsid fallback.
+        match crate::daemon_lifecycle::restart_daemon(
+            short_name, def.binary, program, def.args, pgrep_pattern,
+        ) {
+            Ok(()) => {
+                self.status_msg = Some((
+                    format!("Restarting {}...", def.binary),
+                    false,
+                    Instant::now(),
+                ));
             }
-            self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
-            return;
-        }
-
-        // Fallback: stop then start.
-        if status.running {
-            match stop_service(def, status) {
-                Ok(()) => {
-                    self.pending_restart = Some((self.selected, Instant::now()));
-                    self.status_msg = Some((
-                        format!("Restarting {}...", def.binary),
-                        false,
-                        Instant::now(),
-                    ));
-                }
-                Err(e) => {
-                    self.status_msg = Some((e, true, Instant::now()));
-                }
-            }
-        } else {
-            match start_service(def) {
-                Ok(()) => {
-                    self.status_msg =
-                        Some((format!("Starting {}...", def.binary), false, Instant::now()));
-                }
-                Err(e) => {
-                    self.status_msg = Some((e, true, Instant::now()));
-                }
+            Err(e) => {
+                self.status_msg = Some((e, true, Instant::now()));
             }
         }
+        self.last_refresh = Instant::now() - std::time::Duration::from_secs(10);
     }
 
     /// Open settings.toml in $EDITOR and reload on return.
@@ -1266,19 +1139,3 @@ mod tests {
     }
 }
 
-/// Return PATH with ~/.cargo/bin and ~/.local/bin guaranteed to be present.
-/// Daemons spawned from the TUI inherit a potentially minimal PATH that may
-/// be missing user-local directories where tools like edge-tts, whisper-cpp,
-/// and claude live.
-fn ensure_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/builder".to_string());
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut path = current.clone();
-    let extra_dirs = [format!("{home}/.local/bin"), format!("{home}/.cargo/bin")];
-    for dir in &extra_dirs {
-        if !current.split(':').any(|p| p == dir) {
-            path = format!("{dir}:{path}");
-        }
-    }
-    path
-}

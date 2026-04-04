@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
@@ -50,6 +50,10 @@ struct SwarmWindow {
     closing: bool,
     /// When the close sequence started (for the delay).
     close_started_at: Option<Instant>,
+    /// Last observed mtime of the JSONL file (for staleness detection).
+    last_jsonl_mtime: Option<SystemTime>,
+    /// When the JSONL mtime stopped changing (None = still changing).
+    last_jsonl_mtime_unchanged_since: Option<Instant>,
 }
 
 /// Active swarm window count, exposed to the event bus.
@@ -341,6 +345,8 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                                     last_active: now,
                                     closing: false,
                                     close_started_at: None,
+                                    last_jsonl_mtime: None,
+                                    last_jsonl_mtime_unchanged_since: None,
                                 },
                             );
                             resolved_pending.push(sid.clone());
@@ -432,6 +438,8 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                                     last_active: now,
                                     closing: false,
                                     close_started_at: None,
+                                    last_jsonl_mtime: None,
+                                    last_jsonl_mtime_unchanged_since: None,
                                 },
                             );
                         }
@@ -477,14 +485,37 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                     continue;
                 }
 
-                // Subagent no longer in state files or inactive for too long.
-                let gone = !current_subagent_ids.contains(sid);
-                let timed_out = now.duration_since(window.last_active) > INACTIVE_TIMEOUT;
+                // Check JSONL staleness — state file disappearance alone is not
+                // sufficient because background agents create transient state files.
+                let state_gone = !current_subagent_ids.contains(sid);
+                let jsonl_stale = match window.jsonl_path.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
+                    Some(meta) => {
+                        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                        let changed = Some(mtime) != window.last_jsonl_mtime;
+                        window.last_jsonl_mtime = Some(mtime);
+                        if changed {
+                            // JSONL is still being written — reset staleness timer.
+                            window.last_jsonl_mtime_unchanged_since = None;
+                            false
+                        } else {
+                            // mtime unchanged — start or check staleness timer.
+                            let unchanged_since = window.last_jsonl_mtime_unchanged_since
+                                .get_or_insert(now);
+                            now.duration_since(*unchanged_since).as_secs() > 30
+                        }
+                    }
+                    None => {
+                        // JSONL file gone (or was never resolved) = truly done.
+                        true
+                    }
+                };
+                let gone = state_gone && jsonl_stale;
+                let timed_out = now.duration_since(window.last_active) > INACTIVE_TIMEOUT && jsonl_stale;
 
                 if gone || timed_out {
                     info!(
                         session = %sid,
-                        reason = if gone { "state file removed" } else { "inactive timeout" },
+                        reason = if gone { "state gone + JSONL stale" } else { "inactive timeout + JSONL stale" },
                         "Subagent completed — closing window in {}s",
                         CLOSE_DELAY.as_secs()
                     );

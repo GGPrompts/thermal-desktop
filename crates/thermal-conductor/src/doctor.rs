@@ -1055,18 +1055,12 @@ async fn fix_daemon(spec: &DaemonSpec, _run_dir: &std::path::Path) {
     daemon_lifecycle::cleanup_artifacts(spec.short_name);
     println!("    \x1b[90mcleaned stale artifacts for {}\x1b[0m", spec.short_name);
 
-    // Restart if this is a core service daemon
+    // Restart if this is a core service daemon — unified path (systemctl when managed).
     if let Some(cmd) = spec.restart_cmd {
         let program = cmd[0];
         let args = &cmd[1..];
-        match tokio::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => {
+        match daemon_lifecycle::start_daemon(spec.short_name, spec.name, program, args) {
+            Ok(()) => {
                 println!("    \x1b[32m↻ restarted {}\x1b[0m", spec.name);
             }
             Err(e) => {
@@ -1077,39 +1071,34 @@ async fn fix_daemon(spec: &DaemonSpec, _run_dir: &std::path::Path) {
 }
 
 /// Restart a daemon whose on-disk binary is newer than the running process.
-/// Uses systemctl --user restart when a systemd unit is available, otherwise
-/// kills and re-spawns directly.
+/// Uses the unified restart path: systemctl when managed, kill+setsid otherwise.
 fn restart_stale_daemon(spec: &DaemonSpec) {
     println!(
         "    \x1b[33m⚠ {} running stale binary — restarting\x1b[0m",
         spec.name
     );
 
-    // Prefer systemctl restart — handles stop + start atomically.
-    let unit = match spec.name {
-        "thermal-conductor" => Some("thermal-conductor.service"),
-        "thermal-audio" => Some("thermal-audio.service"),
-        "thermal-dispatcher" => Some("thermal-dispatcher.service"),
-        _ => None,
-    };
-
-    if let Some(unit_name) = unit {
-        if daemon_lifecycle::restart_via_systemctl(unit_name, spec.name).is_ok() {
-            println!("    \x1b[32m↻ restarted {} via systemctl\x1b[0m", spec.name);
-            return;
-        }
-    }
-
-    // Fallback: kill + restart directly.
-    daemon_lifecycle::kill_all(spec.name, spec.short_name, spec.pgrep_pattern).ok();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
     if let Some(cmd) = spec.restart_cmd {
         let program = cmd[0];
         let args = &cmd[1..];
-        match daemon_lifecycle::start_direct(program, args) {
-            Ok(()) => println!("    \x1b[32m↻ restarted {}\x1b[0m", spec.name),
-            Err(e) => eprintln!("    \x1b[31m! failed to restart {}: {e}\x1b[0m", spec.name),
+        match daemon_lifecycle::restart_daemon(
+            spec.short_name,
+            spec.name,
+            program,
+            args,
+            spec.pgrep_pattern,
+        ) {
+            Ok(()) => {
+                let method = if daemon_lifecycle::is_systemd_managed(spec.short_name) {
+                    "via systemctl"
+                } else {
+                    "directly"
+                };
+                println!("    \x1b[32m↻ restarted {} {method}\x1b[0m", spec.name);
+            }
+            Err(e) => {
+                eprintln!("    \x1b[31m! failed to restart {}: {e}\x1b[0m", spec.name);
+            }
         }
     }
 }

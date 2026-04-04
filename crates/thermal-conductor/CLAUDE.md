@@ -86,9 +86,11 @@ Shared kill/restart/counting logic lives in `src/daemon_lifecycle.rs`. Both `thc
 - `kill_duplicates()` / `kill_all()` / `force_kill_all()` — unified kill with SIGTERM→SIGKILL escalation
 - `is_stale_binary()` — compares /proc/PID/exe mtime against on-disk binary
 - `cleanup_artifacts()` — removes socket + pidfile for a daemon
-- `start_direct()` / `restart_via_systemctl()` — daemon restart helpers
+- `start_direct()` — setsid fallback when systemd units are not enabled
+- `is_systemd_managed()` — cached check for whether a daemon's systemd unit is enabled
+- `start_daemon()` / `stop_daemon()` / `restart_daemon()` — unified lifecycle ops (systemctl when managed, direct fallback otherwise)
 
-The conductor daemon writes a pidfile (`conductor.pid`) on startup and removes it on shutdown. Single-instance guard via `enforce_single_instance("conductor")` prevents duplicate daemons.
+The conductor daemon uses a flock-based single-instance guard (`conductor.lock` in the runtime dir) — atomic, no TOCTOU race, auto-released on crash. Pidfiles are still written for diagnostics / `thc doctor`.
 
 ## Health Checks
 `thc doctor` checks PID liveness, socket connectivity, instance count, and binary staleness for all thermal daemons. `thc doctor --fix` cleans stale PID/socket files, kills duplicates, and restarts dead core daemons. Stale binary warnings appear when the on-disk binary is newer than the running process.

@@ -7,7 +7,8 @@ Runtime path, socket, and pidfile helpers for thermal daemons. No GPU dependenci
 - `socket_path(name)` / `pidfile_path(name)` — canonical path construction
 - `cleanup_stale_socket()` — remove sockets from dead daemons
 - `validate_pidfile()` / `write_pidfile()` — PID liveness checking
-- `enforce_single_instance()` — pidfile-based single-instance guard
+- `enforce_single_instance()` — pidfile-based single-instance guard (legacy)
+- `acquire_instance_lock()` — flock-based single-instance guard (preferred, atomic, no TOCTOU race)
 - `try_connect_or_cleanup()` — connect to socket, clean up if stale
 
 ## Dependencies

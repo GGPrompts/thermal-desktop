@@ -73,8 +73,8 @@ fn pidfile_path() -> PathBuf {
     thermal_core::runtime::pidfile_path("dispatcher")
 }
 
-fn enforce_single_instance() {
-    thermal_core::runtime::enforce_single_instance("thermal-dispatcher");
+fn acquire_instance_lock() -> std::fs::File {
+    thermal_core::runtime::acquire_instance_lock("dispatcher")
 }
 
 fn write_pidfile() {
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    enforce_single_instance();
+    let _instance_lock = acquire_instance_lock();
     write_pidfile();
 
     info!("thermal-dispatcher v{} starting", env!("CARGO_PKG_VERSION"));

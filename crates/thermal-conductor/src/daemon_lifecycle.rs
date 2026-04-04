@@ -1,8 +1,14 @@
 //! Shared daemon lifecycle helpers — used by both `thc doctor` and the TUI
 //! Services page to avoid duplicating kill/restart/counting logic.
+//!
+//! **Unified restart rule**: all start/stop/restart operations go through
+//! `systemctl --user` when the daemon's systemd unit is enabled. Direct
+//! process management (setsid/SIGTERM) is only used as a fallback when the
+//! unit is not loaded.
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
@@ -199,25 +205,97 @@ pub fn force_kill_all(
     }
 }
 
-// ── Restart helpers ────────────────────────────────────────────────────────
+// ── Systemd detection ─────────────────────────────────────────────────────
 
-/// Restart a daemon: try `systemctl --user restart` first, fall through to
-/// direct binary start if the systemd unit is not available.
+/// Map from daemon short-name (e.g. "conductor") to systemd unit name.
+pub fn unit_for_daemon(short_name: &str) -> Option<&'static str> {
+    match short_name {
+        "conductor" => Some("thermal-conductor.service"),
+        "audio" => Some("thermal-audio.service"),
+        "dispatcher" => Some("thermal-dispatcher.service"),
+        _ => None,
+    }
+}
+
+/// Check if a daemon's systemd unit is loaded and enabled.
 ///
-/// Returns `Ok(())` on success, `Err(description)` on failure.
-pub fn restart_via_systemctl(unit: &str, binary_name: &str) -> Result<(), String> {
-    systemctl_action("restart", unit, binary_name)
+/// The result is cached per daemon for the lifetime of the process
+/// (units don't get enabled/disabled while the TUI is running).
+pub fn is_systemd_managed(short_name: &str) -> bool {
+    // Per-daemon cache using a static HashMap behind OnceLock.
+    static CACHE: OnceLock<std::collections::HashMap<String, bool>> = OnceLock::new();
+
+    // Build the cache on first call by probing all known daemons.
+    let cache = CACHE.get_or_init(|| {
+        let mut map = std::collections::HashMap::new();
+        for name in &["conductor", "audio", "dispatcher"] {
+            if let Some(unit) = unit_for_daemon(name) {
+                let managed = Command::new("systemctl")
+                    .args(["--user", "is-enabled", unit])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                map.insert(name.to_string(), managed);
+            }
+        }
+        map
+    });
+
+    cache.get(short_name).copied().unwrap_or(false)
 }
 
-/// Start a daemon via systemctl --user. Falls through if the unit is not
-/// available.
-pub fn start_via_systemctl(unit: &str, binary_name: &str) -> Result<(), String> {
-    systemctl_action("start", unit, binary_name)
+// ── Unified start/stop/restart ────────────────────────────────────────────
+
+/// Start a daemon: uses `systemctl --user start` when the unit is enabled,
+/// otherwise falls back to direct process launch via setsid.
+pub fn start_daemon(
+    short_name: &str,
+    binary_name: &str,
+    program: &str,
+    args: &[&str],
+) -> Result<(), String> {
+    if is_systemd_managed(short_name) {
+        let unit = unit_for_daemon(short_name)
+            .ok_or_else(|| format!("no systemd unit for {short_name}"))?;
+        return systemctl_action("start", unit, binary_name);
+    }
+    start_direct(program, args)
 }
 
-/// Stop a daemon via systemctl --user.
-pub fn stop_via_systemctl(unit: &str, binary_name: &str) -> Result<(), String> {
-    systemctl_action("stop", unit, binary_name)
+/// Stop a daemon: uses `systemctl --user stop` when the unit is enabled,
+/// otherwise falls back to SIGTERM / pkill.
+pub fn stop_daemon(
+    short_name: &str,
+    binary_name: &str,
+    pgrep_pattern: Option<&str>,
+) -> Result<(), String> {
+    if is_systemd_managed(short_name) {
+        let unit = unit_for_daemon(short_name)
+            .ok_or_else(|| format!("no systemd unit for {short_name}"))?;
+        return systemctl_action("stop", unit, binary_name);
+    }
+    // Fallback: kill all instances directly.
+    kill_all(binary_name, short_name, pgrep_pattern)
+}
+
+/// Restart a daemon: uses `systemctl --user restart` when the unit is enabled,
+/// otherwise falls back to kill + direct start.
+pub fn restart_daemon(
+    short_name: &str,
+    binary_name: &str,
+    program: &str,
+    args: &[&str],
+    pgrep_pattern: Option<&str>,
+) -> Result<(), String> {
+    if is_systemd_managed(short_name) {
+        let unit = unit_for_daemon(short_name)
+            .ok_or_else(|| format!("no systemd unit for {short_name}"))?;
+        return systemctl_action("restart", unit, binary_name);
+    }
+    // Fallback: kill then start directly.
+    let _ = kill_all(binary_name, short_name, pgrep_pattern);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    start_direct(program, args)
 }
 
 fn systemctl_action(action: &str, unit: &str, binary_name: &str) -> Result<(), String> {

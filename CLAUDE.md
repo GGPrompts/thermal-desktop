@@ -10,11 +10,11 @@ Cargo workspace with shared dependencies. Three core layers split from the origi
 - **thermal-core**: Color palette, text rendering, wgpu context — GPU-heavy, re-exports protocol+runtime for compat
 
 Three daemons (consolidated from 9):
-- **thermal-conductor**: Terminal hub, TUI, GPU window, bar + HUD (managed layer-shell surfaces), message bus, session management. Writes pidfile at `conductor.pid` and enforces single-instance guard on startup.
+- **thermal-conductor**: Terminal hub, TUI, GPU window, bar + HUD (managed layer-shell surfaces), message bus, session management. Uses flock-based single-instance guard (`conductor.lock`) and writes pidfile for diagnostics.
 - **thermal-audio**: Unified TTS playback + voice capture (VAD, Whisper STT), replaces former thermal-voice. Reconnects to conductor with exponential backoff (2s-60s) on disconnect.
 - **thermal-dispatcher**: LLM API routing, trust tiers, adaptive learning
 
-Shared daemon lifecycle logic lives in `crates/thermal-conductor/src/daemon_lifecycle.rs` — instance counting, kill/restart, stale binary detection. Both `thc doctor` and the TUI Services page delegate to this module.
+Shared daemon lifecycle logic lives in `crates/thermal-conductor/src/daemon_lifecycle.rs` — instance counting, kill/restart, stale binary detection. Both `thc doctor` and the TUI Services page delegate to this module. **All restart paths go through `systemctl --user` when units are enabled** (cached per-session via `is_systemd_managed()`); direct setsid/nohup is only used when systemd units are not loaded. Single-instance guard uses `flock()` on lockfiles in `/run/user/$UID/thermal/` — atomic, no TOCTOU race, auto-released on crash.
 
 Each crate has its own `CLAUDE.md` with detailed architecture — read those when working on a specific component.
 

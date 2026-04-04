@@ -658,10 +658,11 @@ fn transition_text(
         | (ClaudeStatus::ToolUse, ClaudeStatus::ToolUse) => {
             let tool = session.current_tool.as_deref().unwrap_or("a tool");
             let detail = tool_detail(tool, session);
+            // Drop label for tool announcements — just the action verb
             if let Some(d) = detail {
-                Some(format!("{session_label}: {d}"))
+                Some(d)
             } else {
-                Some(format!("{session_label} using {tool}"))
+                Some(format!("using {tool}"))
             }
         }
         (_, ClaudeStatus::AwaitingInput) => Some(format!("{session_label} needs input")),
@@ -696,16 +697,21 @@ fn tool_detail(tool: &str, session: &ClaudeSessionState) -> Option<String> {
             });
             desc.map(|d| format!("running {d}"))
         }
-        "Glob" | "Grep" => {
+        "Glob" => {
             let pat = args.pattern.as_deref()?;
-            Some(format!("searching {pat}"))
+            Some(format!("searching files {pat}"))
+        }
+        "Grep" => {
+            let pat = args.pattern.as_deref()?;
+            Some(format!("searching code {pat}"))
         }
         "Agent" | "Task" => {
             let desc = args.description.as_deref()?;
-            Some(format!("agent: {desc}"))
+            Some(format!("spawning agent {desc}"))
         }
-        "WebFetch" | "WebSearch" => Some("web search".to_string()),
-        _ => None,
+        "WebFetch" => Some("fetching web".to_string()),
+        "WebSearch" => Some("searching web".to_string()),
+        _ => Some(format!("using {tool}")),
     }
 }
 
@@ -1067,6 +1073,10 @@ async fn run_daemon_event_loop(
     let mut session_activities: HashMap<String, AgentActivity> = HashMap::new();
     // Track context thresholds to avoid repeat alerts (keyed by session_id).
     let mut prev_context_level: HashMap<String, ContextThreshold> = HashMap::new();
+    // Debounce rapid tool announcements — at most one per second.
+    let mut last_tool_announcement = std::time::Instant::now() - std::time::Duration::from_secs(2);
+    // Sequential subagent counter (no parent_session_id in protocol, so global).
+    let mut subagent_counter: u32 = 0;
 
     let mut voice_check = tokio::time::interval(std::time::Duration::from_millis(500));
     voice_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1115,7 +1125,7 @@ async fn run_daemon_event_loop(
                 match msg {
                     Ok(Some(DaemonMessage::Snapshot(sync))) => {
                         let snap = &sync.snapshot;
-                        let label = daemon_session_label(snap);
+                        let label = daemon_session_label(snap, &mut subagent_counter);
                         debug!("snapshot: {} ({}) activity={:?}", snap.session_id, label, snap.agent_activity);
                         session_names.insert(snap.session_id.clone(), label);
                         session_activities.insert(snap.session_id.clone(), snap.agent_activity.clone());
@@ -1125,6 +1135,15 @@ async fn run_daemon_event_loop(
                             let sid = &event.session_id;
                             let label = session_names.get(sid).cloned()
                                 .unwrap_or_else(|| short_id(sid));
+
+                            let is_tool_event = matches!(
+                                &event.kind,
+                                SemanticEventKind::ToolStarted { .. }
+                                | SemanticEventKind::AgentActivityChanged {
+                                    activity: AgentActivity::ToolRunning,
+                                    ..
+                                }
+                            );
 
                             let text = match &event.kind {
                                 SemanticEventKind::SessionSpawned { display_name, .. } => {
@@ -1146,7 +1165,8 @@ async fn run_daemon_event_loop(
                                 }
                                 SemanticEventKind::ToolStarted { tool_name } => {
                                     session_activities.insert(sid.clone(), AgentActivity::ToolRunning);
-                                    Some(format!("{label} using {tool_name}"))
+                                    // Drop label for tool announcements — just the action
+                                    Some(format!("using {tool_name}"))
                                 }
                                 SemanticEventKind::ContextThresholdCrossed { level, saturation } => {
                                     // Only announce if this is a new/higher threshold.
@@ -1168,6 +1188,24 @@ async fn run_daemon_event_loop(
                                     }
                                 }
                                 _ => None,
+                            };
+
+                            // Debounce rapid tool announcements (1s minimum interval).
+                            let text = if is_tool_event {
+                                if let Some(ref t) = text {
+                                    let now = std::time::Instant::now();
+                                    if now.duration_since(last_tool_announcement) < std::time::Duration::from_secs(1) {
+                                        debug!("debounced tool announcement: {t}");
+                                        None
+                                    } else {
+                                        last_tool_announcement = now;
+                                        Some(t.clone())
+                                    }
+                                } else {
+                                    None
+                                }
+                            } else {
+                                text
                             };
 
                             if let Some(text) = text {
@@ -1283,7 +1321,8 @@ fn daemon_activity_text(
         }
         (_, ToolRunning) => {
             // ToolStarted events provide tool_name; this is the fallback.
-            Some(format!("{label} running a tool"))
+            // Drop label for tool announcements.
+            Some("running a tool".to_string())
         }
         (_, WaitingInput) | (_, Prompting) => Some(format!("{label} needs input")),
         (Thinking, Idle) | (ToolRunning, Idle) | (StreamingOutput, Idle) => {
@@ -1295,7 +1334,12 @@ fn daemon_activity_text(
 }
 
 /// Derive a label from a daemon session snapshot.
-fn daemon_session_label(snap: &daemon_client::SemanticSessionSnapshot) -> String {
+/// `subagent_counter` is incremented for sessions that have no display_name and no cwd,
+/// giving them "sub 1", "sub 2" labels instead of opaque hex IDs.
+fn daemon_session_label(
+    snap: &daemon_client::SemanticSessionSnapshot,
+    subagent_counter: &mut u32,
+) -> String {
     if let Some(ref name) = snap.display_name {
         if !name.is_empty() {
             return name.clone();
@@ -1311,7 +1355,9 @@ fn daemon_session_label(snap: &daemon_client::SemanticSessionSnapshot) -> String
             }
         }
     }
-    short_id(&snap.session_id)
+    // No display_name or cwd — likely a subagent. Use sequential label.
+    *subagent_counter += 1;
+    format!("sub {subagent_counter}")
 }
 
 /// Short session ID for labels.
@@ -1341,6 +1387,8 @@ async fn run_poll_loop(
     let mut prev_states: HashMap<String, (ClaudeStatus, Option<String>)> = HashMap::new();
     let mut prev_context_alert: HashMap<String, u32> = HashMap::new();
     let mut suppressed_queue = SuppressedQueue::new();
+    // Debounce rapid tool announcements — at most one per second.
+    let mut last_tool_announcement = std::time::Instant::now() - std::time::Duration::from_secs(2);
 
     // Seed initial states without announcing.
     for session in poller.poll() {
@@ -1412,7 +1460,18 @@ async fn run_poll_loop(
                         || (session.status == ClaudeStatus::ToolUse && prev.1 != curr_tool);
 
                     if changed {
+                        let is_tool_transition = session.status == ClaudeStatus::ToolUse;
                         if let Some(text) = transition_text(&label, &prev.0, &session.status, session) {
+                            // Debounce rapid tool announcements (1s minimum interval).
+                            if is_tool_transition {
+                                let now = std::time::Instant::now();
+                                if now.duration_since(last_tool_announcement) < std::time::Duration::from_secs(1) {
+                                    debug!("debounced tool announcement: {text}");
+                                    prev_states.insert(session.session_id.clone(), (session.status.clone(), curr_tool.clone()));
+                                    continue;
+                                }
+                                last_tool_announcement = now;
+                            }
                             info!("[{}] {} -> {:?}: {text}", session.session_id, format!("{prev:?}"), session.status);
                             let is_muted = audio_state.lock().unwrap_or_else(|p| p.into_inner()).muted;
                             let voice_active = is_voice_active();
@@ -1893,7 +1952,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj using Read".to_string()));
+        assert_eq!(text, Some("using Read".to_string()));
     }
 
     #[test]
@@ -1909,7 +1968,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: reading main.rs".to_string()));
+        assert_eq!(text, Some("reading main.rs".to_string()));
     }
 
     #[test]
@@ -1925,7 +1984,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: writing foo.txt".to_string()));
+        assert_eq!(text, Some("writing foo.txt".to_string()));
     }
 
     #[test]
@@ -1941,7 +2000,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: editing lib.rs".to_string()));
+        assert_eq!(text, Some("editing lib.rs".to_string()));
     }
 
     #[test]
@@ -1959,7 +2018,7 @@ mod tests {
             &session,
         );
         // description takes priority over command
-        assert_eq!(text, Some("proj: running Build all crates".to_string()));
+        assert_eq!(text, Some("running Build all crates".to_string()));
     }
 
     #[test]
@@ -1975,7 +2034,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: running cargo test".to_string()));
+        assert_eq!(text, Some("running cargo test".to_string()));
     }
 
     #[test]
@@ -2022,7 +2081,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: searching **/*.rs".to_string()));
+        assert_eq!(text, Some("searching files **/*.rs".to_string()));
     }
 
     #[test]
@@ -2038,7 +2097,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: searching fn main".to_string()));
+        assert_eq!(text, Some("searching code fn main".to_string()));
     }
 
     #[test]
@@ -2054,7 +2113,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: agent: analyse logs".to_string()));
+        assert_eq!(text, Some("spawning agent analyse logs".to_string()));
     }
 
     #[test]
@@ -2070,7 +2129,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: agent: run suite".to_string()));
+        assert_eq!(text, Some("spawning agent run suite".to_string()));
     }
 
     #[test]
@@ -2083,7 +2142,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: web search".to_string()));
+        assert_eq!(text, Some("fetching web".to_string()));
     }
 
     #[test]
@@ -2096,7 +2155,7 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        assert_eq!(text, Some("proj: web search".to_string()));
+        assert_eq!(text, Some("searching web".to_string()));
     }
 
     #[test]
@@ -2109,8 +2168,8 @@ mod tests {
             &ClaudeStatus::ToolUse,
             &session,
         );
-        // Unknown tool, no detail → fallback "using <tool>"
-        assert_eq!(text, Some("proj using UnknownTool".to_string()));
+        // Unknown tool — label dropped, fallback "using <tool>"
+        assert_eq!(text, Some("using UnknownTool".to_string()));
     }
 
     #[test]
@@ -2580,11 +2639,11 @@ mod tests {
     }
 
     #[test]
-    fn tool_detail_unknown_tool_returns_none() {
+    fn tool_detail_unknown_tool_returns_using_fallback() {
         let args = ToolArgs::default();
         let session = make_tool_session("s", "FancyNewTool", args);
         let detail = tool_detail("FancyNewTool", &session);
-        assert_eq!(detail, None);
+        assert_eq!(detail, Some("using FancyNewTool".to_string()));
     }
 
     #[test]
@@ -2744,7 +2803,7 @@ mod tests {
     fn daemon_activity_any_to_tool_running() {
         use daemon_client::AgentActivity::*;
         let text = daemon_activity_text("sonnet", &Thinking, &ToolRunning);
-        assert_eq!(text, Some("sonnet running a tool".to_string()));
+        assert_eq!(text, Some("running a tool".to_string()));
     }
 
     #[test]
@@ -2788,6 +2847,7 @@ mod tests {
 
     #[test]
     fn daemon_label_prefers_display_name() {
+        let mut counter = 0u32;
         let snap = daemon_client::SemanticSessionSnapshot {
             session_id: "abc123".into(),
             backend: String::new(),
@@ -2805,11 +2865,13 @@ mod tests {
             current_tool: None,
             context_state: daemon_client::ContextState::default(),
         };
-        assert_eq!(daemon_session_label(&snap), "opus");
+        assert_eq!(daemon_session_label(&snap, &mut counter), "opus");
+        assert_eq!(counter, 0); // counter not incremented for named sessions
     }
 
     #[test]
     fn daemon_label_falls_back_to_cwd_basename() {
+        let mut counter = 0u32;
         let snap = daemon_client::SemanticSessionSnapshot {
             session_id: "abc123".into(),
             backend: String::new(),
@@ -2827,11 +2889,13 @@ mod tests {
             current_tool: None,
             context_state: daemon_client::ContextState::default(),
         };
-        assert_eq!(daemon_session_label(&snap), "thermal-desktop");
+        assert_eq!(daemon_session_label(&snap, &mut counter), "thermal-desktop");
+        assert_eq!(counter, 0);
     }
 
     #[test]
-    fn daemon_label_falls_back_to_short_id() {
+    fn daemon_label_subagent_uses_sequential_number() {
+        let mut counter = 0u32;
         let snap = daemon_client::SemanticSessionSnapshot {
             session_id: "abcdef1234567890".into(),
             backend: String::new(),
@@ -2849,7 +2913,11 @@ mod tests {
             current_tool: None,
             context_state: daemon_client::ContextState::default(),
         };
-        assert_eq!(daemon_session_label(&snap), "abcdef12");
+        assert_eq!(daemon_session_label(&snap, &mut counter), "sub 1");
+        assert_eq!(counter, 1);
+        // Second subagent gets "sub 2"
+        assert_eq!(daemon_session_label(&snap, &mut counter), "sub 2");
+        assert_eq!(counter, 2);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
 use crate::session_log::{parse_session_event, SessionEvent, SessionEventType};
@@ -62,6 +62,8 @@ struct ViewerState {
     agent_id: String,
     /// Current terminal width (updated each frame).
     terminal_width: u16,
+    /// Last content area width used for rendering lines (excludes scrollbar).
+    rendered_width: u16,
     /// Whether the final report has been expanded (done once when stream stops).
     final_expanded: bool,
 }
@@ -91,6 +93,7 @@ impl ViewerState {
             last_activity: Instant::now(),
             agent_id,
             terminal_width: 120,
+            rendered_width: 0,
             final_expanded: false,
         }
     }
@@ -142,7 +145,13 @@ impl ViewerState {
             self.last_activity = Instant::now();
             self.final_expanded = false; // New content — reset expansion.
 
-            let width = self.terminal_width as usize;
+            // Use rendered_width (accounts for scrollbar); fall back to
+            // terminal_width on first render before layout is known.
+            let width = if self.rendered_width > 0 {
+                self.rendered_width as usize
+            } else {
+                self.terminal_width as usize
+            };
             for event in new_events {
                 let new_lines = render_event(&event, width, false);
                 self.lines.extend(new_lines);
@@ -234,13 +243,30 @@ impl ViewerState {
     /// Expand the final assistant text event to show the full report.
     fn expand_final_report(&mut self) {
         self.final_expanded = true;
-        // Re-render all display lines with the final event expanded.
-        let width = self.terminal_width as usize;
+        self.rerender_all_lines();
+    }
+
+    /// Re-render all display lines (e.g., after width change or expansion toggle).
+    fn rerender_all_lines(&mut self) {
+        let width = self.rendered_width as usize;
         self.lines.clear();
         for (i, event) in self.events.iter().enumerate() {
             let expanded = self.is_event_expanded(i);
             let new_lines = render_event(event, width, expanded);
             self.lines.extend(new_lines);
+        }
+    }
+
+    /// Update the effective content width and re-render if it changed.
+    fn update_content_width(&mut self, content_area_width: u16, has_scrollbar: bool) {
+        let effective = if has_scrollbar {
+            content_area_width.saturating_sub(1)
+        } else {
+            content_area_width
+        };
+        if effective != self.rendered_width {
+            self.rendered_width = effective;
+            self.rerender_all_lines();
         }
     }
 }
@@ -600,6 +626,11 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     // ── Content area ────────────────────────────────────────────────────
     let content_area = chunks[1];
     let viewport_height = content_area.height as usize;
+    let total_lines = state.line_count();
+    let has_scrollbar = total_lines > viewport_height;
+
+    // Update effective content width (re-renders lines if width changed).
+    state.update_content_width(content_area.width, has_scrollbar);
 
     // Auto-follow: scroll to bottom when following.
     if state.following {
@@ -607,7 +638,7 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     }
 
     // Build visible lines.
-    let total_lines = state.line_count();
+    let total_lines = state.line_count(); // Re-read after potential re-render.
     let visible_start = state.scroll;
     let visible_end = (visible_start + viewport_height).min(total_lines);
 
@@ -623,11 +654,35 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
         display_lines.push(Line::from(""));
     }
 
+    // Render content into an area that excludes the scrollbar column to
+    // prevent text from bleeding into it.
+    let text_area = if has_scrollbar {
+        Rect {
+            width: content_area.width.saturating_sub(1),
+            ..content_area
+        }
+    } else {
+        content_area
+    };
+
     let content = Paragraph::new(display_lines).style(Style::default().bg(BG_COLOR));
-    f.render_widget(content, content_area);
+    f.render_widget(content, text_area);
+
+    // Fill the scrollbar gutter column with the background color so no
+    // stale text is visible behind the scrollbar track.
+    if has_scrollbar {
+        let gutter = Rect {
+            x: content_area.x + content_area.width.saturating_sub(1),
+            y: content_area.y,
+            width: 1,
+            height: content_area.height,
+        };
+        let bg_fill = Block::default().style(Style::default().bg(BG_COLOR));
+        f.render_widget(bg_fill, gutter);
+    }
 
     // ── Scrollbar ───────────────────────────────────────────────────────
-    if total_lines > viewport_height {
+    if has_scrollbar {
         let mut scrollbar_state =
             ScrollbarState::new(total_lines.saturating_sub(viewport_height)).position(state.scroll);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)

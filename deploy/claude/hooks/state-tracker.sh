@@ -191,9 +191,14 @@ case "$HOOK_TYPE" in
 
     stop)
         CURRENT_TOOL=""
-        # Keep parent at "processing" while subagents are active to avoid
-        # false "exited" / "needs input" announcements.
-        if [[ "$(get_subagent_count)" -gt 0 ]]; then
+        # Subagent stop events are handled by subagent-stop hook — don't
+        # change status here or audio will announce a false "exited".
+        if [[ -n "$AGENT_ID" ]]; then
+            STATUS="processing"
+            DETAILS='{"event":"claude_stopped","is_subagent":true}'
+        elif [[ "$(get_subagent_count)" -gt 0 ]]; then
+            # Keep parent at "processing" while subagents are active to avoid
+            # false "exited" / "needs input" announcements.
             STATUS="processing"
             DETAILS='{"event":"claude_stopped","waiting_for_subagents":true}'
         else
@@ -246,13 +251,16 @@ SUBAGENT_COUNT=$(get_subagent_count)
 # doesn't collapse them into the parent session.
 if [[ -n "$AGENT_ID" ]]; then
     EFFECTIVE_SESSION_ID="${SESSION_ID}.agent.${AGENT_ID}"
+    PARENT_FIELD="\"parent_session_id\": \"$SESSION_ID\","
 else
     EFFECTIVE_SESSION_ID="$SESSION_ID"
+    PARENT_FIELD=""
 fi
 
 STATE_JSON=$(cat <<EOF
 {
   "session_id": "$EFFECTIVE_SESSION_ID",
+  ${PARENT_FIELD}
   "status": "$STATUS",
   "current_tool": "$CURRENT_TOOL",
   "subagent_count": $SUBAGENT_COUNT,

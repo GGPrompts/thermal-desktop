@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -19,6 +20,7 @@ use ratatui::style::{Color as RColor, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
+use tracing::debug;
 
 use crate::session_log::{parse_session_event, SessionEvent, SessionEventType};
 
@@ -32,6 +34,10 @@ const ERROR_COLOR: RColor = RColor::Rgb(0xef, 0x44, 0x44); // ACCENT_HOT
 const MUTED_COLOR: RColor = RColor::Rgb(0x9b, 0x8d, 0xd1); // TEXT_MUTED
 const BG_COLOR: RColor = RColor::Rgb(0x0a, 0x00, 0x10); // BG
 const OK_COLOR: RColor = RColor::Rgb(0x22, 0xc5, 0x5e); // STATUS_OK
+const COMPLETE_COLOR: RColor = RColor::Rgb(0x22, 0xc5, 0x5e); // STATUS_OK (for completion badge)
+
+/// Threshold after which idle stream is considered fully complete (not just paused).
+const COMPLETION_THRESHOLD: Duration = Duration::from_secs(10);
 
 // ── Rendered line ───────────────────────────────────────────────────────────
 
@@ -75,6 +81,10 @@ struct ViewerState {
     expanded_events: HashSet<usize>,
     /// Whether all events are expanded (toggle-all state).
     all_expanded: bool,
+    /// Whether the session is considered fully complete (no changes for COMPLETION_THRESHOLD).
+    completed: bool,
+    /// Whether the TTS completion announcement has been fired (one-shot guard).
+    completion_announced: bool,
 }
 
 impl ViewerState {
@@ -106,6 +116,8 @@ impl ViewerState {
             final_expanded: false,
             expanded_events: HashSet::new(),
             all_expanded: false,
+            completed: false,
+            completion_announced: false,
         }
     }
 
@@ -183,7 +195,108 @@ impl ViewerState {
             self.expand_final_report();
         }
 
+        // Mark session as completed after COMPLETION_THRESHOLD of inactivity.
+        if !self.streaming
+            && !self.completed
+            && !self.events.is_empty()
+            && self.last_activity.elapsed() > COMPLETION_THRESHOLD
+        {
+            self.completed = true;
+            debug!(agent = %self.agent_id, "Session marked as completed");
+
+            // Re-render to apply the final summary highlight.
+            self.rerender_all_lines();
+
+            // Announce completion via TTS (one-shot).
+            if !self.completion_announced {
+                self.completion_announced = true;
+                self.announce_completion();
+            }
+        }
+
+        // Reset completion state if new content arrives (stream resumed).
+        if self.streaming && self.completed {
+            self.completed = false;
+            // Don't reset completion_announced — only announce once per session.
+            self.rerender_all_lines(); // Remove highlight styling.
+        }
+
         Ok(())
+    }
+
+    /// Extract the final summary text (last AssistantText event content).
+    fn final_summary_text(&self) -> Option<&str> {
+        self.events
+            .iter()
+            .rev()
+            .find(|e| e.event_type == SessionEventType::AssistantText)
+            .map(|e| e.content.as_str())
+    }
+
+    /// Truncate text to approximately 2 sentences for TTS readout.
+    fn truncate_for_tts(text: &str) -> String {
+        // Find sentence boundaries (. ! ?) and take first 2.
+        let mut sentence_count = 0;
+        let mut end_pos = 0;
+
+        for (i, ch) in text.char_indices() {
+            if ch == '.' || ch == '!' || ch == '?' {
+                // Check it's not part of a number/abbreviation (crude heuristic).
+                let next_char = text[i + ch.len_utf8()..].chars().next();
+                if next_char.is_none() || next_char == Some(' ') || next_char == Some('\n') {
+                    sentence_count += 1;
+                    end_pos = i + ch.len_utf8();
+                    if sentence_count >= 2 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if sentence_count >= 1 && end_pos > 0 {
+            text[..end_pos].trim().to_string()
+        } else {
+            // No sentence boundary found — take first 200 chars.
+            let limit = text.char_indices().nth(200).map(|(i, _)| i).unwrap_or(text.len());
+            text[..limit].trim().to_string()
+        }
+    }
+
+    /// Fire `thc say` with the final summary (non-blocking subprocess).
+    fn announce_completion(&self) {
+        let summary = match self.final_summary_text() {
+            Some(text) if !text.is_empty() => text,
+            _ => return,
+        };
+
+        let tts_text = Self::truncate_for_tts(summary);
+        if tts_text.is_empty() {
+            return;
+        }
+
+        let agent_label = &self.agent_id[..self.agent_id.len().min(8)];
+        let announcement = format!("Agent {} complete. {}", agent_label, tts_text);
+
+        debug!(agent = %self.agent_id, text_len = announcement.len(), "Announcing completion via TTS");
+
+        // Spawn thc say as a detached subprocess — don't block the TUI.
+        std::thread::spawn(move || {
+            match StdCommand::new("thc")
+                .args(["say", &announcement])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_child) => {
+                    // Fire-and-forget — don't wait for TTS to finish.
+                }
+                Err(e) => {
+                    // TTS is best-effort; don't crash the viewer.
+                    eprintln!("thc say failed: {e}");
+                }
+            }
+        });
     }
 
     /// Total display lines.
@@ -325,6 +438,17 @@ impl ViewerState {
     fn expand_final_report(&mut self) {
         self.final_expanded = true;
         self.rerender_all_lines();
+
+        // Auto-scroll to the final summary if follow mode is active.
+        // (Scroll will be applied in the render loop via `following`.)
+    }
+
+    /// Check if a given event index is the last AssistantText event.
+    fn is_last_assistant_text(&self, idx: usize) -> bool {
+        self.events
+            .iter()
+            .rposition(|e| e.event_type == SessionEventType::AssistantText)
+            == Some(idx)
     }
 
     /// Re-render all display lines (e.g., after width change or expansion toggle).
@@ -333,7 +457,12 @@ impl ViewerState {
         self.lines.clear();
         for (i, event) in self.events.iter().enumerate() {
             let expanded = self.is_event_expanded(i);
-            let new_lines = render_event(event, width, expanded, i);
+            let highlight = self.completed && self.is_last_assistant_text(i);
+            let new_lines = if highlight {
+                render_event_highlighted(event, width, expanded, i)
+            } else {
+                render_event(event, width, expanded, i)
+            };
             self.lines.extend(new_lines);
         }
     }
@@ -381,7 +510,16 @@ fn display_line_count(event: &SessionEvent, expanded: bool) -> usize {
 /// `max_width` is the usable terminal width (columns minus margins).
 /// `expanded` controls whether assistant text shows all lines (true) or is collapsed (false).
 /// `event_idx` is the index of this event in the events vec (for expansion mapping).
+/// `highlighted` adds a visual accent (used for the final summary after completion).
 fn render_event(event: &SessionEvent, max_width: usize, expanded: bool, event_idx: usize) -> Vec<DisplayLine> {
+    render_event_inner(event, max_width, expanded, event_idx, false)
+}
+
+fn render_event_highlighted(event: &SessionEvent, max_width: usize, expanded: bool, event_idx: usize) -> Vec<DisplayLine> {
+    render_event_inner(event, max_width, expanded, event_idx, true)
+}
+
+fn render_event_inner(event: &SessionEvent, max_width: usize, expanded: bool, event_idx: usize, highlighted: bool) -> Vec<DisplayLine> {
     let mut lines = Vec::new();
     // Content area width after accounting for left margin/gutter (~6 chars).
     let content_width = max_width.saturating_sub(6);
@@ -448,12 +586,31 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool, event_id
         }
 
         SessionEventType::AssistantText => {
+            // Highlighted final summary gets an accent left border.
+            let (gutter, text_color) = if highlighted {
+                (" \u{2503} ", COMPLETE_COLOR) // ┃ in green for final summary
+            } else {
+                ("    ", ASSIST_COLOR)
+            };
+
+            // Insert a separator line before highlighted summary.
+            if highlighted {
+                lines.push(dl!(vec![
+                    Span::styled(
+                        " \u{2501}\u{2501}\u{2501} Final Summary \u{2501}\u{2501}\u{2501}",
+                        Style::default()
+                            .fg(COMPLETE_COLOR)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+
             let max_lines = if expanded { 200 } else { 4 };
             for line in event.content.lines().take(max_lines) {
                 let text = truncate_line(line, content_width);
                 lines.push(dl!(vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(text, Style::default().fg(ASSIST_COLOR)),
+                    Span::styled(gutter.to_string(), Style::default().fg(text_color)),
+                    Span::styled(text, Style::default().fg(text_color)),
                 ]));
             }
             let total = event.content.lines().count();
@@ -461,9 +618,9 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool, event_id
                 let remaining = total - max_lines;
                 lines.push(DisplayLine {
                     spans: vec![
-                        Span::styled("    ", Style::default()),
+                        Span::styled(gutter.to_string(), Style::default().fg(text_color)),
                         Span::styled(
-                            format!("▸ +{remaining} more lines"),
+                            format!("\u{25b8} +{remaining} more lines"),
                             Style::default().fg(TOOL_COLOR),
                         ),
                     ],
@@ -473,9 +630,9 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool, event_id
             } else if expanded && total > 4 {
                 lines.push(DisplayLine {
                     spans: vec![
-                        Span::styled("    ", Style::default()),
+                        Span::styled(gutter.to_string(), Style::default().fg(text_color)),
                         Span::styled(
-                            "▾ collapse".to_string(),
+                            "\u{25be} collapse".to_string(),
                             Style::default().fg(TOOL_COLOR),
                         ),
                     ],
@@ -690,10 +847,17 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     .split(area);
 
     // ── Title bar ───────────────────────────────────────────────────────
-    let streaming_indicator = if state.streaming {
-        Span::styled(" ● ", Style::default().fg(ERROR_COLOR))
+    let status_indicator = if state.completed {
+        Span::styled(
+            " \u{2713} Complete ",
+            Style::default()
+                .fg(COMPLETE_COLOR)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if state.streaming {
+        Span::styled(" \u{25cf} ", Style::default().fg(ERROR_COLOR))
     } else {
-        Span::styled(" ○ ", Style::default().fg(MUTED_COLOR))
+        Span::styled(" \u{25cb} ", Style::default().fg(MUTED_COLOR))
     };
 
     let follow_indicator = if state.following {
@@ -710,10 +874,10 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(" — {} events", state.events.len()),
+            format!(" \u{2014} {} events", state.events.len()),
             Style::default().fg(MUTED_COLOR),
         ),
-        streaming_indicator,
+        status_indicator,
         follow_indicator,
     ]);
 
@@ -788,26 +952,46 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     }
 
     // ── Footer ──────────────────────────────────────────────────────────
-    let footer_line = Line::from(vec![
-        Span::styled(" q", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":quit  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("↑↓", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":scroll  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("PgUp/Dn", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":page  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("t", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":next-tool  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("T", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":prev-tool  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("f", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":follow  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("G", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":bottom  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("↵", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":expand  ", Style::default().fg(MUTED_COLOR)),
-        Span::styled("e", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":expand-all", Style::default().fg(MUTED_COLOR)),
-    ]);
+    let footer_line = if state.completed {
+        Line::from(vec![
+            Span::styled(
+                " \u{2713} Session complete ",
+                Style::default()
+                    .fg(COMPLETE_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("\u{2014} ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("q", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(" to close  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("\u{2191}\u{2193}", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":scroll  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("e", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":expand-all  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("G", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":bottom", Style::default().fg(MUTED_COLOR)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(" q", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":quit  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("\u{2191}\u{2193}", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":scroll  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("PgUp/Dn", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":page  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("t", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":next-tool  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("T", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":prev-tool  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("f", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":follow  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("G", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":bottom  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("\u{21b5}", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":expand  ", Style::default().fg(MUTED_COLOR)),
+            Span::styled("e", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+            Span::styled(":expand-all", Style::default().fg(MUTED_COLOR)),
+        ])
+    };
 
     let footer = Paragraph::new(footer_line).style(Style::default().bg(RColor::Rgb(0x12, 0x08, 0x22)));
     f.render_widget(footer, chunks[2]);

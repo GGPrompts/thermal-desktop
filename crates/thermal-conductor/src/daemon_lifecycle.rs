@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
+use tracing::warn;
 
 // ── Instance counting ──────────────────────────────────────────────────────
 
@@ -293,27 +294,56 @@ pub fn restart_daemon(
         return systemctl_action("restart", unit, binary_name);
     }
     // Fallback: kill then start directly.
-    let _ = kill_all(binary_name, short_name, pgrep_pattern);
+    if let Err(e) = kill_all(binary_name, short_name, pgrep_pattern) {
+        warn!("kill_all failed during restart of {binary_name}: {e}");
+    }
     std::thread::sleep(std::time::Duration::from_millis(500));
     start_direct(program, args)
 }
 
 fn systemctl_action(action: &str, unit: &str, binary_name: &str) -> Result<(), String> {
-    let output = Command::new("systemctl")
-        .args(["--user", action, unit])
-        .output()
-        .map_err(|e| format!("systemctl {action} failed: {e}"))?;
+    use std::process::Stdio;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last_line = stderr
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("unknown error");
-        Err(format!("{binary_name}: {last_line}"))
+    let mut child = Command::new("systemctl")
+        .args(["--user", action, unit])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("systemctl {action} failed to start: {e}"))?;
+
+    // 10s timeout — systemctl start/stop/restart can hang if the service
+    // manager is wedged; avoid blocking the TUI indefinitely.
+    let timeout = std::time::Duration::from_secs(10);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|e| format!("reading systemctl output: {e}"))?;
+                if output.status.success() {
+                    return Ok(());
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let last_line = stderr
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("unknown error");
+                    return Err(format!("{binary_name}: {last_line}"));
+                }
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(format!(
+                        "{binary_name}: systemctl {action} {unit} timed out after {timeout:?}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("systemctl wait error: {e}")),
+        }
     }
 }
 

@@ -8,7 +8,7 @@
 //! # Integration
 //!
 //! Spawned as a background tokio task from `daemon::run_daemon()`. Exposes
-//! `active_sessions()` for UI components to query transcript state.
+//! `new()` and `spawn()` for creating and launching the watcher.
 
 use std::collections::HashMap;
 use std::fs::File;

@@ -77,6 +77,12 @@ const INACTIVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum number of poll cycles to retry JSONL resolution before giving up.
 const MAX_JSONL_RETRIES: u32 = 20; // 20 × 500ms = 10s
 
+/// How long a JSONL file's mtime must remain unchanged before we consider
+/// the subagent done. Set to 3× the viewer's 10s `COMPLETION_THRESHOLD` so
+/// the viewer has time to detect completion and render the final summary
+/// before the swarm watcher initiates the close sequence.
+const JSONL_STALENESS_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Base directory for Claude projects.
 fn claude_projects_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/home/builder".into());
@@ -488,26 +494,31 @@ pub(crate) fn spawn_swarm_watcher(_event_bus: Arc<SemanticEventBus>) {
                 // Check JSONL staleness — state file disappearance alone is not
                 // sufficient because background agents create transient state files.
                 let state_gone = !current_subagent_ids.contains(sid);
-                let jsonl_stale = match window.jsonl_path.as_ref().and_then(|p| std::fs::metadata(p).ok()) {
-                    Some(meta) => {
-                        let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                        let changed = Some(mtime) != window.last_jsonl_mtime;
-                        window.last_jsonl_mtime = Some(mtime);
-                        if changed {
-                            // JSONL is still being written — reset staleness timer.
-                            window.last_jsonl_mtime_unchanged_since = None;
-                            false
-                        } else {
-                            // mtime unchanged — start or check staleness timer.
-                            let unchanged_since = window.last_jsonl_mtime_unchanged_since
-                                .get_or_insert(now);
-                            now.duration_since(*unchanged_since).as_secs() > 30
+                let jsonl_stale = match window.jsonl_path.as_ref() {
+                    None => true, // never resolved = truly done
+                    Some(p) => match std::fs::metadata(p) {
+                        Ok(meta) => {
+                            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                            let changed = Some(mtime) != window.last_jsonl_mtime;
+                            window.last_jsonl_mtime = Some(mtime);
+                            if changed {
+                                // JSONL is still being written — reset staleness timer.
+                                window.last_jsonl_mtime_unchanged_since = None;
+                                false
+                            } else {
+                                // mtime unchanged — start or check staleness timer.
+                                // 30s staleness = 3× the viewer's 10s COMPLETION_THRESHOLD,
+                                // ensuring the viewer has time to detect completion and
+                                // render the final summary before the swarm watcher closes
+                                // the window.
+                                let unchanged_since = window.last_jsonl_mtime_unchanged_since
+                                    .get_or_insert(now);
+                                now.duration_since(*unchanged_since) > JSONL_STALENESS_TIMEOUT
+                            }
                         }
-                    }
-                    None => {
-                        // JSONL file gone (or was never resolved) = truly done.
-                        true
-                    }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                        Err(_) => false, // transient error (EACCES, etc.) — treat as still alive
+                    },
                 };
                 let gone = state_gone && jsonl_stale;
                 let timed_out = now.duration_since(window.last_active) > INACTIVE_TIMEOUT && jsonl_stale;

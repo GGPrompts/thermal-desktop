@@ -53,5 +53,15 @@ After making changes, **you must `cargo install --path crates/<name>`** to updat
 - Edit the `.ggl` file to change type definitions, not the generated output
 - `ggl_types.rs` is hand-written glue (aliases, Display, Default) — safe to edit
 
+### Deployment Configs
+The `deploy/` directory contains deployment configs that were migrated from `thermal-os-dotfiles`:
+- `deploy/kitty/kitty.conf` — thermal-themed kitty terminal config
+- `deploy/hypr/hyprland.conf` — Hyprland keybinds and autostart
+- `deploy/systemd/` — systemd user units for thermal daemons (`thermal.target`, service files, `ai-agents.slice`)
+- `deploy/hooks/state-tracker.sh` — Claude Code state-tracking hook
+- `deploy/install-services.sh` — symlink installer for systemd units and configs
+
+Shell/editor configs (zshrc, nvim, starship) remain in `~/projects/thermal-os-dotfiles`.
+
 ## Task Tracking
 Issue tracking via beads (prefix: `therm`).

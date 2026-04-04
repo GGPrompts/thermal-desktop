@@ -52,7 +52,7 @@ kitty must be started with remote control enabled via Unix socket:
 allow_remote_control socket-only
 listen_on unix:/tmp/kitty-thc
 ```
-Full thermal-themed kitty.conf lives in `thermal-os-dotfiles/config/kitty/kitty.conf`.
+Full thermal-themed kitty.conf lives in `deploy/kitty/kitty.conf`.
 
 ## TUI Sessions Tab (3-Panel Layout)
 Designed as a command center for a vertical monitor:

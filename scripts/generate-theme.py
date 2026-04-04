@@ -44,12 +44,12 @@ TARGETS = {
         "// THERMAL-PALETTE-COLORS-END",
     ),
     "kitty.conf": (
-        DOTFILES / "config" / "kitty" / "kitty.conf",
+        THERMAL_DESKTOP / "deploy" / "kitty" / "kitty.conf",
         "# THERMAL-COLORS-START",
         "# THERMAL-COLORS-END",
     ),
     "hyprland.conf": (
-        DOTFILES / "config" / "hypr" / "hyprland.conf",
+        THERMAL_DESKTOP / "deploy" / "hypr" / "hyprland.conf",
         "# THERMAL-COLORS-START",
         "# THERMAL-COLORS-END",
     ),

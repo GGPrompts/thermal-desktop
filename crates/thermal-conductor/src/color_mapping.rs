@@ -55,7 +55,7 @@ pub(crate) fn ansi_to_glyphon_bg(color: &AnsiColor) -> Option<[f32; 4]> {
 /// yellow -> orange -> red -> white-hot.  Avoids clustering everything in the
 /// purple/indigo range.
 pub(crate) fn named_to_thermal_fg(named: NamedColor) -> [f32; 4] {
-    // Aligned with kitty.conf in thermal-os-dotfiles/config/kitty/kitty.conf
+    // Aligned with kitty.conf in deploy/kitty/kitty.conf
     match named {
         NamedColor::Black => PaletteColor::BG.to_f32_array(), // color0  #0a0010
         NamedColor::Red => PaletteColor::SEARING.to_f32_array(), // color1  #ef4444

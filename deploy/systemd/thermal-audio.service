@@ -1,0 +1,16 @@
+[Unit]
+Description=Thermal Audio — TTS playback + voice capture
+PartOf=thermal.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/thermal-audio
+Restart=on-failure
+RestartSec=2
+Slice=ai-agents.slice
+
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR XDG_DATA_HOME
+
+[Install]
+WantedBy=thermal.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=swww wallpaper daemon
+PartOf=thermal.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/swww-daemon
+Restart=on-failure
+RestartSec=2
+
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+
+[Install]
+WantedBy=thermal.target

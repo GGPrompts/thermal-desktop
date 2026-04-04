@@ -1,0 +1,112 @@
+[[profile]]
+name = "Claude"
+command = "claude"
+icon = "🔥"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "Codex"
+command = "codex"
+icon = "🤖"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "GH Copilot"
+command = "copilot"
+icon = "🐍"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "LazyGit"
+command = "lazygit"
+icon = "📦"
+count = 1
+git_worktree = false
+
+# --- System Monitors ---
+
+[[profile]]
+name = "btop"
+command = "btop"
+icon = "📊"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "htop"
+command = "htop"
+icon = "📈"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "nvtop"
+command = "nvtop"
+icon = "🎮"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "bandwhich"
+command = "bandwhich"
+icon = "🌐"
+count = 1
+git_worktree = false
+
+# --- File Managers ---
+
+[[profile]]
+name = "Yazi"
+command = "yazi"
+icon = "📁"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "lf"
+command = "lf"
+icon = "🗂️"
+count = 1
+git_worktree = false
+
+# --- Dev Tools ---
+
+[[profile]]
+name = "Micro"
+command = "micro"
+icon = "✏️"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "Neovim"
+command = "nvim"
+icon = "📝"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "ncdu"
+command = "ncdu"
+icon = "💾"
+count = 1
+git_worktree = false
+
+# --- Fun ---
+
+[[profile]]
+name = "cava"
+command = "cava"
+icon = "🎵"
+count = 1
+git_worktree = false
+
+[[profile]]
+name = "cmatrix"
+command = "cmatrix"
+icon = "🟩"
+count = 1
+git_worktree = false

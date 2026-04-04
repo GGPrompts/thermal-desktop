@@ -1,0 +1,6 @@
+[Unit]
+Description=Thermal Desktop — all daemon services
+Documentation=https://github.com/builder/thermal-desktop
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Thermal Conductor — session daemon (PTY, socket server)
+PartOf=thermal.target
+After=thermal-audio.service
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/thc daemon
+Restart=on-failure
+RestartSec=2
+Slice=ai-agents.slice
+
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin
+PassEnvironment=WAYLAND_DISPLAY DISPLAY XDG_RUNTIME_DIR
+
+[Install]
+WantedBy=thermal.target

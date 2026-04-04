@@ -33,10 +33,17 @@ Backend detection order for `--backend=auto`:
 
 ## Key Files
 - `src/main.rs` — clap CLI, subcommand dispatch, `--backend` flag parsing
+- `src/doctor.rs` — `thc doctor` health checker and `thc smoke` pipeline
+- `src/config.rs` — `thc config` command: display effective settings with source annotations
 - `src/backend.rs` — `BackendPreference` enum, `detect_backend()` auto-detection logic
 - `src/kitty.rs` — `KittyController`: async `kitty @` interface (spawn, list, close, send, focus) + sidecar read/write
 - `src/client.rs` — `DaemonClient`: Unix socket communication with the optional daemon
-- `src/daemon.rs` — Optional PTY session daemon implementation
+- `src/daemon/mod.rs` — Optional PTY session daemon (module root, re-exports `run_daemon`)
+- `src/daemon/entry.rs` — `run_daemon` / `run_daemon_on` entry points, state file watcher
+- `src/daemon/session.rs` — `Daemon` impl: spawn/list sessions, handle requests, persist state
+- `src/daemon/client_handler.rs` — Per-connection handler: reads requests, streams responses
+- `src/daemon/helpers.rs` — Cell/color conversion, grid snapshots, name generation
+- `src/daemon/tests.rs` — Integration tests for the session daemon
 - `src/protocol.rs` — Wire protocol types (Request/Response, MessagePack framing)
 
 ## kitty Requirements

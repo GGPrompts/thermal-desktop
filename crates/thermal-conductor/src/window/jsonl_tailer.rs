@@ -275,11 +275,11 @@ mod tests {
     fn session_event_conversion_user() {
         let se = session_log::SessionEvent {
             timestamp: String::new(),
-            epoch_ms: None,
+
             event_type: SessionEventType::UserMessage,
             content: "hello".into(),
             tool_name: None,
-            duration: None,
+
             tool_use_id: None,
             is_error: false,
         };
@@ -291,11 +291,11 @@ mod tests {
     fn session_event_conversion_tool_use() {
         let se = session_log::SessionEvent {
             timestamp: String::new(),
-            epoch_ms: None,
+
             event_type: SessionEventType::ToolUse,
             content: r#"{"command": "ls"}"#.into(),
             tool_name: Some("Bash".into()),
-            duration: None,
+
             tool_use_id: Some("tu_01".into()),
             is_error: false,
         };
@@ -314,11 +314,11 @@ mod tests {
     fn session_event_conversion_tool_result() {
         let se = session_log::SessionEvent {
             timestamp: String::new(),
-            epoch_ms: None,
+
             event_type: SessionEventType::ToolResult,
             content: "ok".into(),
             tool_name: Some("Bash".into()),
-            duration: None,
+
             tool_use_id: Some("tu_01".into()),
             is_error: true,
         };
@@ -335,11 +335,11 @@ mod tests {
     fn session_event_conversion_system_is_none() {
         let se = session_log::SessionEvent {
             timestamp: String::new(),
-            epoch_ms: None,
+
             event_type: SessionEventType::SystemMessage,
             content: "system info".into(),
             tool_name: None,
-            duration: None,
+
             tool_use_id: None,
             is_error: false,
         };

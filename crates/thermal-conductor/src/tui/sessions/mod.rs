@@ -725,7 +725,6 @@ impl TuiPage for SessionsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::Color;
     use thermal_core::{ClaudeSessionState, ClaudeStatus};
 
     // ── Helpers ───────────────────────────────────────────────────────────────

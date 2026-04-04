@@ -78,32 +78,8 @@ impl std::fmt::Display for StreamingStatus {
     }
 }
 
-/// Snapshot of a tracked transcript session.
-#[derive(Debug, Clone)]
-pub struct TranscriptSession {
-    /// Full path to the JSONL file.
-    pub path: PathBuf,
-    /// Session ID extracted from filename.
-    pub session_id: String,
-    /// Agent type (Claude Code or Codex).
-    pub agent: TranscriptAgent,
-    /// Type of the most recently parsed event (e.g. "assistant", "user", "tool_use").
-    pub last_event_type: Option<String>,
-    /// When the file was last modified (monotonic).
-    pub last_event_at: Instant,
-    /// Whether the session is actively streaming.
-    pub is_streaming: bool,
-    /// Streaming status (active/recent/idle).
-    pub status: StreamingStatus,
-    /// Total number of JSONL lines read.
-    pub event_count: u64,
-    /// Brief summary of the last event content.
-    pub last_summary: Option<String>,
-}
-
 /// Internal per-file tracking state.
 struct TrackedFile {
-    path: PathBuf,
     session_id: String,
     agent: TranscriptAgent,
     last_event_type: Option<String>,
@@ -126,20 +102,6 @@ impl TrackedFile {
         }
     }
 
-    fn to_session(&self) -> TranscriptSession {
-        let status = self.streaming_status();
-        TranscriptSession {
-            path: self.path.clone(),
-            session_id: self.session_id.clone(),
-            agent: self.agent,
-            last_event_type: self.last_event_type.clone(),
-            last_event_at: self.last_modified,
-            is_streaming: status == StreamingStatus::Active,
-            status,
-            event_count: self.event_count,
-            last_summary: self.last_summary.clone(),
-        }
-    }
 }
 
 // ── TranscriptWatcher ────────────────────────────────────────────────────────
@@ -154,12 +116,6 @@ impl TranscriptWatcher {
         Self {
             state: Arc::new(Mutex::new(HashMap::new())),
         }
-    }
-
-    /// Return a snapshot of all tracked transcript sessions.
-    #[allow(dead_code)]
-    pub fn active_sessions(&self) -> Vec<TranscriptSession> {
-        self.state.lock().values().map(|t| t.to_session()).collect()
     }
 
     /// Spawn the background watcher task. Returns a join handle.
@@ -300,7 +256,6 @@ impl TranscriptWatcher {
         let tracked = state
             .entry(path.to_path_buf())
             .or_insert_with(|| TrackedFile {
-                path: path.to_path_buf(),
                 session_id: session_id.clone(),
                 agent,
                 last_event_type: None,
@@ -555,27 +510,9 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Create and spawn a transcript watcher, returning both the handle and
 /// a shared reference for querying active sessions.
-pub(crate) fn spawn_transcript_watcher() -> (tokio::task::JoinHandle<()>, TranscriptWatcherHandle) {
+pub(crate) fn spawn_transcript_watcher() -> tokio::task::JoinHandle<()> {
     let watcher = TranscriptWatcher::new();
-    let handle_ref = TranscriptWatcherHandle {
-        state: Arc::clone(&watcher.state),
-    };
-    let join = watcher.spawn();
-    (join, handle_ref)
-}
-
-/// Shared handle for querying transcript watcher state from other components.
-#[allow(dead_code)]
-pub(crate) struct TranscriptWatcherHandle {
-    state: Arc<Mutex<HashMap<PathBuf, TrackedFile>>>,
-}
-
-#[allow(dead_code)]
-impl TranscriptWatcherHandle {
-    /// Return a snapshot of all tracked transcript sessions.
-    pub fn active_sessions(&self) -> Vec<TranscriptSession> {
-        self.state.lock().values().map(|t| t.to_session()).collect()
-    }
+    watcher.spawn()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -660,7 +597,6 @@ mod tests {
     #[test]
     fn streaming_status_active() {
         let tracked = TrackedFile {
-            path: PathBuf::from("/tmp/test.jsonl"),
             session_id: "test".into(),
             agent: TranscriptAgent::ClaudeCode,
             last_event_type: None,

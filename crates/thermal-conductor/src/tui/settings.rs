@@ -21,29 +21,6 @@ impl ServiceSettings {
     pub fn sections_raw(&self) -> &HashMap<String, Vec<(String, String)>> {
         &self.sections
     }
-
-    /// Return a one-line summary for a service binary name, or `None` if no
-    /// section matches.
-    pub fn summary_for(&self, binary: &str) -> Option<String> {
-        let section = binary_to_section(binary)?;
-        let pairs = self.sections.get(section)?;
-        if pairs.is_empty() {
-            return None;
-        }
-        let parts: Vec<String> = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        Some(parts.join(", "))
-    }
-}
-
-/// Map a service binary name to its settings.toml section name.
-fn binary_to_section(binary: &str) -> Option<&'static str> {
-    match binary {
-        "thermal-audio" => Some("audio"),
-        "thermal-dispatcher" => Some("dispatcher"),
-        "thermal-conductor" | "thermal-conductor-tui" => Some("conductor"),
-        "thermal-notify" => Some("notify"),
-        _ => None,
-    }
 }
 
 /// Return the path to the unified settings file.
@@ -241,25 +218,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn binary_to_section_maps_known_services() {
-        assert_eq!(binary_to_section("thermal-audio"), Some("audio"));
-        assert_eq!(binary_to_section("thermal-dispatcher"), Some("dispatcher"));
-        assert_eq!(binary_to_section("thermal-conductor"), Some("conductor"));
-        assert_eq!(binary_to_section("thermal-notify"), Some("notify"));
-        // Removed daemons should return None
-        assert_eq!(binary_to_section("thermal-voice"), None);
-        assert_eq!(binary_to_section("thermal-bar"), None);
-        assert_eq!(binary_to_section("thermal-hud"), None);
-    }
-
-    #[test]
-    fn binary_to_section_returns_none_for_unknown() {
-        assert_eq!(binary_to_section("codex-state-adapter"), None);
-        assert_eq!(binary_to_section("thermal-lock"), None);
-        assert_eq!(binary_to_section("random-thing"), None);
-    }
-
-    #[test]
     fn settings_path_is_under_config() {
         let path = settings_path();
         let path_str = path.to_string_lossy();
@@ -278,25 +236,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn empty_settings_returns_no_summaries() {
-        let settings = ServiceSettings::default();
-        assert!(settings.summary_for("thermal-audio").is_none());
-    }
-
-    #[test]
-    fn summary_for_formats_key_value_pairs() {
-        let mut sections = HashMap::new();
-        sections.insert(
-            "audio".to_string(),
-            vec![
-                ("volume".to_string(), "0.80".to_string()),
-                ("voice".to_string(), "en-US-GuyNeural".to_string()),
-            ],
-        );
-        let settings = ServiceSettings { sections };
-        let summary = settings.summary_for("thermal-audio").unwrap();
-        assert!(summary.contains("volume=0.80"));
-        assert!(summary.contains("voice=en-US-GuyNeural"));
-    }
 }

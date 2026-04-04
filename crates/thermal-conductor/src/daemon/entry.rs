@@ -272,8 +272,7 @@ pub async fn run_daemon() -> Result<()> {
     crate::swarm_watcher::spawn_swarm_watcher(Arc::clone(&daemon.event_bus));
 
     // ── Transcript watcher — monitor Claude/Codex JSONL files ────────
-    let (_transcript_handle, _transcript_state) =
-        crate::transcript_watcher::spawn_transcript_watcher();
+    let _transcript_handle = crate::transcript_watcher::spawn_transcript_watcher();
 
     // Delegate to the shared accept loop.
     let daemon = run_daemon_on(listener, shutdown_rx, Some(daemon)).await?;

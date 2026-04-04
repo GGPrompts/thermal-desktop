@@ -13,8 +13,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 
@@ -92,10 +91,6 @@ fn resolve_model_path(config: &VoiceConfig) -> PathBuf {
 // Runtime paths
 // ---------------------------------------------------------------------------
 
-fn voice_socket_path() -> PathBuf {
-    thermal_core::runtime::socket_path("voice")
-}
-
 // voice pidfile is no longer needed — unified daemon uses audio.pid
 
 // Voice state file: producer end of the voice state chain. Written at ~5Hz
@@ -165,11 +160,6 @@ fn read_state_file() -> Option<VoiceStateFile> {
 // ---------------------------------------------------------------------------
 // Socket command protocol (voice commands via audio.sock or voice.sock)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct VoiceSocketCommand {
-    pub action: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VoiceSocketResponse {
@@ -919,48 +909,6 @@ fn is_playback_active(playback_active: &Arc<AtomicBool>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Socket handler for voice commands
-// ---------------------------------------------------------------------------
-
-async fn handle_voice_connection(
-    stream: tokio::net::UnixStream,
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<VoiceDaemonCommand>,
-) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
-
-    buf_reader
-        .read_line(&mut line)
-        .await
-        .context("reading from socket")?;
-
-    if line.trim().is_empty() {
-        return Ok(());
-    }
-
-    let cmd: VoiceSocketCommand = serde_json::from_str(line.trim())
-        .with_context(|| format!("parsing command: {}", line.trim()))?;
-
-    let (reply_tx, reply_rx) = oneshot::channel();
-    cmd_tx.send(VoiceDaemonCommand {
-        action: cmd.action,
-        reply: reply_tx,
-    })?;
-
-    let response = reply_rx
-        .await
-        .unwrap_or_else(|_| VoiceSocketResponse::error("daemon dropped the request"));
-
-    let mut resp_json = serde_json::to_string(&response)?;
-    resp_json.push('\n');
-    writer.write_all(resp_json.as_bytes()).await?;
-    writer.shutdown().await?;
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // PTT-only daemon mode
 // ---------------------------------------------------------------------------
 
@@ -1499,49 +1447,6 @@ pub fn is_voice_active_from_state() -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Voice socket listener — accepts voice commands on voice.sock
-// ---------------------------------------------------------------------------
-
-/// Spawn a voice socket listener that accepts voice commands and forwards
-/// them to the capture loop via the provided channel.
-pub async fn spawn_voice_socket_listener(
-    cmd_tx: tokio::sync::mpsc::UnboundedSender<VoiceDaemonCommand>,
-) -> Result<Option<PathBuf>> {
-    let sock_path = voice_socket_path();
-    thermal_core::runtime::cleanup_stale_socket("thermal-voice", &sock_path);
-
-    let listener = match UnixListener::bind(&sock_path) {
-        Ok(l) => l,
-        Err(e) => {
-            warn!("cannot bind voice socket {:?}: {e}", sock_path);
-            return Ok(None);
-        }
-    };
-
-    info!("voice socket listening on {}", sock_path.display());
-    let path = sock_path.clone();
-
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let tx = cmd_tx.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_voice_connection(stream, tx).await {
-                            warn!("voice connection error: {e}");
-                        }
-                    });
-                }
-                Err(e) => {
-                    warn!("voice socket accept error: {e}");
-                }
-            }
-        }
-    });
-
-    Ok(Some(path))
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1592,13 +1497,6 @@ mod tests {
             assert_eq!(parsed.state, original.state);
             assert_eq!(parsed.label, original.label);
         }
-    }
-
-    #[test]
-    fn voice_command_parsing() {
-        let json = r#"{"action": "start"}"#;
-        let cmd: VoiceSocketCommand = serde_json::from_str(json).unwrap();
-        assert_eq!(cmd.action, "start");
     }
 
     #[test]

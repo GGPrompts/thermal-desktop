@@ -12,8 +12,6 @@ pub type WidgetId = u64;
 /// Status of an active tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolStatus {
-    /// Tool invocation requested, not yet started.
-    Pending,
     /// Tool is currently executing.
     Running,
     /// Tool completed successfully.
@@ -41,8 +39,6 @@ pub struct ToolCallCard {
 pub struct ThinkingIndicator {
     /// Truncated preview of the thinking content.
     pub content_preview: String,
-    /// When the thinking started (for animation timing).
-    pub started_at: Instant,
 }
 
 /// Context window usage gauge bar.
@@ -52,13 +48,6 @@ pub struct ContextGauge {
     pub used: f32,
     /// Total context window capacity (1.0 = 100%).
     pub total: f32,
-}
-
-/// Modal permission dialog — captures input for y/n response.
-#[derive(Debug, Clone)]
-pub struct PermissionDialog {
-    pub tool: String,
-    pub message: String,
 }
 
 /// Tool result card — shown briefly after tool completion.
@@ -77,23 +66,16 @@ pub enum WidgetKind {
     ToolCallCard(ToolCallCard),
     ThinkingIndicator(ThinkingIndicator),
     ContextGauge(ContextGauge),
-    PermissionDialog(PermissionDialog),
     ResultCard(ResultCard),
 }
 
 impl WidgetKind {
-    /// Whether this widget type captures keyboard input (modal).
-    pub fn is_modal(&self) -> bool {
-        matches!(self, WidgetKind::PermissionDialog(_))
-    }
-
     /// Human-readable label for logging/debugging.
     pub fn label(&self) -> &'static str {
         match self {
             WidgetKind::ToolCallCard(_) => "ToolCallCard",
             WidgetKind::ThinkingIndicator(_) => "ThinkingIndicator",
             WidgetKind::ContextGauge(_) => "ContextGauge",
-            WidgetKind::PermissionDialog(_) => "PermissionDialog",
             WidgetKind::ResultCard(_) => "ResultCard",
         }
     }

@@ -138,6 +138,10 @@ for f in "$DEPLOY/systemd"/*.service "$DEPLOY/systemd"/*.target "$DEPLOY/systemd
     deploy_file "$f" "$SYSTEMD_DIR/$(basename "$f")"
 done
 
+# ── Thermal config ────────────────────────────────────────────
+echo "Thermal config..."
+deploy_dir "$DEPLOY/thermal" "$HOME/.config/thermal"
+
 # ── Claude settings + hooks ──────────────────────────────────
 echo "Claude settings..."
 deploy_file "$DEPLOY/claude/settings.json" "$HOME/.claude/settings.json"

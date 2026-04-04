@@ -34,7 +34,6 @@ const ERROR_COLOR: RColor = RColor::Rgb(0xef, 0x44, 0x44); // ACCENT_HOT
 const MUTED_COLOR: RColor = RColor::Rgb(0x9b, 0x8d, 0xd1); // TEXT_MUTED
 const BG_COLOR: RColor = RColor::Rgb(0x0a, 0x00, 0x10); // BG
 const OK_COLOR: RColor = RColor::Rgb(0x22, 0xc5, 0x5e); // STATUS_OK
-const COMPLETE_COLOR: RColor = RColor::Rgb(0x22, 0xc5, 0x5e); // STATUS_OK (for completion badge)
 
 /// Threshold after which idle stream is considered fully complete (not just paused).
 const COMPLETION_THRESHOLD: Duration = Duration::from_secs(10);
@@ -279,24 +278,22 @@ impl ViewerState {
 
         debug!(agent = %self.agent_id, text_len = announcement.len(), "Announcing completion via TTS");
 
-        // Spawn thc say as a detached subprocess — don't block the TUI.
-        std::thread::spawn(move || {
-            match StdCommand::new("thc")
-                .args(["say", &announcement])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(_child) => {
-                    // Fire-and-forget — don't wait for TTS to finish.
-                }
-                Err(e) => {
-                    // TTS is best-effort; don't crash the viewer.
-                    eprintln!("thc say failed: {e}");
-                }
+        // spawn() is already non-blocking — no thread needed.
+        match StdCommand::new("thc")
+            .args(["say", &announcement])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_child) => {
+                // Fire-and-forget — don't wait for TTS to finish.
             }
-        });
+            Err(e) => {
+                // TTS is best-effort; don't crash the viewer.
+                debug!("thc say failed: {e}");
+            }
+        }
     }
 
     /// Total display lines.
@@ -453,7 +450,13 @@ impl ViewerState {
 
     /// Re-render all display lines (e.g., after width change or expansion toggle).
     fn rerender_all_lines(&mut self) {
-        let width = self.rendered_width as usize;
+        // Use rendered_width if available; fall back to terminal_width
+        // before the first frame when rendered_width is still 0.
+        let width = if self.rendered_width > 0 {
+            self.rendered_width as usize
+        } else {
+            self.terminal_width as usize
+        };
         self.lines.clear();
         for (i, event) in self.events.iter().enumerate() {
             let expanded = self.is_event_expanded(i);
@@ -588,7 +591,7 @@ fn render_event_inner(event: &SessionEvent, max_width: usize, expanded: bool, ev
         SessionEventType::AssistantText => {
             // Highlighted final summary gets an accent left border.
             let (gutter, text_color) = if highlighted {
-                (" \u{2503} ", COMPLETE_COLOR) // ┃ in green for final summary
+                (" \u{2503} ", OK_COLOR) // ┃ in green for final summary
             } else {
                 ("    ", ASSIST_COLOR)
             };
@@ -599,7 +602,7 @@ fn render_event_inner(event: &SessionEvent, max_width: usize, expanded: bool, ev
                     Span::styled(
                         " \u{2501}\u{2501}\u{2501} Final Summary \u{2501}\u{2501}\u{2501}",
                         Style::default()
-                            .fg(COMPLETE_COLOR)
+                            .fg(OK_COLOR)
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
@@ -851,7 +854,7 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
         Span::styled(
             " \u{2713} Complete ",
             Style::default()
-                .fg(COMPLETE_COLOR)
+                .fg(OK_COLOR)
                 .add_modifier(Modifier::BOLD),
         )
     } else if state.streaming {
@@ -887,11 +890,14 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     // ── Content area ────────────────────────────────────────────────────
     let content_area = chunks[1];
     let viewport_height = content_area.height as usize;
+
+    // Estimate scrollbar presence, then update content width (may re-render
+    // and change line count). Re-read total_lines and has_scrollbar after.
+    let preliminary_has_scrollbar = state.line_count() > viewport_height;
+    state.update_content_width(content_area.width, preliminary_has_scrollbar);
+
     let total_lines = state.line_count();
     let has_scrollbar = total_lines > viewport_height;
-
-    // Update effective content width (re-renders lines if width changed).
-    state.update_content_width(content_area.width, has_scrollbar);
 
     // Auto-follow: scroll to bottom when following.
     if state.following {
@@ -899,7 +905,6 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     }
 
     // Build visible lines.
-    let total_lines = state.line_count(); // Re-read after potential re-render.
     let visible_start = state.scroll;
     let visible_end = (visible_start + viewport_height).min(total_lines);
 
@@ -957,7 +962,7 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
             Span::styled(
                 " \u{2713} Session complete ",
                 Style::default()
-                    .fg(COMPLETE_COLOR)
+                    .fg(OK_COLOR)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("\u{2014} ", Style::default().fg(MUTED_COLOR)),

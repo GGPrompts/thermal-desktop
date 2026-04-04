@@ -1125,7 +1125,13 @@ async fn run_daemon_event_loop(
                 match msg {
                     Ok(Some(DaemonMessage::Snapshot(sync))) => {
                         let snap = &sync.snapshot;
-                        let label = daemon_session_label(snap, &mut subagent_counter);
+                        // Only assign a new label (and potentially increment
+                        // the subagent counter) for first-seen sessions.
+                        let label = if let Some(existing) = session_names.get(&snap.session_id) {
+                            existing.clone()
+                        } else {
+                            daemon_session_label(snap, &mut subagent_counter)
+                        };
                         debug!("snapshot: {} ({}) activity={:?}", snap.session_id, label, snap.agent_activity);
                         session_names.insert(snap.session_id.clone(), label);
                         session_activities.insert(snap.session_id.clone(), snap.agent_activity.clone());
@@ -1467,7 +1473,8 @@ async fn run_poll_loop(
                                 let now = std::time::Instant::now();
                                 if now.duration_since(last_tool_announcement) < std::time::Duration::from_secs(1) {
                                     debug!("debounced tool announcement: {text}");
-                                    prev_states.insert(session.session_id.clone(), (session.status.clone(), curr_tool.clone()));
+                                    // Don't update prev_states here — leave it unchanged so the
+                                    // next poll still sees a change and re-evaluates after cooldown.
                                     continue;
                                 }
                                 last_tool_announcement = now;

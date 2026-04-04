@@ -34,7 +34,6 @@ mod persist;
 pub(crate) mod profiles_config;
 mod protocol;
 mod pty;
-mod semantic_scrollback;
 mod semantic_state;
 mod session_log;
 mod structured_output;

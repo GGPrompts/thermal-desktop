@@ -764,13 +764,6 @@ fn count_daemon_instances(spec: &DaemonSpec) -> u32 {
     daemon_lifecycle::count_instances(spec.name, spec.pgrep_pattern)
 }
 
-/// List all PIDs matching a daemon spec (for targeted killing).
-///
-/// Delegates to `daemon_lifecycle::list_pids()`.
-fn list_daemon_pids(spec: &DaemonSpec) -> Vec<u32> {
-    daemon_lifecycle::list_pids(spec.name, spec.pgrep_pattern)
-}
-
 /// Kill duplicate instances of a daemon, keeping the one that owns the
 /// pidfile (or the lowest PID as a fallback). Sends SIGTERM first, then
 /// SIGKILL after a short delay.

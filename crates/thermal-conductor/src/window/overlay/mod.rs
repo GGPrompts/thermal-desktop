@@ -74,16 +74,6 @@ impl OverlayManager {
 
     // ── Modal widget management ──────────────────────────────────────
 
-    /// Push a modal widget onto the focus stack. It will capture all
-    /// keyboard input until popped.
-    pub fn push_modal(&mut self, kind: WidgetKind) -> WidgetId {
-        debug_assert!(kind.is_modal(), "push_modal called with non-modal widget");
-        let id = self.alloc_id();
-        tracing::debug!(id, label = kind.label(), "overlay: push modal");
-        self.modal_stack.push(Widget { id, kind });
-        id
-    }
-
     /// Pop the top modal widget from the focus stack.
     /// Returns the removed widget, or `None` if the stack is empty.
     pub fn pop_modal(&mut self) -> Option<Widget> {
@@ -92,12 +82,6 @@ impl OverlayManager {
             tracing::debug!(id = w.id, label = w.kind.label(), "overlay: pop modal");
         }
         w
-    }
-
-    /// The top modal widget, if any. When present, it should receive
-    /// all keyboard input instead of the PTY.
-    pub fn top(&self) -> Option<&Widget> {
-        self.modal_stack.last()
     }
 
     /// Whether a modal widget is currently capturing input.
@@ -109,43 +93,10 @@ impl OverlayManager {
 
     /// Add a passive (non-capturing) widget.
     pub fn add_passive(&mut self, kind: WidgetKind) -> WidgetId {
-        debug_assert!(
-            !kind.is_modal(),
-            "add_passive called with modal widget — use push_modal"
-        );
         let id = self.alloc_id();
         tracing::debug!(id, label = kind.label(), "overlay: add passive");
         self.passive_widgets.push(Widget { id, kind });
         id
-    }
-
-    /// Remove a passive widget by ID. Returns true if found and removed.
-    pub fn remove_passive(&mut self, id: WidgetId) -> bool {
-        let len_before = self.passive_widgets.len();
-        self.passive_widgets.retain(|w| w.id != id);
-        let removed = self.passive_widgets.len() < len_before;
-        if removed {
-            tracing::debug!(id, "overlay: remove passive");
-        }
-        removed
-    }
-
-    /// Find a passive widget by ID.
-    pub fn get_passive(&self, id: WidgetId) -> Option<&Widget> {
-        self.passive_widgets.iter().find(|w| w.id == id)
-    }
-
-    /// Mutably access a passive widget by ID.
-    pub fn get_passive_mut(&mut self, id: WidgetId) -> Option<&mut Widget> {
-        self.passive_widgets.iter_mut().find(|w| w.id == id)
-    }
-
-    /// Find the first passive widget matching a predicate.
-    pub fn find_passive<F>(&self, f: F) -> Option<&Widget>
-    where
-        F: Fn(&Widget) -> bool,
-    {
-        self.passive_widgets.iter().find(|w| f(w))
     }
 
     // ── Housekeeping ─────────────────────────────────────────────────
@@ -164,13 +115,6 @@ impl OverlayManager {
             }
         });
         self.passive_widgets.len() < before
-    }
-
-    /// Remove all widgets (reset state).
-    pub fn clear(&mut self) {
-        self.modal_stack.clear();
-        self.passive_widgets.clear();
-        tracing::debug!("overlay: cleared all widgets");
     }
 
     /// Whether there are any visible widgets (modal or passive).
@@ -373,7 +317,6 @@ impl OverlayManager {
                 if !preview.is_empty() {
                     self.add_passive(WidgetKind::ThinkingIndicator(ThinkingIndicator {
                         content_preview: preview,
-                        started_at: Instant::now(),
                     }));
                 }
                 true
@@ -433,39 +376,17 @@ impl Default for OverlayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use widgets::PermissionDialog;
 
     #[test]
-    fn modal_push_pop() {
+    fn passive_add() {
         let mut mgr = OverlayManager::new();
-        assert!(!mgr.has_modal());
-        assert!(mgr.top().is_none());
-
-        let id = mgr.push_modal(WidgetKind::PermissionDialog(PermissionDialog {
-            tool: "Bash".into(),
-            message: "Run rm -rf?".into(),
-        }));
-        assert!(mgr.has_modal());
-        assert_eq!(mgr.top().unwrap().id, id);
-
-        let popped = mgr.pop_modal().unwrap();
-        assert_eq!(popped.id, id);
-        assert!(!mgr.has_modal());
-    }
-
-    #[test]
-    fn passive_add_remove() {
-        let mut mgr = OverlayManager::new();
-        let id = mgr.add_passive(WidgetKind::ContextGauge(ContextGauge {
+        assert!(!mgr.has_widgets());
+        mgr.add_passive(WidgetKind::ContextGauge(ContextGauge {
             used: 0.5,
             total: 1.0,
         }));
         assert!(mgr.has_widgets());
-        assert!(mgr.get_passive(id).is_some());
-
-        assert!(mgr.remove_passive(id));
-        assert!(!mgr.has_widgets());
-        assert!(!mgr.remove_passive(id)); // already removed
+        assert_eq!(mgr.passive_widgets.len(), 1);
     }
 
     #[test]

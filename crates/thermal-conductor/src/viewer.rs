@@ -681,10 +681,7 @@ fn render_event_inner(event: &SessionEvent, max_width: usize, expanded: bool, ev
         }
 
         SessionEventType::ToolResult => {
-            let duration_str = event
-                .duration
-                .map(|d| format!("[{:.1}s]", d.as_secs_f64()))
-                .unwrap_or_default();
+            let duration_str = String::new();
 
             let (icon, color) = if event.is_error {
                 ("✗", ERROR_COLOR)

@@ -52,11 +52,6 @@ pub fn clear_color_for_mode(pre_multiplied: bool) -> [f32; 4] {
     }
 }
 
-/// Return TERM_BG with reduced alpha (pre-multiplied, legacy default).
-pub fn clear_color() -> [f32; 4] {
-    clear_color_for_mode(true)
-}
-
 // ── RenderCell — snapshot of a single grid cell ────────────────────────────
 
 /// A lightweight snapshot of a terminal cell, suitable for lock-free rendering.

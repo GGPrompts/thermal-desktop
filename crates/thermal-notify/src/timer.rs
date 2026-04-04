@@ -7,7 +7,6 @@ pub struct DismissTimer {
     pub id: u32,
     deadline: Instant,
     fade_duration: Duration,
-    pub dismissed: bool,
 }
 
 impl DismissTimer {
@@ -28,7 +27,6 @@ impl DismissTimer {
             id,
             deadline: Instant::now() + Duration::from_millis(ms),
             fade_duration: Duration::from_millis(300),
-            dismissed: false,
         })
     }
 
@@ -44,14 +42,6 @@ impl DismissTimer {
             Urgency::Critical => Duration::from_millis(500),
         };
         Some(timer)
-    }
-
-    /// Immediately start the fade-out animation.
-    pub fn dismiss(&mut self) {
-        if !self.dismissed {
-            self.dismissed = true;
-            self.deadline = Instant::now();
-        }
     }
 
     /// Alpha [0.0, 1.0]: 1.0 before deadline, cubic ease-out fade during
@@ -112,12 +102,6 @@ mod tests {
     }
 
     #[test]
-    fn new_dismissed_field_starts_false() {
-        let timer = DismissTimer::new(1, 5000).unwrap();
-        assert!(!timer.dismissed);
-    }
-
-    #[test]
     fn new_alpha_is_one_immediately_after_creation() {
         let timer = DismissTimer::new(1, 5000).unwrap();
         assert!(
@@ -163,34 +147,6 @@ mod tests {
     fn with_urgency_stores_id() {
         let t = DismissTimer::with_urgency(99, 5000, Urgency::Normal).unwrap();
         assert_eq!(t.id, 99);
-    }
-
-    // ── DismissTimer::dismiss ────────────────────────────────────────────────
-
-    #[test]
-    fn dismiss_sets_dismissed_flag() {
-        let mut timer = DismissTimer::new(1, 5000).unwrap();
-        assert!(!timer.dismissed);
-        timer.dismiss();
-        assert!(timer.dismissed);
-    }
-
-    #[test]
-    fn dismiss_is_idempotent() {
-        let mut timer = DismissTimer::new(1, 5000).unwrap();
-        timer.dismiss();
-        timer.dismiss(); // second call must not panic
-        assert!(timer.dismissed);
-    }
-
-    #[test]
-    fn dismiss_starts_fade_alpha_below_one_after_fade_duration() {
-        let mut timer = DismissTimer::new(1, 5000).unwrap();
-        timer.dismiss();
-        // The deadline is now set to Instant::now() at dismiss time.
-        // After the full fade_duration (300 ms default) the alpha should be 0.
-        // We cannot sleep in a fast unit test, but we can verify alpha ≤ 1.0.
-        assert!(timer.alpha() <= 1.0);
     }
 
     // ── DismissTimer::alpha ──────────────────────────────────────────────────

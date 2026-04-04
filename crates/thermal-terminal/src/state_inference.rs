@@ -1042,20 +1042,6 @@ enum StripState {
 
 /// Diagnostic counters for [`AnsiStripper`].
 ///
-/// Useful for monitoring parser health: if `split_sequences` is high
-/// relative to `sequences_stripped`, PTY read sizes may need tuning.
-#[derive(Debug, Default, Clone)]
-pub struct AnsiStripperStats {
-    /// Sequences that spanned a chunk boundary (feed started mid-sequence).
-    pub split_sequences: u64,
-    /// Total CSI/OSC/APC/charset sequences fully consumed.
-    pub sequences_stripped: u64,
-    /// Total bytes consumed by escape sequences (not emitted to output).
-    pub bytes_stripped: u64,
-    /// Total visible text bytes emitted to the output buffer.
-    pub bytes_visible: u64,
-}
-
 /// Stateful ANSI escape sequence stripper.
 ///
 /// Strips CSI, OSC, APC, and other common escape sequences from a byte
@@ -1064,20 +1050,13 @@ pub struct AnsiStripperStats {
 /// read boundaries are consumed correctly.
 struct AnsiStripper {
     state: StripState,
-    stats: AnsiStripperStats,
 }
 
 impl AnsiStripper {
     fn new() -> Self {
         Self {
             state: StripState::Normal,
-            stats: AnsiStripperStats::default(),
         }
-    }
-
-    /// Returns a reference to the diagnostic counters.
-    pub fn stats(&self) -> &AnsiStripperStats {
-        &self.stats
     }
 
     /// Feed a chunk of raw bytes and return the visible text extracted from it.
@@ -1089,12 +1068,6 @@ impl AnsiStripper {
         let mut out = String::with_capacity(bytes.len());
         let mut i = 0;
 
-        // Track split sequences: if we enter feed() already mid-sequence,
-        // a sequence was split across chunk boundaries.
-        if self.state != StripState::Normal {
-            self.stats.split_sequences += 1;
-        }
-
         while i < bytes.len() {
             let b = bytes[i];
 
@@ -1102,7 +1075,6 @@ impl AnsiStripper {
                 StripState::Normal => {
                     if b == 0x1B {
                         self.state = StripState::Escape;
-                        self.stats.bytes_stripped += 1;
                         i += 1;
                     } else if b < 0x20 && b != b'\n' && b != b'\r' && b != b'\t' {
                         // Skip non-printable control characters.
@@ -1113,7 +1085,6 @@ impl AnsiStripper {
                         if let Some(ch) = decode_utf8_char(remaining) {
                             let char_len = ch.len_utf8();
                             out.push(ch);
-                            self.stats.bytes_visible += char_len as u64;
                             i += char_len;
                         } else {
                             // Invalid UTF-8, skip byte.
@@ -1124,7 +1095,6 @@ impl AnsiStripper {
 
                 StripState::Escape => {
                     // We saw ESC last; this byte determines the sequence type.
-                    self.stats.bytes_stripped += 1;
                     match b {
                         b'[' => {
                             self.state = StripState::Csi;
@@ -1145,7 +1115,6 @@ impl AnsiStripper {
                         _ => {
                             // Other 2-byte ESC sequences: skip this byte and done.
                             self.state = StripState::Normal;
-                            self.stats.sequences_stripped += 1;
                             i += 1;
                         }
                     }
@@ -1153,20 +1122,16 @@ impl AnsiStripper {
 
                 StripState::Csi => {
                     // CSI sequence: consume until final byte 0x40..=0x7E.
-                    self.stats.bytes_stripped += 1;
                     if (0x40..=0x7E).contains(&b) {
                         self.state = StripState::Normal;
-                        self.stats.sequences_stripped += 1;
                     }
                     i += 1;
                 }
 
                 StripState::Osc => {
-                    self.stats.bytes_stripped += 1;
                     if b == 0x07 {
                         // BEL terminates OSC.
                         self.state = StripState::Normal;
-                        self.stats.sequences_stripped += 1;
                         i += 1;
                     } else if b == 0x1B {
                         // Possible ST (ESC \).
@@ -1181,9 +1146,7 @@ impl AnsiStripper {
                 StripState::OscEsc => {
                     if b == b'\\' {
                         // ST complete — OSC is done.
-                        self.stats.bytes_stripped += 1;
                         self.state = StripState::Normal;
-                        self.stats.sequences_stripped += 1;
                     } else {
                         // Not ST — the ESC was part of the OSC body (rare).
                         // Stay in OSC and reprocess this byte.
@@ -1194,7 +1157,6 @@ impl AnsiStripper {
                 }
 
                 StripState::Apc => {
-                    self.stats.bytes_stripped += 1;
                     if b == 0x1B {
                         self.state = StripState::ApcEsc;
                     }
@@ -1204,9 +1166,7 @@ impl AnsiStripper {
                 StripState::ApcEsc => {
                     if b == b'\\' {
                         // ST complete — APC is done.
-                        self.stats.bytes_stripped += 1;
                         self.state = StripState::Normal;
-                        self.stats.sequences_stripped += 1;
                     } else {
                         // Not ST — stay in APC.
                         self.state = StripState::Apc;
@@ -1217,9 +1177,7 @@ impl AnsiStripper {
 
                 StripState::Charset => {
                     // Charset designation: consume the one charset byte.
-                    self.stats.bytes_stripped += 1;
                     self.state = StripState::Normal;
-                    self.stats.sequences_stripped += 1;
                     i += 1;
                 }
             }

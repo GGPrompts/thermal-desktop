@@ -61,10 +61,6 @@ enum PidSource {
     Pidfile(&'static str),
     /// Fall back to `pgrep -x <binary>`.
     Pgrep,
-    /// Use `pgrep -f <pattern>` with a custom full-cmdline pattern.
-    /// Useful when the binary name alone is ambiguous (e.g. `thc` runs
-    /// as tui, daemon, or window — we need to match `thc daemon`).
-    PgrepPattern(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -188,15 +184,6 @@ fn is_pid_alive(pid: u32) -> bool {
     signal::kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
-fn pgrep_pid_pattern(pattern: &str) -> Option<u32> {
-    let output = Command::new("pgrep").args(["-f", pattern]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().next()?.trim().parse().ok()
-}
-
 /// Read process start time from /proc and return a human-friendly uptime string.
 fn process_uptime(pid: u32) -> Option<String> {
     // /proc/<pid>/stat field 22 is starttime in clock ticks since boot.
@@ -246,7 +233,6 @@ fn get_service_status(def: &ServiceDef) -> ServiceStatus {
                 .filter(|cmd| *cmd != def.binary)
                 .and_then(|cmd| pgrep_pid(cmd))
         }),
-        PidSource::PgrepPattern(pattern) => pgrep_pid_pattern(pattern),
     };
 
     let stale_binary = pid.map_or(false, |p| is_stale_binary(p, def));
@@ -270,10 +256,7 @@ fn is_stale_binary(pid: u32, _def: &ServiceDef) -> bool {
 /// Delegates to the shared `daemon_lifecycle` module.
 fn count_instances(def: &ServiceDef) -> u32 {
     // Prefer the explicit count_pattern (avoids matching sibling subcommands).
-    let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
-        PidSource::PgrepPattern(pat) => Some(*pat),
-        _ => None,
-    });
+    let pgrep_pattern = def.count_pattern;
     let count = crate::daemon_lifecycle::count_instances(def.binary, pgrep_pattern);
     if count > 0 || pgrep_pattern.is_some() {
         return count;
@@ -299,10 +282,7 @@ fn start_service(def: &ServiceDef) -> Result<(), String> {
 
 fn stop_service(def: &ServiceDef, _status: &ServiceStatus) -> Result<(), String> {
     let short_name = binary_to_short_name(def.binary);
-    let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
-        PidSource::PgrepPattern(pat) => Some(*pat),
-        _ => None,
-    });
+    let pgrep_pattern = def.count_pattern;
 
     // Unified path: systemctl when managed, direct kill otherwise.
     let result = crate::daemon_lifecycle::stop_daemon(short_name, def.binary, pgrep_pattern);
@@ -494,10 +474,7 @@ impl ServicesPage {
         let def = &SERVICES[self.selected];
         let short_name = binary_to_short_name(def.binary);
         let program = def.command.unwrap_or(def.binary);
-        let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
-            PidSource::PgrepPattern(pat) => Some(*pat),
-            _ => None,
-        });
+        let pgrep_pattern = def.count_pattern;
 
         // Unified path: systemctl when managed (atomic restart), setsid fallback.
         match crate::daemon_lifecycle::restart_daemon(
@@ -566,10 +543,7 @@ impl ServicesPage {
             // systemctl kill failed — unit not active, fall through to pkill.
         }
 
-        let pgrep_pattern = def.count_pattern.or(match &def.pid_source {
-            PidSource::PgrepPattern(pat) => Some(*pat),
-            _ => None,
-        });
+        let pgrep_pattern = def.count_pattern;
         let short_name = binary_to_short_name(def.binary);
 
         match crate::daemon_lifecycle::force_kill_all(def.binary, short_name, pgrep_pattern) {

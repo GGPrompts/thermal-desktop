@@ -28,8 +28,6 @@ pub(super) mod colors {
     ];
     /// Active tool — searing red.
     pub const TOOL_ACTIVE: [f32; 4] = ThermalPalette::SEARING;
-    /// Tool pending — accent cold.
-    pub const TOOL_PENDING: [f32; 4] = ThermalPalette::ACCENT_COLD;
     /// Tool completed — status OK green.
     pub const TOOL_COMPLETED: [f32; 4] = ThermalPalette::STATUS_OK;
     /// Tool failed — status error red.
@@ -39,8 +37,6 @@ pub(super) mod colors {
     /// Context gauge fill (interpolated by usage).
     pub const GAUGE_LOW: [f32; 4] = ThermalPalette::MILD;
     pub const GAUGE_HIGH: [f32; 4] = ThermalPalette::SEARING;
-    /// Permission dialog border — hot yellow.
-    pub const PERMISSION_BORDER: [f32; 4] = ThermalPalette::HOT;
     /// Result success.
     pub const RESULT_OK: [f32; 4] = ThermalPalette::STATUS_OK;
     /// Result failure.
@@ -53,7 +49,6 @@ pub(super) mod colors {
 /// Get the accent color for a tool call card based on its status.
 fn tool_status_color(status: &ToolStatus) -> [f32; 4] {
     match status {
-        ToolStatus::Pending => colors::TOOL_PENDING,
         ToolStatus::Running => colors::TOOL_ACTIVE,
         ToolStatus::Completed => colors::TOOL_COMPLETED,
         ToolStatus::Failed => colors::TOOL_FAILED,
@@ -78,7 +73,6 @@ fn widget_accent(widget: &Widget) -> [f32; 4] {
                 1.0,
             ]
         }
-        WidgetKind::PermissionDialog(_) => colors::PERMISSION_BORDER,
         WidgetKind::ResultCard(card) => {
             if card.success {
                 colors::RESULT_OK
@@ -484,7 +478,6 @@ fn widget_text(widget: &Widget) -> (String, String) {
     match &widget.kind {
         WidgetKind::ToolCallCard(card) => {
             let status_icon = match card.status {
-                ToolStatus::Pending => "\u{25cb}", // ○
                 ToolStatus::Running => "\u{25cf}", // ●
                 ToolStatus::Completed => "\u{2713}", // ✓
                 ToolStatus::Failed => "\u{2717}",  // ✗
@@ -510,11 +503,6 @@ fn widget_text(widget: &Widget) -> (String, String) {
             };
             let primary = format!("Context: {}%", pct);
             (primary, String::new())
-        }
-        WidgetKind::PermissionDialog(dialog) => {
-            let primary = format!("Permission: {}", dialog.tool);
-            let secondary = dialog.message.clone();
-            (primary, secondary)
         }
         WidgetKind::ResultCard(card) => {
             let icon = if card.success { "\u{2713}" } else { "\u{2717}" };

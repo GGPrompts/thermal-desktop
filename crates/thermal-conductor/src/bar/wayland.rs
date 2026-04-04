@@ -55,7 +55,6 @@ pub const BAR_HEIGHT: u32 = 32;
 pub enum ClickAction {
     WorkspaceSwitch(i64),
     VoiceMuteToggle,
-    SessionFocus(i64),
 }
 
 /// A rectangular click target on the bar surface.
@@ -522,12 +521,6 @@ fn execute_click_action(action: &ClickAction) {
                         let _ = stream.write_all(b"{\"action\":\"voice_toggle\"}\n");
                     }
                 });
-        }
-        ClickAction::SessionFocus(ws) => {
-            tracing::info!(workspace = ws, "click: focusing session workspace");
-            let _ = std::process::Command::new("hyprctl")
-                .args(["dispatch", "workspace", &ws.to_string()])
-                .spawn();
         }
     }
 }

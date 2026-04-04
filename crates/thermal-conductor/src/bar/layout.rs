@@ -57,18 +57,16 @@ pub struct BarLayout {
     pub center: Vec<ModuleOutput>,
     pub right: Vec<ModuleOutput>,
     pub bar_width: u32,
-    pub bar_height: u32,
 }
 
 impl BarLayout {
-    /// Create a new empty layout with the given bar width (height is always 32).
+    /// Create a new empty layout with the given bar width (height is always `BAR_HEIGHT`).
     pub fn new(bar_width: u32) -> Self {
         Self {
             left: Vec::new(),
             center: Vec::new(),
             right: Vec::new(),
             bar_width,
-            bar_height: 32,
         }
     }
 

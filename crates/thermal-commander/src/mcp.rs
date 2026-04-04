@@ -95,14 +95,6 @@ impl ContentBlock {
         }
     }
 
-    pub fn image(base64_data: String, mime: &str) -> Self {
-        Self {
-            content_type: "image".into(),
-            text: None,
-            data: Some(base64_data),
-            mime_type: Some(mime.into()),
-        }
-    }
 }
 
 /// Tool call result.

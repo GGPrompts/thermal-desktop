@@ -57,25 +57,6 @@ impl RingBuffer {
         }
         self.buf.push_back(msg);
     }
-
-    /// Return all messages with seq > `since_seq`.
-    fn replay_since(&self, since_seq: u64) -> Vec<Message> {
-        self.buf
-            .iter()
-            .filter(|m| m.seq > since_seq)
-            .cloned()
-            .collect()
-    }
-
-    /// The oldest sequence number still in the buffer, or None if empty.
-    #[allow(dead_code)]
-    fn oldest_seq(&self) -> Option<u64> {
-        self.buf.front().map(|m| m.seq)
-    }
-
-    fn len(&self) -> usize {
-        self.buf.len()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +111,6 @@ impl MessageBus {
     /// Subscribe to live message broadcasts.
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Message>> {
         self.broadcast_tx.subscribe()
-    }
-
-    /// Replay messages from the ring buffer with seq > `since_seq`.
-    pub async fn replay_since(&self, since_seq: u64) -> Vec<Message> {
-        let ring = self.ring.lock().await;
-        ring.replay_since(since_seq)
     }
 
     /// Ingest a message: assign seq + ts, store in ring, broadcast to subscribers.
@@ -291,14 +266,14 @@ mod tests {
     #[test]
     fn ring_buffer_push_and_len() {
         let mut ring = RingBuffer::new(5);
-        assert_eq!(ring.len(), 0);
+        assert_eq!(ring.buf.len(), 0);
 
         for i in 1..=3 {
             let mut msg = make_agent_msg(&format!("msg {i}"));
             msg.seq = i;
             ring.push(msg);
         }
-        assert_eq!(ring.len(), 3);
+        assert_eq!(ring.buf.len(), 3);
     }
 
     #[test]
@@ -309,8 +284,8 @@ mod tests {
             msg.seq = i;
             ring.push(msg);
         }
-        assert_eq!(ring.len(), 3);
-        assert_eq!(ring.oldest_seq(), Some(3));
+        assert_eq!(ring.buf.len(), 3);
+        assert_eq!(ring.buf.front().map(|m| m.seq), Some(3));
     }
 
     #[test]
@@ -322,7 +297,7 @@ mod tests {
             ring.push(msg);
         }
 
-        let replayed = ring.replay_since(3);
+        let replayed: Vec<_> = ring.buf.iter().filter(|m| m.seq > 3).collect();
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].seq, 4);
         assert_eq!(replayed[1].seq, 5);
@@ -337,7 +312,7 @@ mod tests {
             ring.push(msg);
         }
 
-        let replayed = ring.replay_since(0);
+        let replayed: Vec<_> = ring.buf.iter().filter(|m| m.seq > 0).collect();
         assert_eq!(replayed.len(), 3);
     }
 
@@ -350,14 +325,14 @@ mod tests {
             ring.push(msg);
         }
 
-        let replayed = ring.replay_since(100);
+        let replayed: Vec<_> = ring.buf.iter().filter(|m| m.seq > 100).collect();
         assert_eq!(replayed.len(), 0);
     }
 
     #[test]
     fn ring_buffer_oldest_seq_empty() {
         let ring = RingBuffer::new(10);
-        assert_eq!(ring.oldest_seq(), None);
+        assert_eq!(ring.buf.front().map(|m| m.seq), None);
     }
 
     #[test]
@@ -368,8 +343,8 @@ mod tests {
             msg.seq = i;
             ring.push(msg);
         }
-        assert_eq!(ring.len(), 1);
-        assert_eq!(ring.oldest_seq(), Some(3));
+        assert_eq!(ring.buf.len(), 1);
+        assert_eq!(ring.buf.front().map(|m| m.seq), Some(3));
     }
 
     // -- MessageBus ingest tests --
@@ -382,7 +357,7 @@ mod tests {
         bus.send(msg).await;
 
         let ring = bus.ring.lock().await;
-        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.buf.len(), 1);
         let stored = &ring.buf[0];
         assert_eq!(stored.seq, 1);
         assert!(stored.ts > 0);
@@ -435,8 +410,8 @@ mod tests {
         }
 
         let ring = bus.ring.lock().await;
-        assert_eq!(ring.len(), 3);
-        assert_eq!(ring.oldest_seq(), Some(3));
+        assert_eq!(ring.buf.len(), 3);
+        assert_eq!(ring.buf.front().map(|m| m.seq), Some(3));
     }
 
     // -- Subscribe message creation test --

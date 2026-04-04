@@ -6,6 +6,7 @@
 //!
 //! Launched via `thc view <path>` or spawned by SwarmWatcher for subagent windows.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,10 @@ const OK_COLOR: RColor = RColor::Rgb(0x22, 0xc5, 0x5e); // STATUS_OK
 /// A pre-rendered display line with styling info.
 struct DisplayLine {
     spans: Vec<Span<'static>>,
+    /// Index of the source event that produced this line (for expansion mapping).
+    event_index: usize,
+    /// Whether this line is an expandable "+N more lines" indicator.
+    is_expandable: bool,
 }
 
 // ── Viewer state ────────────────────────────────────────────────────────────
@@ -66,6 +71,10 @@ struct ViewerState {
     rendered_width: u16,
     /// Whether the final report has been expanded (done once when stream stops).
     final_expanded: bool,
+    /// Set of event indices that the user has manually expanded.
+    expanded_events: HashSet<usize>,
+    /// Whether all events are expanded (toggle-all state).
+    all_expanded: bool,
 }
 
 impl ViewerState {
@@ -95,6 +104,8 @@ impl ViewerState {
             terminal_width: 120,
             rendered_width: 0,
             final_expanded: false,
+            expanded_events: HashSet::new(),
+            all_expanded: false,
         }
     }
 
@@ -153,7 +164,9 @@ impl ViewerState {
                 self.terminal_width as usize
             };
             for event in new_events {
-                let new_lines = render_event(&event, width, false);
+                let idx = self.events.len();
+                let expanded = self.all_expanded || self.expanded_events.contains(&idx);
+                let new_lines = render_event(&event, width, expanded, idx);
                 self.lines.extend(new_lines);
                 self.events.push(event);
             }
@@ -229,6 +242,10 @@ impl ViewerState {
 
     /// Whether event at index should be rendered expanded.
     fn is_event_expanded(&self, idx: usize) -> bool {
+        // User manual toggle takes priority.
+        if self.all_expanded || self.expanded_events.contains(&idx) {
+            return true;
+        }
         if !self.final_expanded {
             return false;
         }
@@ -238,6 +255,70 @@ impl ViewerState {
             .iter()
             .rposition(|e| e.event_type == SessionEventType::AssistantText);
         last_assistant == Some(idx)
+    }
+
+    /// Toggle expansion for the event that produced the display line at `display_idx`.
+    /// Returns true if a toggle actually happened.
+    fn toggle_expansion_at(&mut self, display_idx: usize, viewport_height: usize) -> bool {
+        let line = match self.lines.get(display_idx) {
+            Some(l) => l,
+            None => return false,
+        };
+        if !line.is_expandable {
+            return false;
+        }
+        let event_idx = line.event_index;
+        if self.expanded_events.contains(&event_idx) {
+            self.expanded_events.remove(&event_idx);
+        } else {
+            self.expanded_events.insert(event_idx);
+        }
+        // Remember current scroll position relative to the toggled line.
+        let old_scroll = self.scroll;
+        self.rerender_all_lines();
+        // If we collapsed something above the viewport, adjust scroll to keep context.
+        let new_total = self.line_count();
+        if old_scroll > new_total.saturating_sub(viewport_height) {
+            self.scroll = new_total.saturating_sub(viewport_height);
+        } else {
+            self.scroll = old_scroll;
+        }
+        true
+    }
+
+    /// Toggle expand/collapse all events.
+    fn toggle_all_expansion(&mut self, viewport_height: usize) {
+        self.all_expanded = !self.all_expanded;
+        if !self.all_expanded {
+            self.expanded_events.clear();
+        }
+        let old_scroll = self.scroll;
+        self.rerender_all_lines();
+        let new_total = self.line_count();
+        if old_scroll > new_total.saturating_sub(viewport_height) {
+            self.scroll = new_total.saturating_sub(viewport_height);
+        } else {
+            self.scroll = old_scroll;
+        }
+    }
+
+    /// Find the display line index that the cursor is on (top of viewport + offset).
+    /// For now, use the first visible expandable line, or support Enter on any line
+    /// that belongs to a collapsible event. We use the "current line" = scroll position.
+    fn cursor_display_line(&self, viewport_height: usize) -> usize {
+        // The "cursor" is conceptually the first visible line.
+        // Users scroll to a "+N more lines" indicator and press Enter.
+        // We search visible lines for the first expandable one from the top.
+        let visible_start = self.scroll;
+        let visible_end = (visible_start + viewport_height).min(self.line_count());
+        for i in visible_start..visible_end {
+            if let Some(dl) = self.lines.get(i) {
+                if dl.is_expandable {
+                    return i;
+                }
+            }
+        }
+        visible_start
     }
 
     /// Expand the final assistant text event to show the full report.
@@ -252,7 +333,7 @@ impl ViewerState {
         self.lines.clear();
         for (i, event) in self.events.iter().enumerate() {
             let expanded = self.is_event_expanded(i);
-            let new_lines = render_event(event, width, expanded);
+            let new_lines = render_event(event, width, expanded, i);
             self.lines.extend(new_lines);
         }
     }
@@ -299,34 +380,38 @@ fn display_line_count(event: &SessionEvent, expanded: bool) -> usize {
 /// Render a single event into display lines.
 /// `max_width` is the usable terminal width (columns minus margins).
 /// `expanded` controls whether assistant text shows all lines (true) or is collapsed (false).
-fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<DisplayLine> {
+/// `event_idx` is the index of this event in the events vec (for expansion mapping).
+fn render_event(event: &SessionEvent, max_width: usize, expanded: bool, event_idx: usize) -> Vec<DisplayLine> {
     let mut lines = Vec::new();
     // Content area width after accounting for left margin/gutter (~6 chars).
     let content_width = max_width.saturating_sub(6);
+
+    // Helper: create a plain (non-expandable) display line for this event.
+    macro_rules! dl {
+        ($spans:expr) => {
+            DisplayLine { spans: $spans, event_index: event_idx, is_expandable: false }
+        };
+    }
 
     match event.event_type {
         SessionEventType::UserMessage => {
             let ts = format_time(&event.timestamp);
 
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled("┃ ", Style::default().fg(USER_COLOR)),
-                    Span::styled("USER", Style::default().fg(USER_COLOR).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {ts}"), Style::default().fg(MUTED_COLOR)),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("┃ ", Style::default().fg(USER_COLOR)),
+                Span::styled("USER", Style::default().fg(USER_COLOR).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {ts}"), Style::default().fg(MUTED_COLOR)),
+            ]));
 
             let max_lines = if expanded { 100 } else { 5 };
             for line in event.content.lines().take(max_lines) {
                 let text = truncate_line(line, content_width);
-                lines.push(DisplayLine {
-                    spans: vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled("┃ ", Style::default().fg(USER_COLOR)),
-                        Span::styled(text, Style::default().fg(RColor::Rgb(0xe9, 0xe0, 0xff))),
-                    ],
-                });
+                lines.push(dl!(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled("┃ ", Style::default().fg(USER_COLOR)),
+                    Span::styled(text, Style::default().fg(RColor::Rgb(0xe9, 0xe0, 0xff))),
+                ]));
             }
             let total = event.content.lines().count();
             if total > max_lines {
@@ -336,28 +421,40 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<D
                         Span::styled("  ", Style::default()),
                         Span::styled("┃ ", Style::default().fg(USER_COLOR)),
                         Span::styled(
-                            format!("  +{remaining} more lines"),
-                            Style::default().fg(MUTED_COLOR),
+                            format!("  ▸ +{remaining} more lines"),
+                            Style::default().fg(TOOL_COLOR),
                         ),
                     ],
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            } else if expanded && total > 5 {
+                // Show a collapse indicator when expanded.
+                lines.push(DisplayLine {
+                    spans: vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled("┃ ", Style::default().fg(USER_COLOR)),
+                        Span::styled(
+                            "  ▾ collapse".to_string(),
+                            Style::default().fg(TOOL_COLOR),
+                        ),
+                    ],
+                    event_index: event_idx,
+                    is_expandable: true,
                 });
             }
 
-            lines.push(DisplayLine {
-                spans: vec![Span::raw("")],
-            });
+            lines.push(dl!(vec![Span::raw("")]));
         }
 
         SessionEventType::AssistantText => {
             let max_lines = if expanded { 200 } else { 4 };
             for line in event.content.lines().take(max_lines) {
                 let text = truncate_line(line, content_width);
-                lines.push(DisplayLine {
-                    spans: vec![
-                        Span::styled("    ", Style::default()),
-                        Span::styled(text, Style::default().fg(ASSIST_COLOR)),
-                    ],
-                });
+                lines.push(dl!(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(text, Style::default().fg(ASSIST_COLOR)),
+                ]));
             }
             let total = event.content.lines().count();
             if total > max_lines {
@@ -366,15 +463,27 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<D
                     spans: vec![
                         Span::styled("    ", Style::default()),
                         Span::styled(
-                            format!("+{remaining} more lines"),
-                            Style::default().fg(MUTED_COLOR),
+                            format!("▸ +{remaining} more lines"),
+                            Style::default().fg(TOOL_COLOR),
                         ),
                     ],
+                    event_index: event_idx,
+                    is_expandable: true,
+                });
+            } else if expanded && total > 4 {
+                lines.push(DisplayLine {
+                    spans: vec![
+                        Span::styled("    ", Style::default()),
+                        Span::styled(
+                            "▾ collapse".to_string(),
+                            Style::default().fg(TOOL_COLOR),
+                        ),
+                    ],
+                    event_index: event_idx,
+                    is_expandable: true,
                 });
             }
-            lines.push(DisplayLine {
-                spans: vec![Span::raw("")],
-            });
+            lines.push(dl!(vec![Span::raw("")]));
         }
 
         SessionEventType::Thinking => {
@@ -382,23 +491,21 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<D
                 event.content.lines().next().unwrap_or(""),
                 content_width.saturating_sub(14),
             );
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        "▸ Thinking",
-                        Style::default()
-                            .fg(THINK_COLOR)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                    Span::styled(
-                        format!("  {preview}"),
-                        Style::default()
-                            .fg(MUTED_COLOR)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    "▸ Thinking",
+                    Style::default()
+                        .fg(THINK_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    format!("  {preview}"),
+                    Style::default()
+                        .fg(MUTED_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]));
         }
 
         SessionEventType::ToolUse => {
@@ -406,13 +513,11 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<D
             let summary = extract_tool_summary(tool, &event.content, content_width.saturating_sub(tool.len() + 6));
             let tool_style = tool_color_style(tool);
 
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(format!("▸ {tool}"), tool_style.add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("  {summary}"), Style::default().fg(MUTED_COLOR)),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("▸ {tool}"), tool_style.add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {summary}"), Style::default().fg(MUTED_COLOR)),
+            ]));
         }
 
         SessionEventType::ToolResult => {
@@ -440,53 +545,45 @@ fn render_event(event: &SessionEvent, max_width: usize, expanded: bool) -> Vec<D
                 String::new()
             };
 
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(format!("{icon} "), Style::default().fg(color)),
-                    Span::styled(preview, Style::default().fg(MUTED_COLOR)),
-                    Span::styled(line_info, Style::default().fg(MUTED_COLOR).add_modifier(Modifier::DIM)),
-                    Span::styled(
-                        format!("  {duration_str}"),
-                        Style::default().fg(MUTED_COLOR).add_modifier(Modifier::DIM),
-                    ),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(format!("{icon} "), Style::default().fg(color)),
+                Span::styled(preview, Style::default().fg(MUTED_COLOR)),
+                Span::styled(line_info, Style::default().fg(MUTED_COLOR).add_modifier(Modifier::DIM)),
+                Span::styled(
+                    format!("  {duration_str}"),
+                    Style::default().fg(MUTED_COLOR).add_modifier(Modifier::DIM),
+                ),
+            ]));
 
-            lines.push(DisplayLine {
-                spans: vec![Span::raw("")],
-            });
+            lines.push(dl!(vec![Span::raw("")]));
         }
 
         SessionEventType::Progress => {
             let tool = event.tool_name.as_deref().unwrap_or("?");
             let msg = truncate_line(&event.content, content_width.saturating_sub(tool.len() + 4));
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("    ", Style::default()),
-                    Span::styled(
-                        format!("⋯ {tool}: {msg}"),
-                        Style::default()
-                            .fg(MUTED_COLOR)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("    ", Style::default()),
+                Span::styled(
+                    format!("⋯ {tool}: {msg}"),
+                    Style::default()
+                        .fg(MUTED_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]));
         }
 
         SessionEventType::SystemMessage => {
             let msg = truncate_line(&event.content, content_width.saturating_sub(4));
-            lines.push(DisplayLine {
-                spans: vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(
-                        format!("◆ {msg}"),
-                        Style::default()
-                            .fg(MUTED_COLOR)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                ],
-            });
+            lines.push(dl!(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("◆ {msg}"),
+                    Style::default()
+                        .fg(MUTED_COLOR)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ]));
         }
     }
 
@@ -705,7 +802,11 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
         Span::styled("f", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
         Span::styled(":follow  ", Style::default().fg(MUTED_COLOR)),
         Span::styled("G", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(":bottom", Style::default().fg(MUTED_COLOR)),
+        Span::styled(":bottom  ", Style::default().fg(MUTED_COLOR)),
+        Span::styled("↵", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(":expand  ", Style::default().fg(MUTED_COLOR)),
+        Span::styled("e", Style::default().fg(TOOL_COLOR).add_modifier(Modifier::BOLD)),
+        Span::styled(":expand-all", Style::default().fg(MUTED_COLOR)),
     ]);
 
     let footer = Paragraph::new(footer_line).style(Style::default().bg(RColor::Rgb(0x12, 0x08, 0x22)));
@@ -811,6 +912,18 @@ pub async fn run(path: PathBuf) -> Result<()> {
                         // Previous tool call.
                         (KeyCode::Char('T'), _) => {
                             state.jump_prev_tool();
+                        }
+
+                        // Expand/collapse: Enter or Space toggles the nearest
+                        // expandable line visible in the viewport.
+                        (KeyCode::Enter, _) | (KeyCode::Char(' '), _) => {
+                            let target = state.cursor_display_line(viewport_height);
+                            state.toggle_expansion_at(target, viewport_height);
+                        }
+
+                        // Toggle-all expand/collapse.
+                        (KeyCode::Char('e'), _) => {
+                            state.toggle_all_expansion(viewport_height);
                         }
 
                         _ => {}

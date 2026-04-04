@@ -197,6 +197,47 @@ fn pgrep_pid_pattern(pattern: &str) -> Option<u32> {
     stdout.lines().next()?.trim().parse().ok()
 }
 
+/// Read process start time from /proc and return a human-friendly uptime string.
+fn process_uptime(pid: u32) -> Option<String> {
+    // /proc/<pid>/stat field 22 is starttime in clock ticks since boot.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields are space-separated, but field 2 (comm) may contain spaces inside
+    // parens. Skip past the closing paren to parse reliably.
+    let after_comm = stat.rsplit_once(')')?.1;
+    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+    // After comm, field indices are offset by 2: field 22 (starttime) is at index 19.
+    let starttime_ticks: u64 = fields.get(19)?.parse().ok()?;
+    let ticks_per_sec = nix::unistd::sysconf(nix::unistd::SysconfVar::CLK_TCK)
+        .ok()
+        .flatten()? as u64;
+
+    // Read system uptime to convert boot-relative ticks to wall clock duration.
+    let uptime_str = fs::read_to_string("/proc/uptime").ok()?;
+    let system_uptime_secs: f64 = uptime_str.split_whitespace().next()?.parse().ok()?;
+
+    let process_start_secs = starttime_ticks / ticks_per_sec;
+    let elapsed = system_uptime_secs as u64 - process_start_secs;
+
+    Some(format_uptime(elapsed))
+}
+
+/// Format seconds into a compact human-readable string.
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn get_service_status(def: &ServiceDef) -> ServiceStatus {
     let pid = match &def.pid_source {
         PidSource::Pidfile(filename) => read_pid_from_file(filename),
@@ -768,7 +809,7 @@ impl TuiPage for ServicesPage {
             "Description",
             "Status",
             "PID",
-            "Config",
+            "Uptime",
         ])
         .style(
             Style::default()
@@ -809,9 +850,9 @@ impl TuiPage for ServicesPage {
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "-".to_string());
 
-                let config_text = self
-                    .settings
-                    .summary_for(def.binary)
+                let uptime_text = status
+                    .pid
+                    .and_then(|p| process_uptime(p))
                     .unwrap_or_else(|| "-".to_string());
 
                 let row_style = if selected {
@@ -834,7 +875,7 @@ impl TuiPage for ServicesPage {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(pid_text, Style::default().fg(TEXT_MUTED)),
-                    Span::styled(config_text, Style::default().fg(TEXT_MUTED)),
+                    Span::styled(uptime_text, Style::default().fg(TEXT_MUTED)),
                 ])
                 .style(row_style)
             })
@@ -848,7 +889,7 @@ impl TuiPage for ServicesPage {
                 Constraint::Length(22), // description
                 Constraint::Length(9),  // status
                 Constraint::Length(8),  // PID
-                Constraint::Min(20),    // config summary
+                Constraint::Min(10),    // uptime
             ],
         )
         .header(header)

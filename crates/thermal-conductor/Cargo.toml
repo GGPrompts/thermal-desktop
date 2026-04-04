@@ -39,6 +39,7 @@ tempfile = { workspace = true }
 zbus = { workspace = true }
 regex = { workspace = true }
 shlex = "1"
+unicode-width = "0.2"
 
 [dev-dependencies]
 thermal-core = { path = "../thermal-core" }

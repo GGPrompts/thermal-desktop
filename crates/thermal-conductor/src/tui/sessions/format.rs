@@ -69,7 +69,7 @@ pub(super) fn status_label(status: &ClaudeStatus) -> &'static str {
 /// Color for context percentage thresholds (thermal palette).
 pub(super) fn ctx_color(pct: f32) -> Color {
     if pct < 50.0 {
-        pal(ThermalPalette::COLD)
+        pal(ThermalPalette::ACCENT_COOL)
     } else if pct < 75.0 {
         pal(ThermalPalette::WARM)
     } else if pct < 90.0 {

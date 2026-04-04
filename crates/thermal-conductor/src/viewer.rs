@@ -888,10 +888,15 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
     let content_area = chunks[1];
     let viewport_height = content_area.height as usize;
 
-    // Estimate scrollbar presence, then update content width (may re-render
-    // and change line count). Re-read total_lines and has_scrollbar after.
-    let preliminary_has_scrollbar = state.line_count() > viewport_height;
-    state.update_content_width(content_area.width, preliminary_has_scrollbar);
+    // Clear the entire content area first to prevent stale characters
+    // from previous frames (scrollbar tracks, gutter fills) lingering.
+    let bg_clear = Block::default().style(Style::default().bg(BG_COLOR));
+    f.render_widget(bg_clear, content_area);
+
+    // Always reserve 1 column for the scrollbar gutter to avoid width
+    // oscillation: adding/removing the scrollbar column triggers rerender
+    // which can change line count, toggling scrollbar presence each frame.
+    state.update_content_width(content_area.width, true);
 
     let total_lines = state.line_count();
     let has_scrollbar = total_lines > viewport_height;
@@ -917,32 +922,14 @@ fn render_ui(f: &mut Frame, state: &mut ViewerState) {
         display_lines.push(Line::from(""));
     }
 
-    // Render content into an area that excludes the scrollbar column to
-    // prevent text from bleeding into it.
-    let text_area = if has_scrollbar {
-        Rect {
-            width: content_area.width.saturating_sub(1),
-            ..content_area
-        }
-    } else {
-        content_area
+    // Text area always excludes the scrollbar column.
+    let text_area = Rect {
+        width: content_area.width.saturating_sub(1),
+        ..content_area
     };
 
     let content = Paragraph::new(display_lines).style(Style::default().bg(BG_COLOR));
     f.render_widget(content, text_area);
-
-    // Fill the scrollbar gutter column with the background color so no
-    // stale text is visible behind the scrollbar track.
-    if has_scrollbar {
-        let gutter = Rect {
-            x: content_area.x + content_area.width.saturating_sub(1),
-            y: content_area.y,
-            width: 1,
-            height: content_area.height,
-        };
-        let bg_fill = Block::default().style(Style::default().bg(BG_COLOR));
-        f.render_widget(bg_fill, gutter);
-    }
 
     // ── Scrollbar ───────────────────────────────────────────────────────
     if has_scrollbar {

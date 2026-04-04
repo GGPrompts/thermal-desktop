@@ -504,7 +504,8 @@ impl SessionsPage {
                     .status();
             }
 
-            let target = if let Some(ref parent) = row.session.parent_session_id {
+            // Try kitty title-based focus first (matches how sessions are spawned).
+            let session_id = if let Some(ref parent) = row.session.parent_session_id {
                 parent.as_str()
             } else {
                 &row.session.session_id
@@ -514,17 +515,25 @@ impl SessionsPage {
                     "@",
                     "focus-window",
                     "--match",
-                    &format!("pid:{}", row.session.pid.unwrap_or(0)),
+                    &format!("title:^thermal-{}$", session_id),
                 ])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
 
             if !kitty_ok {
-                // kitty focus failed (window gone or PID stale) — try tmux fallback
-                let _ = Command::new("tmux")
-                    .args(["switch-client", "-t", target])
-                    .status();
+                // Kitty title match failed — try PID-based focus via kitty, then hyprctl.
+                let pid = row.session.pid.unwrap_or(0);
+                let pid_ok = Command::new("kitty")
+                    .args(["@", "focus-window", "--match", &format!("pid:{pid}")])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !pid_ok {
+                    let _ = Command::new("hyprctl")
+                        .args(["dispatch", "focuswindow", &format!("pid:{pid}")])
+                        .output();
+                }
             }
         }
     }
@@ -903,9 +912,9 @@ mod tests {
     // ── ctx_color thresholds ──────────────────────────────────────────────────
 
     #[test]
-    fn ctx_color_below_50_is_cold() {
-        assert_eq!(ctx_color(0.0), pal(ThermalPalette::COLD));
-        assert_eq!(ctx_color(49.9), pal(ThermalPalette::COLD));
+    fn ctx_color_below_50_is_accent_cool() {
+        assert_eq!(ctx_color(0.0), pal(ThermalPalette::ACCENT_COOL));
+        assert_eq!(ctx_color(49.9), pal(ThermalPalette::ACCENT_COOL));
     }
 
     #[test]

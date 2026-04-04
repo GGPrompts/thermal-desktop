@@ -1,9 +1,9 @@
 # thermal-conductor
 
-Tabbed ratatui TUI hub for orchestrating Claude agent **therminals**. Uses kitty's remote control API as the primary session backend, with the optional PTY session daemon as a fallback.
+Process manager and orchestration hub for AI agent sessions. The conductor daemon owns agent PTYs and provides session persistence, the message bus, and semantic event streaming. The TUI is the control plane; `thc window` (GPU terminal) is the primary display for agent sessions.
 
 ## What This Does
-Spawns, tracks, and manages terminal sessions inside kitty via `kitty @` remote control. Session metadata (worktree paths, profile names, spawn timestamps) is persisted in a JSON sidecar at `/run/user/$UID/thermal/sessions.json`. A daemon-based backend is available as a fallback when kitty is not running with remote control enabled.
+Manages AI agent sessions (Claude, Codex, Copilot CLI) as daemon-owned processes with full lifecycle control — spawn, attach/detach, persist, observe, and orchestrate. The daemon owns PTYs so sessions survive window closes (like tmux, but purpose-built for agents). The GPU terminal (`thc window`) attaches to daemon sessions for rendering. kitty is used as a stable fallback for non-agent terminals and during GPU terminal development.
 
 ## Usage
 ```bash
@@ -19,12 +19,19 @@ thc doctor --fix                       # Clean stale files + restart dead core d
 ```
 
 ## Architecture
+
+### Target architecture
 ```
-thc tui (ratatui)
-    ↕ Backend::Kitty (default)          ↕ Backend::Daemon (fallback)
-kitty @ remote control API          thc daemon (Unix socket / MessagePack)
-    ↕ kitty windows (PTYs)              ↕ alacritty_terminal PTYs
+thc tui (ratatui control plane)
+    ↕ thc daemon (Unix socket / MessagePack)
+    ↕ owns agent PTYs, message bus, semantic events
+    ↕
+thc window (GPU terminal)              kitty (non-agent terminals)
+    ↕ attaches to daemon sessions           ↕ plain PTYs
 ```
+
+### Current state (transitional)
+Agent sessions currently spawn via kitty (`kitty @ launch`). The daemon exists and handles PTY sessions, but the TUI doesn't yet spawn through it — that wiring is tracked in therm-uayi. kitty is used as the stable development environment while the GPU terminal reaches full parity.
 
 Backend detection order for `--backend=auto`:
 1. Probe `kitty @ ls` — if it succeeds, use the kitty backend.
@@ -69,13 +76,14 @@ Designed as a command center for a vertical monitor:
 - TUI logging goes to file only (`/run/user/$UID/thermal/conductor-tui.log`), never stderr.
 
 ## GPU Terminal Window
-`thermal-conductor window` — wgpu-rendered terminal with alacritty_terminal backend. Supports standalone mode (own PTY) or client mode (streams from `thc daemon` via `spawn_daemon_reader_task()`). Agent overlay HUD is decorative. Wayland input handlers (`input_handlers.rs`) clean up keyboard repeat/modifier state on focus loss and mouse button state on pointer leave — maintain this pattern when adding new input handling.
+`thermal-conductor window` — wgpu-rendered terminal with alacritty_terminal backend. Currently runs in standalone mode (own PTY). Client mode (attach to daemon session) is scaffolded but not yet wired — tracked in therm-uayi. Wayland input handlers (`input_handlers.rs`) clean up keyboard repeat/modifier state on focus loss and mouse button state on pointer leave — maintain this pattern when adding new input handling.
 
 ## Roadmap: GPU AI Terminal
-- Phase 1 (done): GPU terminal rendering single PTY
-- Phase 2: Multi-pane layout with agent-aware overlays
-- Phase 3 (done): Session daemon streaming to GPU terminal
-- Phase 4: AI-native features (semantic scrollback, context heatmaps)
+- Phase 1 (done): GPU terminal rendering single PTY — near parity with kitty
+- Phase 2: Wire daemon → GPU terminal for agent sessions (therm-uayi) — spawn agents through daemon, attach/detach via `thc window`
+- Phase 3: Message bus in daemon — agents coordinate without UI attached
+- Phase 4: Multi-pane layout, semantic features, context heatmaps
+- End goal: GPU terminal replaces kitty entirely for agent sessions; kitty only for dev shells during transition
 
 ## State File Watcher
 The daemon owns a **single `ClaudeStatePoller`** (inotify) that watches `/tmp/{claude-code,codex,copilot}-state/` and imports external sessions into the semantic event bus. This replaces the old pattern where every consumer ran its own poller. External sessions get the same granular events (activity, tool start/stop, context threshold) as daemon-owned PTY sessions. Sessions are tagged `backend: "external"` vs `"daemon"`.
@@ -102,4 +110,4 @@ Integration tests in `tests/daemon_lifecycle.rs` cover: pidfile lifecycle, stale
 
 ## Dependencies
 - `thermal-core` for `ClaudeStatePoller` (daemon-owned, single instance) and shared palette
-- kitty with `allow_remote_control socket-only` (or `thc daemon` as fallback)
+- kitty with `allow_remote_control socket-only` (used for non-agent terminals and during GPU terminal development)

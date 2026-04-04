@@ -11,6 +11,7 @@ use ratatui::{
 };
 
 use thermal_core::{ClaudeStatus, SessionStateExt, palette::ThermalPalette};
+use unicode_width::UnicodeWidthStr;
 
 use super::format::*;
 use super::{FocusedPanel, SessionsPage};
@@ -23,12 +24,14 @@ impl SessionsPage {
         } else {
             (self.chat_messages.len() as u16).min(5)
         };
+        // Table height: header (2 rows) + data rows + 1 padding, min 4 rows.
+        let table_rows = (2 + self.display_rows.len() + 1).max(4) as u16;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(40),          // table
+                Constraint::Min(table_rows),         // table — adapts to session count
                 Constraint::Length(1),               // timeline bar for selected session
-                Constraint::Percentage(35),          // preview pane
+                Constraint::Percentage(100),         // preview pane — fills remaining space
                 Constraint::Length(chat_msg_height), // recent chat messages
                 Constraint::Length(3),               // chat input bar
                 Constraint::Length(1),               // footer
@@ -314,7 +317,11 @@ impl SessionsPage {
                 )
             } else {
                 let total = self.preview_content.len();
-                let end = self.preview_scroll.max(1).min(total);
+                let end = if self.preview_scroll == 0 {
+                    inner_height.min(total)
+                } else {
+                    self.preview_scroll.min(total)
+                };
                 let start = end.saturating_sub(inner_height);
                 let visible_lines: Vec<Line> = self.preview_content[start..end].to_vec();
 
@@ -436,18 +443,28 @@ impl SessionsPage {
                 Line::from(Span::styled(&self.chat_input, Style::default().fg(TEXT)))
             };
 
-            let input_widget = Paragraph::new(input_line).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(input_border_color))
-                    .title(input_title)
-                    .title_style(Style::default().fg(if chat_focused {
-                        pal(ThermalPalette::ACCENT_WARM)
-                    } else {
-                        TEXT_MUTED
-                    }))
-                    .style(Style::default().bg(BG)),
-            );
+            // Horizontal scroll: keep cursor visible within the input box.
+            let inner_width = chunks[4].width.saturating_sub(2) as usize; // minus borders
+            let cursor_col = before_cursor.width();
+            let h_scroll = if cursor_col >= inner_width {
+                (cursor_col - inner_width + 1) as u16
+            } else {
+                0
+            };
+            let input_widget = Paragraph::new(input_line)
+                .scroll((0, h_scroll))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(input_border_color))
+                        .title(input_title)
+                        .title_style(Style::default().fg(if chat_focused {
+                            pal(ThermalPalette::ACCENT_WARM)
+                        } else {
+                            TEXT_MUTED
+                        }))
+                        .style(Style::default().bg(BG)),
+                );
             f.render_widget(input_widget, chunks[4]);
         }
 

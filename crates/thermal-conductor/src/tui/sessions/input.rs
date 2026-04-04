@@ -147,7 +147,7 @@ impl SessionsPage {
                     self.focused_panel = self.focused_panel.prev();
                 }
                 KeyCode::PageUp => {
-                    self.preview_scroll = self.preview_scroll.saturating_sub(10).max(1);
+                    self.preview_scroll = self.preview_scroll.saturating_sub(10);
                     self.preview_pinned = true;
                 }
                 KeyCode::PageDown => {
@@ -156,7 +156,7 @@ impl SessionsPage {
                     self.preview_pinned = self.preview_scroll < self.preview_content.len();
                 }
                 KeyCode::Home => {
-                    self.preview_scroll = 1;
+                    self.preview_scroll = 0;
                     self.preview_pinned = true;
                 }
                 KeyCode::End => {
@@ -204,7 +204,7 @@ impl SessionsPage {
             KeyCode::Char('r') => self.force_refresh(poller),
             KeyCode::Char('s') => self.save_session_as_profile(),
             KeyCode::PageUp => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(10).max(1);
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
                 self.preview_pinned = true;
             }
             KeyCode::PageDown => {
@@ -254,7 +254,7 @@ impl SessionsPage {
             }
             MouseEventKind::ScrollUp => {
                 if hit(self.panel_rect_preview, col, row) {
-                    self.preview_scroll = self.preview_scroll.saturating_sub(3).max(1);
+                    self.preview_scroll = self.preview_scroll.saturating_sub(3);
                     self.preview_pinned = true;
                     self.focused_panel = FocusedPanel::Preview;
                 } else if hit(self.panel_rect_agent, col, row) {

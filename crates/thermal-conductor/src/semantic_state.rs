@@ -600,15 +600,16 @@ impl SemanticEventBus {
 
             let state = states.get_mut(sid).unwrap();
 
-            // Context change
+            // Context change — convert percent (0-100) to saturation (0.0-1.0)
             if let Some(pct) = new_context_pct {
+                let sat = (pct as f64) / 100.0;
                 let old_pct = state.context_state.saturation;
-                state.context_state.saturation = Some(pct);
+                state.context_state.saturation = Some(sat);
                 let seq = state.next_seq();
 
                 // Check threshold crossings
                 let old_level = old_pct.map(threshold_level);
-                let new_level = Some(threshold_level(pct));
+                let new_level = Some(threshold_level(sat));
                 if old_level != new_level {
                     if let Some(level) = new_level.flatten() {
                         let crossing = SemanticEvent {
@@ -616,7 +617,7 @@ impl SemanticEventBus {
                             seq,
                             kind: SemanticEventKind::ContextThresholdCrossed {
                                 level,
-                                saturation: Some(pct),
+                                saturation: Some(sat),
                             },
                         };
                         drop(states);
@@ -652,7 +653,7 @@ impl SemanticEventBus {
             state.activity = new_activity.clone();
             state.current_tool = new_tool;
             if let Some(pct) = new_context_pct {
-                state.context_state.saturation = Some(pct);
+                state.context_state.saturation = Some((pct as f64) / 100.0);
             }
 
             let seq = state.next_seq();

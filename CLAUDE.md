@@ -58,8 +58,8 @@ The `deploy/` directory contains deployment configs that were migrated from `the
 - `deploy/kitty/kitty.conf` — thermal-themed kitty terminal config
 - `deploy/hypr/hyprland.conf` — Hyprland keybinds and autostart
 - `deploy/systemd/` — systemd user units for thermal daemons (`thermal.target`, service files, `ai-agents.slice`)
-- `deploy/hooks/state-tracker.sh` — Claude Code state-tracking hook
-- `deploy/install-services.sh` — symlink installer for systemd units and configs
+- `deploy/claude/` — Claude Code settings.json, hooks/state-tracker.sh, statusline.sh
+- `deploy/install.sh` — copy-based installer for all deploy configs (no symlinks). Use `--diff` to preview changes.
 
 Shell/editor configs (zshrc, nvim, starship) remain in `~/projects/thermal-os-dotfiles`.
 

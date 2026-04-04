@@ -16,8 +16,9 @@ STATE_DIR="/tmp/claude-code-state"
 SUBAGENT_DIR="$STATE_DIR/subagents"
 mkdir -p "$STATE_DIR" "$SUBAGENT_DIR"
 
-# Read stdin (hook data from Claude)
-STDIN_DATA=$(timeout 0.1 cat 2>/dev/null || echo "")
+# Read stdin (hook data from Claude).
+# Use a generous timeout so large payloads aren't truncated.
+STDIN_DATA=$(timeout 1 cat 2>/dev/null || echo "")
 
 # Session identifier — prefer Claude's own session_id from stdin
 STDIN_SESSION_ID=$(echo "$STDIN_DATA" | jq -r '.session_id // ""' 2>/dev/null || echo "")
@@ -31,7 +32,17 @@ else
     SESSION_ID="$$"
 fi
 
-STATE_FILE="$STATE_DIR/${SESSION_ID}.json"
+# Check if this event is from a subagent (agent_id present in stdin).
+# Subagent tool events go to a separate file; parent events go to the main file.
+AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // ""' 2>/dev/null || echo "")
+
+if [[ -n "$AGENT_ID" ]]; then
+    STATE_FILE="$STATE_DIR/${SESSION_ID}.agent.${AGENT_ID}.json"
+else
+    STATE_FILE="$STATE_DIR/${SESSION_ID}.json"
+fi
+
+PARENT_STATE_FILE="$STATE_DIR/${SESSION_ID}.json"
 SUBAGENT_COUNT_FILE="$SUBAGENT_DIR/${SESSION_ID}.count"
 
 get_subagent_count() {
@@ -96,35 +107,58 @@ case "$HOOK_TYPE" in
 
     subagent-start)
         increment_subagent_count
-        AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
-        AGENT_TYPE=$(echo "$STDIN_DATA" | jq -r '.agent_type // "unknown"' 2>/dev/null || echo "unknown")
+        SA_AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
+        SA_AGENT_TYPE=$(echo "$STDIN_DATA" | jq -r '.agent_type // "unknown"' 2>/dev/null || echo "unknown")
+        SUBAGENT_COUNT=$(get_subagent_count)
+
+        # Write parent state update (subagent count changed).
+        STATE_FILE="$PARENT_STATE_FILE"
         STATUS="processing"
         CURRENT_TOOL=""
-        SUBAGENT_COUNT=$(get_subagent_count)
         DETAILS=$(jq -n \
-            --arg id "$AGENT_ID" \
-            --arg type "$AGENT_TYPE" \
+            --arg id "$SA_AGENT_ID" \
+            --arg type "$SA_AGENT_TYPE" \
             --arg count "$SUBAGENT_COUNT" \
             '{event:"subagent_started",agent_id:$id,agent_type:$type,active_subagents:($count|tonumber)}')
+
+        # Also create per-subagent state file so swarm watcher + audio can track it.
+        SA_STATE_FILE="$STATE_DIR/${SESSION_ID}.agent.${SA_AGENT_ID}.json"
+        SA_JSON=$(jq -n \
+            --arg sid "${SESSION_ID}.agent.${SA_AGENT_ID}" \
+            --arg parent "$SESSION_ID" \
+            --arg agent_id "$SA_AGENT_ID" \
+            --arg agent_type "$SA_AGENT_TYPE" \
+            --arg cwd "$PWD" \
+            --arg ts "$TIMESTAMP" \
+            --arg source "hook" \
+            '{session_id:$sid,parent_session_id:$parent,agent_id:$agent_id,agent_type:$agent_type,status:"processing",working_dir:$cwd,last_updated:$ts,source:$source}')
+        SA_TEMP="${SA_STATE_FILE}.tmp.$$"
+        echo "$SA_JSON" > "$SA_TEMP" && mv -f "$SA_TEMP" "$SA_STATE_FILE"
         ;;
 
     subagent-stop)
         decrement_subagent_count
         SUBAGENT_COUNT=$(get_subagent_count)
-        AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
-        AGENT_TYPE=$(echo "$STDIN_DATA" | jq -r '.agent_type // "unknown"' 2>/dev/null || echo "unknown")
+        SA_AGENT_ID=$(echo "$STDIN_DATA" | jq -r '.agent_id // "unknown"' 2>/dev/null || echo "unknown")
+        SA_AGENT_TYPE=$(echo "$STDIN_DATA" | jq -r '.agent_type // "unknown"' 2>/dev/null || echo "unknown")
+
+        # Remove per-subagent state file (swarm watcher detects removal).
+        rm -f "$STATE_DIR/${SESSION_ID}.agent.${SA_AGENT_ID}.json" 2>/dev/null
+
+        # Write parent state update.
+        STATE_FILE="$PARENT_STATE_FILE"
         CURRENT_TOOL=""
         if [[ "$SUBAGENT_COUNT" -eq 0 ]]; then
             STATUS="awaiting_input"
             DETAILS=$(jq -n \
-                --arg id "$AGENT_ID" \
-                --arg type "$AGENT_TYPE" \
+                --arg id "$SA_AGENT_ID" \
+                --arg type "$SA_AGENT_TYPE" \
                 '{event:"subagent_stopped",agent_id:$id,agent_type:$type,remaining_subagents:0,all_complete:true}')
         else
             STATUS="processing"
             DETAILS=$(jq -n \
-                --arg id "$AGENT_ID" \
-                --arg type "$AGENT_TYPE" \
+                --arg id "$SA_AGENT_ID" \
+                --arg type "$SA_AGENT_TYPE" \
                 --arg count "$SUBAGENT_COUNT" \
                 '{event:"subagent_stopped",agent_id:$id,agent_type:$type,remaining_subagents:($count|tonumber)}')
         fi
@@ -156,18 +190,30 @@ case "$HOOK_TYPE" in
         ;;
 
     stop)
-        STATUS="awaiting_input"
         CURRENT_TOOL=""
-        DETAILS='{"event":"claude_stopped","waiting_for_user":true}'
+        # Keep parent at "processing" while subagents are active to avoid
+        # false "exited" / "needs input" announcements.
+        if [[ "$(get_subagent_count)" -gt 0 ]]; then
+            STATUS="processing"
+            DETAILS='{"event":"claude_stopped","waiting_for_subagents":true}'
+        else
+            STATUS="awaiting_input"
+            DETAILS='{"event":"claude_stopped","waiting_for_user":true}'
+        fi
         ;;
 
     notification)
         NOTIF_TYPE=$(echo "$STDIN_DATA" | jq -r '.notification_type // "unknown"' 2>/dev/null || echo "unknown")
         case "$NOTIF_TYPE" in
             idle_prompt|awaiting-input)
-                STATUS="awaiting_input"
                 CURRENT_TOOL=""
-                DETAILS='{"event":"awaiting_input"}'
+                if [[ "$(get_subagent_count)" -gt 0 ]]; then
+                    STATUS="processing"
+                    DETAILS='{"event":"awaiting_input","waiting_for_subagents":true}'
+                else
+                    STATUS="awaiting_input"
+                    DETAILS='{"event":"awaiting_input"}'
+                fi
                 ;;
             *)
                 if [[ -f "$STATE_FILE" ]]; then
@@ -196,9 +242,17 @@ esac
 
 SUBAGENT_COUNT=$(get_subagent_count)
 
+# Use composite session_id for subagent events so the conductor
+# doesn't collapse them into the parent session.
+if [[ -n "$AGENT_ID" ]]; then
+    EFFECTIVE_SESSION_ID="${SESSION_ID}.agent.${AGENT_ID}"
+else
+    EFFECTIVE_SESSION_ID="$SESSION_ID"
+fi
+
 STATE_JSON=$(cat <<EOF
 {
-  "session_id": "$SESSION_ID",
+  "session_id": "$EFFECTIVE_SESSION_ID",
   "status": "$STATUS",
   "current_tool": "$CURRENT_TOOL",
   "subagent_count": $SUBAGENT_COUNT,

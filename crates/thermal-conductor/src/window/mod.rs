@@ -266,6 +266,25 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
     // The render loop drains this each iteration and calls window.set_title().
     let pending_title: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
+    // Agent overlay (context gauge, tool cards, agent events) is only enabled
+    // when the GPU window is running an agent process directly.  Custom
+    // commands like `thc tui` or `btop` would otherwise pick up a cwd-matched
+    // Claude session and show misleading overlays.
+    let agent_overlay_enabled = match &command {
+        None => true, // default shell — may launch claude interactively
+        Some(args) => args
+            .first()
+            .map(|bin| {
+                let base = std::path::Path::new(bin)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(bin);
+                base.starts_with("claude") || base.starts_with("codex")
+            })
+            .unwrap_or(false),
+    };
+    tracing::info!(agent_overlay_enabled, "Agent overlay feature gate");
+
     // When a custom command is provided, always use standalone mode — the
     // daemon's spawn_session API expects a shell path, not an arbitrary
     // command line. Standalone mode execs the command directly via PTY.
@@ -591,6 +610,7 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
         inject_watcher,
         context_warning_active: false,
         context_critical_active: false,
+        agent_overlay_enabled,
         overlay,
         agent_event_rx,
         agent_event_tx,
@@ -724,49 +744,57 @@ pub fn run(attach_session_id: Option<String>, command: Option<Vec<String>>) -> a
             Vec::new()
         };
 
-        // ── Track tool changes for the agent timeline ────────────────────
-        if let Some(ref session) = state.claude_session {
-            state
-                .agent_timeline
-                .record_tool_change(session.current_tool.as_deref());
-        } else if state.agent_timeline.visible {
-            state.agent_timeline.record_idle();
-        }
+        // ── Agent overlay features (gated on agent_overlay_enabled) ─────
+        // Disabled for non-agent commands (e.g. `thc tui`, `btop`) to prevent
+        // cwd-matched sessions from showing misleading overlays.
+        if state.agent_overlay_enabled {
+            // ── Track tool changes for the agent timeline ────────────────
+            if let Some(ref session) = state.claude_session {
+                state
+                    .agent_timeline
+                    .record_tool_change(session.current_tool.as_deref());
+            } else if state.agent_timeline.visible {
+                state.agent_timeline.record_idle();
+            }
 
-        // ── Update overlay context gauge from Claude session state ──────
-        if let Some(ref session) = state.claude_session {
-            if let Some(ctx_pct) = session.context_percent {
-                let pct = (ctx_pct as f32 / 100.0).clamp(0.0, 1.0);
-                if state.overlay.update_context_gauge(pct, 1.0) {
+            // ── Update overlay context gauge from Claude session state ──
+            if let Some(ref session) = state.claude_session {
+                if let Some(ctx_pct) = session.context_percent {
+                    let pct = (ctx_pct as f32 / 100.0).clamp(0.0, 1.0);
+                    if state.overlay.update_context_gauge(pct, 1.0) {
+                        state.dirty = true;
+                    }
+                }
+            }
+
+            // ── Tail active session JSONL for agent events ──────────────
+            {
+                let sid = state.claude_session.as_ref().map(|s| s.session_id.as_str());
+                state.jsonl_tailer.poll(sid, &state.agent_event_tx);
+            }
+
+            // ── Drain agent events into overlay manager ─────────────────
+            while let Ok(event) = state.agent_event_rx.try_recv() {
+                if state.overlay.handle_agent_event(&event) {
                     state.dirty = true;
                 }
             }
-        }
 
-        // ── Tail active session JSONL for agent events ────────────────────
-        {
-            let sid = state.claude_session.as_ref().map(|s| s.session_id.as_str());
-            state.jsonl_tailer.poll(sid, &state.agent_event_tx);
-        }
-
-        // ── Drain agent events into overlay manager ───────────────────────
-        while let Ok(event) = state.agent_event_rx.try_recv() {
-            if state.overlay.handle_agent_event(&event) {
-                state.dirty = true;
+            // ── Update agent communication graph ────────────────────────
+            if state.agent_graph.visible {
+                state
+                    .agent_graph
+                    .set_layout_size(state.width as f32, GRAPH_OVERLAY_HEIGHT as f32);
+                state.agent_graph.update_from_sessions(&all_sessions);
+                state.agent_graph.tick_layout();
             }
-        }
 
-        // ── Update agent communication graph ─────────────────────────────
-        if state.agent_graph.visible {
-            state
-                .agent_graph
-                .set_layout_size(state.width as f32, GRAPH_OVERLAY_HEIGHT as f32);
-            state.agent_graph.update_from_sessions(&all_sessions);
-            state.agent_graph.tick_layout();
+            // ── Update context saturation warnings ──────────────────────
+            state.update_context_warnings();
+        } else {
+            // Drain agent events to prevent channel backup.
+            while state.agent_event_rx.try_recv().is_ok() {}
         }
-
-        // ── Update context saturation warnings ──────────────────────────
-        state.update_context_warnings();
 
         // ── Poll cross-pane inject watcher ────────────────────────────────
         // Non-blocking: picks up inject files from other windows.
@@ -965,6 +993,10 @@ pub(super) struct ConductorWindow {
     pub(super) context_warning_active: bool,
     /// Whether the 95% context critical overlay is currently displayed.
     pub(super) context_critical_active: bool,
+    /// Whether agent overlay features (context gauge, tool cards, events) are
+    /// enabled. Disabled when the GPU window runs a non-agent command like
+    /// `thc tui` or `btop` to prevent stale cwd-matched overlays.
+    pub(super) agent_overlay_enabled: bool,
     /// Agent overlay widget manager — focus stack + passive widgets.
     pub(super) overlay: overlay::OverlayManager,
     /// Receiver for parsed agent events (sent from daemon reader or PTY watcher).

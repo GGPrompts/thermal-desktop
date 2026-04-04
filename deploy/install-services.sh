@@ -1,25 +1,45 @@
 #!/bin/bash
-# Install Thermal Desktop systemd user services
-# Symlinks service files from dotfiles into ~/.config/systemd/user/
-# and enables the thermal.target
+# Install Thermal Desktop deploy configs
+# Symlinks systemd units, kitty, and hyprland configs into ~/.config/
 
 set -euo pipefail
 
-DOTFILES="$HOME/projects/thermal-desktop/deploy/systemd"
-TARGET="$HOME/.config/systemd/user"
+DEPLOY="$HOME/projects/thermal-desktop/deploy"
 
-mkdir -p "$TARGET"
+# ── App config symlinks ───────────────────────────────────
+link_config() {
+    local src="$1" dest="$2"
+    mkdir -p "$(dirname "$dest")"
+    if [ -L "$dest" ]; then
+        echo "  skip $(basename "$dest") (already linked)"
+    elif [ -e "$dest" ]; then
+        echo "  WARN $dest exists and is not a symlink — skipping"
+    else
+        ln -s "$src" "$dest"
+        echo "  link $(basename "$dest") -> $src"
+    fi
+}
 
-echo "Linking service files..."
-for f in "$DOTFILES"/*.{service,target,slice}; do
+echo "Linking app configs..."
+link_config "$DEPLOY/kitty" "$HOME/.config/kitty"
+link_config "$DEPLOY/hypr/hyprland.conf" "$HOME/.config/hypr/hyprland.conf"
+link_config "$DEPLOY/hypr/hypridle.conf" "$HOME/.config/hypr/hypridle.conf"
+
+# ── Systemd unit symlinks ─────────────────────────────────
+SYSTEMD_TARGET="$HOME/.config/systemd/user"
+mkdir -p "$SYSTEMD_TARGET"
+
+echo ""
+echo "Linking systemd units..."
+for f in "$DEPLOY/systemd"/*.{service,target,slice}; do
     [ -f "$f" ] || continue
     name=$(basename "$f")
-    if [ -L "$TARGET/$name" ]; then
+    if [ -L "$SYSTEMD_TARGET/$name" ]; then
         echo "  skip $name (already linked)"
-    elif [ -e "$TARGET/$name" ]; then
+    elif [ -e "$SYSTEMD_TARGET/$name" ]; then
         echo "  WARN $name exists and is not a symlink — skipping"
     else
-        ln -s "$f" "$TARGET/$name"
+        ln -s "$f" "$SYSTEMD_TARGET/$name"
         echo "  link $name"
     fi
 done
